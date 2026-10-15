@@ -1,7 +1,7 @@
 # 0003. Claude status comes from hooks injected with `--settings`
 
 Date: 2026-10-15
-Status: Accepted (merge behaviour verified in the spike)
+Status: Accepted (merge behaviour pending spike verification)
 
 ## Context
 

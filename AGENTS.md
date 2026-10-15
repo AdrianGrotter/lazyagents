@@ -10,9 +10,9 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 
 ## Commands
 
-- `just check`: fmt check, clippy with `-D warnings`, tests, hook tests. The done gate.
+- `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, tmux harness self-test, spike smoke run. The done gate.
 - `just fmt`, `just lint`, `just test`, `just test-hooks`
-- `just spike [cmd...]`: the milestone-1 embedded-terminal spike (default command `claude`).
+- `just spike [cmd...]`: the milestone-1 embedded-terminal spike (default command `claude`); runs from any directory.
 
 ## Layout
 
@@ -23,7 +23,7 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 | `crates/tui` | ratatui client |
 | `crates/lazyagents` | the binary and CLI |
 | `spike/` | throwaway embedded-terminal spike; removed after milestone 1 |
-| `scripts/` | tmux harness and hook tests |
+| `scripts/` | tmux harness, hook tests, spike smoke script |
 | `docs/` | architecture, protocol, keybindings, status detection, ADRs (`decisions/`) |
 
 ## Working rules

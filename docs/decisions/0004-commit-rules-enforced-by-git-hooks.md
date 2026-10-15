@@ -17,4 +17,4 @@ The design called for a Claude Code `PreToolUse` guard that inspects `git commit
 
 ## Consequences
 
-Humans and every agent get the same gate. Commits outside the dev shell fail with a message telling the user to enter it.
+Humans and every agent get the same gate. The gate exists once the dev shell has been entered at least once, which sets `core.hooksPath`; a fresh clone that never enters it has no gate. Commits from a shell without cargo fail with a message telling the user to enter the dev shell.

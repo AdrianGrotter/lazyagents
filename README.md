@@ -17,6 +17,10 @@ direnv allow        # or: nix develop
 just check          # fmt, clippy, tests
 just spike          # run the spike with claude in the main pane
 just spike sh       # ... or any other command
+
+# or run the built binary from a project directory, outside the dev shell
+nix develop -c cargo build -p spike
+cd ~/some-project && ~/git/lazyagents/target/debug/spike
 ```
 
 Contributor and agent guide: [AGENTS.md](AGENTS.md).
