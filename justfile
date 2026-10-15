@@ -18,7 +18,10 @@ test-hooks:
 test-harness:
     scripts/test-harness.sh
 
-check: fmt-check lint test test-hooks test-harness
+smoke-spike:
+    scripts/smoke-spike.sh
+
+check: fmt-check lint test test-hooks test-harness smoke-spike
 
 spike *args:
     cargo run -p spike -- {{args}}
