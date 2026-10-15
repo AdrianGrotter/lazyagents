@@ -1040,13 +1040,13 @@ impl Daemon {
         let spawned = std::thread::Builder::new()
             .name("snapshot".into())
             .spawn(move || {
-                let _ = tx.send(take_snapshot(job));
+                let _ = tx.send(take_snapshot(ProcessTable::read(), job));
             });
         match spawned {
             Ok(_) => self.snapshot = Some(rx),
             Err(e) => {
                 tracing::error!(error = %e, "spawning the snapshot thread failed; reading inline");
-                self.apply_snapshot(take_snapshot(requests));
+                self.apply_snapshot(take_snapshot(ProcessTable::read(), requests));
             }
         }
     }
@@ -1171,11 +1171,20 @@ fn fit_in_a_message(response: Response) -> Result<Response, String> {
     }
 }
 
-fn take_snapshot(requests: Vec<(AgentId, u64, u32, Vec<Tracked>)>) -> Snapshot {
-    let table = ProcessTable::read();
+/// Without a reading every agent keeps its previous list.
+fn take_snapshot(
+    table: Option<ProcessTable>,
+    requests: Vec<(AgentId, u64, u32, Vec<Tracked>)>,
+) -> Snapshot {
     requests
         .into_iter()
-        .map(|(id, generation, root, previous)| (id, generation, table.track(root, &previous)))
+        .map(|(id, generation, root, previous)| {
+            let tracked = match &table {
+                Some(table) => table.track(root, &previous),
+                None => previous,
+            };
+            (id, generation, tracked)
+        })
         .collect()
 }
 
@@ -1294,6 +1303,19 @@ mod tests {
         daemon.apply_snapshot(vec![(id, 0, vec![tracked])]);
         assert!(child.exits_within(Duration::from_secs(3)), "child survived");
         assert!(daemon.agents[&id].tracked.is_empty());
+    }
+
+    #[test]
+    fn a_failed_process_reading_keeps_the_tracked_lists() {
+        let id = AgentId::random();
+        let previous = vec![Tracked {
+            pid: 4242,
+            start: "Thu Oct 15 10:00:00 2026".into(),
+        }];
+        assert_eq!(
+            take_snapshot(None, vec![(id, 3, 4241, previous.clone())]),
+            vec![(id, 3, previous)]
+        );
     }
 
     #[test]

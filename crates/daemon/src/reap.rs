@@ -27,15 +27,27 @@ pub struct ProcessTable {
 }
 
 impl ProcessTable {
-    pub fn read() -> Self {
-        let Ok(output) = Command::new("ps")
+    /// `None` when `ps` cannot run, fails or lists nothing, so a bad reading is never
+    /// taken to mean that every process is gone.
+    pub fn read() -> Option<Self> {
+        match Command::new("ps")
             .args(["-A", "-o", "pid=,ppid=,lstart="])
             .output()
-        else {
-            tracing::warn!("ps failed; only agent process groups will be signalled");
-            return Self { rows: Vec::new() };
-        };
-        let rows = String::from_utf8_lossy(&output.stdout)
+        {
+            Ok(output) => Self::parse(output.status.success(), &output.stdout),
+            Err(e) => {
+                tracing::warn!(error = %e, "running ps failed");
+                None
+            }
+        }
+    }
+
+    fn parse(success: bool, stdout: &[u8]) -> Option<Self> {
+        if !success {
+            tracing::warn!("ps exited with an error");
+            return None;
+        }
+        let rows: Vec<(u32, u32, String)> = String::from_utf8_lossy(stdout)
             .lines()
             .filter_map(|line| {
                 let line = line.trim_start();
@@ -49,7 +61,11 @@ impl ProcessTable {
                 ))
             })
             .collect();
-        Self { rows }
+        if rows.is_empty() {
+            tracing::warn!("ps listed no processes");
+            return None;
+        }
+        Some(Self { rows })
     }
 
     /// `previous` entries still running with their recorded start time, plus the
@@ -104,12 +120,16 @@ impl ProcessTable {
 }
 
 pub fn descendants(root: u32) -> Vec<u32> {
-    ProcessTable::read().descendants(&[root])
+    ProcessTable::read()
+        .map(|table| table.descendants(&[root]))
+        .unwrap_or_default()
 }
 
 /// The descendants of `root` with their start times.
 pub fn snapshot(root: u32) -> Vec<Tracked> {
-    ProcessTable::read().track(root, &[])
+    ProcessTable::read()
+        .map(|table| table.track(root, &[]))
+        .unwrap_or_default()
 }
 
 pub fn terminate_tree(roots: &[u32], grace: Duration) {
@@ -138,10 +158,22 @@ pub fn terminate(trees: &[u32], groups: &[u32], tracked: &[Tracked], grace: Dura
     if trees.is_empty() && groups.is_empty() && tracked.is_empty() {
         return;
     }
-    let table = ProcessTable::read();
     let mut pids = trees.clone();
-    pids.extend(table.descendants(&trees));
-    pids.extend(table.running(tracked));
+    match ProcessTable::read().or_else(|| {
+        std::thread::sleep(POLL);
+        ProcessTable::read()
+    }) {
+        Some(table) => {
+            pids.extend(table.descendants(&trees));
+            pids.extend(table.running(tracked));
+        }
+        None => tracing::error!(
+            ?trees,
+            ?groups,
+            ?tracked,
+            "no process table; signalling only the trees' roots and the groups"
+        ),
+    }
     settle(&mut pids);
     if pids.is_empty() && groups.is_empty() {
         return;
@@ -163,7 +195,9 @@ pub fn terminate(trees: &[u32], groups: &[u32], tracked: &[Tracked], grace: Dura
         .filter(|&pid| alive(pid))
         .chain(pids.iter().copied())
         .collect();
-    pids.extend(ProcessTable::read().descendants(&survivors));
+    if let Some(table) = ProcessTable::read() {
+        pids.extend(table.descendants(&survivors));
+    }
     settle(&mut pids);
     groups.retain(|&leader| group_exists(leader));
     tracing::warn!(
@@ -295,6 +329,15 @@ mod tests {
             [tracked(11, "t11"), tracked(20, "t20")]
         );
         assert_eq!(table.track(10, &[]), [tracked(11, "t11")]);
+    }
+
+    #[test]
+    fn a_failed_or_empty_ps_reading_is_no_table() {
+        let output = b"  10     1 Thu Oct 15 10:00:00 2026\n";
+        assert!(ProcessTable::parse(true, output).is_some());
+        assert!(ProcessTable::parse(false, output).is_none());
+        assert!(ProcessTable::parse(true, b"").is_none());
+        assert!(ProcessTable::parse(true, b"garbage\n").is_none());
     }
 
     #[test]

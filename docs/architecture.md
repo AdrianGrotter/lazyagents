@@ -58,7 +58,9 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   agent's earlier list: entries still running with the same start time stay, even after
   they left the agent's tree (reparented to init or moved to a new session, as Claude's
   Bash-tool shells do); entries that exited, or whose pid now belongs to a process with
-  another start time, are pruned. A recycled pid is therefore never signalled.
+  another start time, are pruned. A recycled pid is therefore never signalled. A
+  reading that fails (`ps` cannot run, exits non-zero or lists nothing) leaves every
+  list as it was.
 - **Stopping an agent.** Kill, remove, restart and shutdown stop, in one pass, the
   agent's current process tree (read just before signalling, because a dying parent
   hands its children to init), its process group and its tracked descendants: SIGHUP
@@ -66,7 +68,8 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   period until all of it is gone. Survivors, including descendants forked meanwhile,
   and the group get SIGKILL, followed by a short wait (500 ms). The grace period is 1 s
   for one agent and 2 s shared by all agents on shutdown, which stops every agent in
-  that single pass. A snapshot still running when the stop begins is waited for (up
+  that single pass. A failed process-table reading is retried once; if it fails again,
+  the pass signals only the tree roots and the groups, and logs an error. A snapshot still running when the stop begins is waited for (up
   to 2 s) first, so the descendants it reports are part of that pass. The request is
   answered only once this is done, and a restart spawns the new process only
   afterwards.
