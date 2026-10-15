@@ -20,112 +20,166 @@ pub struct Tracked {
     pub start: String,
 }
 
+/// One reading of `ps`: `(pid, ppid, start)` for every process, where `start` is the
+/// `lstart` text.
+pub struct ProcessTable {
+    rows: Vec<(u32, u32, String)>,
+}
+
+impl ProcessTable {
+    pub fn read() -> Self {
+        let Ok(output) = Command::new("ps")
+            .args(["-A", "-o", "pid=,ppid=,lstart="])
+            .output()
+        else {
+            tracing::warn!("ps failed; only agent process groups will be signalled");
+            return Self { rows: Vec::new() };
+        };
+        let rows = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let (pid, rest) = line.split_once(char::is_whitespace)?;
+                let rest = rest.trim_start();
+                let (ppid, start) = rest.split_once(char::is_whitespace)?;
+                Some((
+                    pid.parse().ok()?,
+                    ppid.parse().ok()?,
+                    start.trim().to_string(),
+                ))
+            })
+            .collect();
+        Self { rows }
+    }
+
+    /// `previous` entries still running with their recorded start time, plus the
+    /// current descendants of `root`.
+    pub fn track(&self, root: u32, previous: &[Tracked]) -> Vec<Tracked> {
+        let starts: HashMap<u32, &str> = self
+            .rows
+            .iter()
+            .map(|(pid, _, start)| (*pid, start.as_str()))
+            .collect();
+        let mut tracked: Vec<Tracked> = previous
+            .iter()
+            .filter(|t| starts.get(&t.pid) == Some(&t.start.as_str()))
+            .cloned()
+            .collect();
+        for pid in self.descendants(&[root]) {
+            if let Some(start) = starts.get(&pid)
+                && !tracked.iter().any(|t| t.pid == pid)
+            {
+                tracked.push(Tracked {
+                    pid,
+                    start: start.to_string(),
+                });
+            }
+        }
+        tracked
+    }
+
+    fn descendants(&self, roots: &[u32]) -> Vec<u32> {
+        let links: Vec<(u32, u32)> = self
+            .rows
+            .iter()
+            .map(|(pid, ppid, _)| (*pid, *ppid))
+            .collect();
+        roots
+            .iter()
+            .flat_map(|&root| descendants_in(&links, root))
+            .collect()
+    }
+
+    fn running(&self, tracked: &[Tracked]) -> Vec<u32> {
+        tracked
+            .iter()
+            .filter(|t| {
+                self.rows
+                    .iter()
+                    .any(|(pid, _, start)| *pid == t.pid && *start == t.start)
+            })
+            .map(|t| t.pid)
+            .collect()
+    }
+}
+
 pub fn descendants(root: u32) -> Vec<u32> {
-    descendants_in(&links(&process_table()), root)
+    ProcessTable::read().descendants(&[root])
 }
 
 /// The descendants of `root` with their start times.
 pub fn snapshot(root: u32) -> Vec<Tracked> {
-    let table = process_table();
-    let starts: HashMap<u32, &str> = table
-        .iter()
-        .map(|(pid, _, start)| (*pid, start.as_str()))
-        .collect();
-    descendants_in(&links(&table), root)
-        .into_iter()
-        .filter_map(|pid| {
-            Some(Tracked {
-                pid,
-                start: starts.get(&pid)?.to_string(),
-            })
-        })
-        .collect()
+    ProcessTable::read().track(root, &[])
 }
 
-/// Signals every root's process group and every process in the roots' trees, waits up
-/// to `grace` until all of them and the groups are gone, then SIGKILLs whatever is left,
-/// including descendants forked meanwhile, and waits briefly for it to go. The trees are
-/// captured before any signal is sent, because a dying parent hands its children to init.
 pub fn terminate_tree(roots: &[u32], grace: Duration) {
-    let roots: Vec<u32> = roots
+    terminate(roots, &[], &[], grace);
+}
+
+pub fn terminate_tracked(tracked: &[Tracked], grace: Duration) {
+    terminate(&[], &[], tracked, grace);
+}
+
+/// Stops, in one pass, every process in the `trees`, every process group led by a
+/// tree root or listed in `groups`, and every `tracked` process still running with its
+/// recorded start time. Sends SIGHUP to the groups and SIGTERM to everything, waits up
+/// to `grace` until all of it is gone, then SIGKILLs what is left, including
+/// descendants forked meanwhile, and waits briefly for it to go. The trees are captured
+/// before any signal is sent, because a dying parent hands its children to init.
+pub fn terminate(trees: &[u32], groups: &[u32], tracked: &[Tracked], grace: Duration) {
+    let trees: Vec<u32> = trees
         .iter()
         .copied()
         .filter(|&pid| signalable(pid))
         .collect();
-    if roots.is_empty() {
+    let mut groups: Vec<u32> = trees.iter().chain(groups).copied().collect();
+    settle(&mut groups);
+    groups.retain(|&leader| group_exists(leader));
+    if trees.is_empty() && groups.is_empty() && tracked.is_empty() {
         return;
     }
-    let mut pids = roots.clone();
-    pids.extend(descendants_of(&process_table(), &roots));
+    let table = ProcessTable::read();
+    let mut pids = trees.clone();
+    pids.extend(table.descendants(&trees));
+    pids.extend(table.running(tracked));
     settle(&mut pids);
+    if pids.is_empty() && groups.is_empty() {
+        return;
+    }
 
-    for &root in &roots {
-        signal_group(root, Signal::HUP);
-        signal_group(root, Signal::TERM);
+    for &leader in &groups {
+        signal_group(leader, Signal::HUP);
+        signal_group(leader, Signal::TERM);
     }
     for &pid in &pids {
         signal(pid, Signal::TERM);
     }
-    if wait_gone(&mut pids, &roots, grace) {
+    if wait_gone(&mut pids, &groups, grace) {
         return;
     }
-    let survivors: Vec<u32> = roots.iter().chain(&pids).copied().collect();
-    pids.extend(descendants_of(&process_table(), &survivors));
+    let survivors: Vec<u32> = trees
+        .iter()
+        .copied()
+        .filter(|&pid| alive(pid))
+        .chain(pids.iter().copied())
+        .collect();
+    pids.extend(ProcessTable::read().descendants(&survivors));
     settle(&mut pids);
-    tracing::warn!(?pids, "agent processes outlived SIGTERM; sending SIGKILL");
-    for &pid in &pids {
-        signal(pid, Signal::KILL);
-    }
-    for &root in &roots {
-        signal_group(root, Signal::KILL);
-    }
-    if !wait_gone(&mut pids, &roots, KILL_WAIT) {
-        tracing::error!(?pids, "agent processes outlived SIGKILL");
-    }
-}
-
-/// Sends SIGTERM to each tracked process still running with its recorded start time,
-/// waits up to `grace`, then SIGKILLs those still matching.
-pub fn terminate_tracked(tracked: &[Tracked], grace: Duration) {
-    if tracked.is_empty() {
-        return;
-    }
-    let mut pids = matching(tracked);
-    if pids.is_empty() {
-        return;
-    }
-    for &pid in &pids {
-        signal(pid, Signal::TERM);
-    }
-    if wait_gone(&mut pids, &[], grace) {
-        return;
-    }
-    let mut pids = matching(tracked);
+    groups.retain(|&leader| group_exists(leader));
     tracing::warn!(
         ?pids,
-        "detached agent processes outlived SIGTERM; sending SIGKILL"
+        ?groups,
+        "agent processes outlived SIGTERM; sending SIGKILL"
     );
     for &pid in &pids {
         signal(pid, Signal::KILL);
     }
-    if !wait_gone(&mut pids, &[], KILL_WAIT) {
-        tracing::error!(?pids, "detached agent processes outlived SIGKILL");
+    for &leader in &groups {
+        signal_group(leader, Signal::KILL);
     }
-}
-
-fn matching(tracked: &[Tracked]) -> Vec<u32> {
-    let table = process_table();
-    let mut pids: Vec<u32> = tracked
-        .iter()
-        .filter(|t| {
-            table
-                .iter()
-                .any(|(pid, _, start)| *pid == t.pid && *start == t.start)
-        })
-        .map(|t| t.pid)
-        .collect();
-    settle(&mut pids);
-    pids
+    if !wait_gone(&mut pids, &groups, KILL_WAIT) {
+        tracing::error!(?pids, ?groups, "agent processes outlived SIGKILL");
+    }
 }
 
 fn settle(pids: &mut Vec<u32>) {
@@ -134,13 +188,13 @@ fn settle(pids: &mut Vec<u32>) {
     pids.dedup();
 }
 
-/// Polls until every pid and every root's process group is gone or `limit` passes;
-/// leaves the surviving pids in `pids`.
-fn wait_gone(pids: &mut Vec<u32>, roots: &[u32], limit: Duration) -> bool {
+/// Polls until every pid and every process group is gone or `limit` passes; leaves the
+/// surviving pids in `pids`.
+fn wait_gone(pids: &mut Vec<u32>, groups: &[u32], limit: Duration) -> bool {
     let deadline = Instant::now() + limit;
     loop {
         pids.retain(|&pid| alive(pid));
-        if pids.is_empty() && groups_gone(roots) {
+        if pids.is_empty() && !groups.iter().any(|&leader| group_exists(leader)) {
             return true;
         }
         if Instant::now() >= deadline {
@@ -148,47 +202,6 @@ fn wait_gone(pids: &mut Vec<u32>, roots: &[u32], limit: Duration) -> bool {
         }
         std::thread::sleep(POLL);
     }
-}
-
-fn groups_gone(roots: &[u32]) -> bool {
-    roots.iter().all(|&root| !group_alive(root))
-}
-
-/// `(pid, ppid, start)` for every process; `start` is `ps`'s `lstart` text.
-fn process_table() -> Vec<(u32, u32, String)> {
-    let Ok(output) = Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,lstart="])
-        .output()
-    else {
-        tracing::warn!("ps failed; only agent process groups will be signalled");
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim_start();
-            let (pid, rest) = line.split_once(char::is_whitespace)?;
-            let rest = rest.trim_start();
-            let (ppid, start) = rest.split_once(char::is_whitespace)?;
-            Some((
-                pid.parse().ok()?,
-                ppid.parse().ok()?,
-                start.trim().to_string(),
-            ))
-        })
-        .collect()
-}
-
-fn links(table: &[(u32, u32, String)]) -> Vec<(u32, u32)> {
-    table.iter().map(|(pid, ppid, _)| (*pid, *ppid)).collect()
-}
-
-fn descendants_of(table: &[(u32, u32, String)], roots: &[u32]) -> Vec<u32> {
-    let links = links(table);
-    roots
-        .iter()
-        .flat_map(|&root| descendants_in(&links, root))
-        .collect()
 }
 
 fn descendants_in(table: &[(u32, u32)], root: u32) -> Vec<u32> {
@@ -234,7 +247,7 @@ fn alive(target: u32) -> bool {
     to_pid(target).is_some_and(|target| test_kill_process(target).is_ok())
 }
 
-fn group_alive(leader: u32) -> bool {
+pub fn group_exists(leader: u32) -> bool {
     to_pid(leader).is_some_and(|leader| test_kill_process_group(leader).is_ok())
 }
 
@@ -255,6 +268,33 @@ mod tests {
     fn descendants_survive_a_cycle_in_the_table() {
         let table = [(10, 11), (11, 10)];
         assert_eq!(descendants_in(&table, 10), [11]);
+    }
+
+    #[test]
+    fn track_keeps_reparented_entries_and_drops_exited_or_reused_ones() {
+        let table = ProcessTable {
+            rows: vec![
+                (10, 1, "t10".into()),
+                (11, 10, "t11".into()),
+                (20, 1, "t20".into()),
+                (21, 1, "new21".into()),
+            ],
+        };
+        let tracked = |pid: u32, start: &str| Tracked {
+            pid,
+            start: start.into(),
+        };
+        let previous = [
+            tracked(11, "t11"),
+            tracked(20, "t20"),
+            tracked(21, "old21"),
+            tracked(30, "t30"),
+        ];
+        assert_eq!(
+            table.track(10, &previous),
+            [tracked(11, "t11"), tracked(20, "t20")]
+        );
+        assert_eq!(table.track(10, &[]), [tracked(11, "t11")]);
     }
 
     #[test]

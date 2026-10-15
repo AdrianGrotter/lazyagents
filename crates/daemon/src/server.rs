@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::encode::encode;
 use crate::lock::InstanceLock;
-use crate::reap::{self, Tracked, terminate_tree};
+use crate::reap::{self, ProcessTable, Tracked};
 use crate::spawn::{Launch, SpawnContext, find_in_path, hook_settings, spawn_spec};
 use crate::status::{generic_status, on_hook};
 use crate::store::{self, AgentRecord, StoredState};
@@ -210,10 +210,15 @@ struct Agent {
     generation: u64,
     last_output: Option<Instant>,
     dirty: bool,
-    /// The agent's descendants as of the latest snapshot, so processes that detach from
-    /// its tree can still be stopped once it exits or is killed.
+    /// The agent's descendants seen by snapshots and still running, so processes that
+    /// detach from its tree can still be stopped once it exits or is killed.
     tracked: Vec<Tracked>,
+    /// The process group the agent leads; kept after it exits while members remain.
+    group: Option<u32>,
 }
+
+/// Tracked descendants computed off the event loop for one agent generation.
+type Snapshot = Vec<(AgentId, u64, Vec<Tracked>)>;
 
 struct Subscription {
     agent: AgentId,
@@ -234,6 +239,7 @@ struct Daemon {
     clients: HashMap<ClientId, Client>,
     events: UnboundedSender<TerminalEvent>,
     last_snapshot: Instant,
+    snapshot: Option<std::sync::mpsc::Receiver<Snapshot>>,
 }
 
 impl Drop for Daemon {
@@ -261,6 +267,7 @@ impl Daemon {
                     last_output: None,
                     dirty: false,
                     tracked: Vec::new(),
+                    group: None,
                 };
                 (agent.record.id, agent)
             })
@@ -274,6 +281,7 @@ impl Daemon {
             clients: HashMap::new(),
             events,
             last_snapshot: Instant::now(),
+            snapshot: None,
         }
     }
 
@@ -546,6 +554,7 @@ impl Daemon {
                 last_output: None,
                 dirty: false,
                 tracked: Vec::new(),
+                group: None,
             },
         );
         let started = self.start(id, Launch::Fresh, PaneSize::new(create.cols, create.rows));
@@ -603,6 +612,7 @@ impl Daemon {
             Proxy::new(id, agent.generation, self.events.clone()),
         ) {
             Ok(terminal) => {
+                agent.group = Some(terminal.pid());
                 agent.terminal = Some(terminal);
                 agent.status = Status::Starting;
                 agent.last_output = None;
@@ -616,26 +626,32 @@ impl Daemon {
         }
     }
 
-    /// Terminates the process trees of the given running agents and the descendants they
-    /// were last seen with, then drops their terminals.
+    /// Terminates the given agents' process trees, process groups and tracked
+    /// descendants, then drops their terminals.
     fn stop(&mut self, ids: &[AgentId], grace: Duration) {
-        let roots: Vec<u32> = ids
-            .iter()
-            .filter_map(|id| self.agents.get(id))
-            .filter(|agent| agent.status.is_running())
-            .filter_map(|agent| agent.terminal.as_ref().map(Terminal::pid))
-            .collect();
-        terminate_tree(&roots, grace);
+        let mut trees = Vec::new();
+        let mut groups = Vec::new();
         let mut tracked = Vec::new();
         for id in ids {
             if let Some(agent) = self.agents.get_mut(id) {
+                if agent.status.is_running()
+                    && let Some(terminal) = agent.terminal.as_ref()
+                {
+                    trees.push(terminal.pid());
+                }
+                groups.extend(agent.group);
                 tracked.append(&mut agent.tracked);
+            }
+        }
+        reap::terminate(&trees, &groups, &tracked, grace);
+        for id in ids {
+            if let Some(agent) = self.agents.get_mut(id) {
+                agent.group = agent.group.filter(|&leader| reap::group_exists(leader));
                 if agent.terminal.take().is_some() {
                     agent.generation += 1;
                 }
             }
         }
-        reap::terminate_tracked(&tracked, grace);
     }
 
     fn stop_all(&mut self) {
@@ -760,6 +776,7 @@ impl Daemon {
         let Some(terminal) = agent.terminal.as_mut() else {
             return;
         };
+        let root = terminal.pid();
         match terminal.handle(event.event) {
             Outcome::Output => {
                 agent.dirty = true;
@@ -768,25 +785,89 @@ impl Daemon {
             Outcome::Exited(code) => {
                 agent.status = Status::Exited(code);
                 agent.dirty = true;
-                reap::terminate_tracked(&std::mem::take(&mut agent.tracked), STOP_GRACE);
+                let tracked = std::mem::take(&mut agent.tracked);
+                reap::terminate(&[], &[root], &tracked, STOP_GRACE);
+                agent.group = reap::group_exists(root).then_some(root);
                 self.announce(event.agent);
             }
             Outcome::Nothing => {}
         }
     }
 
-    fn tick(&mut self) {
-        let now = Instant::now();
-        if now.duration_since(self.last_snapshot) >= SNAPSHOT {
-            self.last_snapshot = now;
-            for agent in self.agents.values_mut() {
-                if agent.status.is_running()
-                    && let Some(terminal) = agent.terminal.as_ref()
-                {
-                    agent.tracked = reap::snapshot(terminal.pid());
+    /// Applies a finished snapshot and, once per `SNAPSHOT`, starts the next one on a
+    /// separate thread so `ps` never blocks the event loop.
+    fn refresh_tracked(&mut self, now: Instant) {
+        if let Some(pending) = &self.snapshot {
+            match pending.try_recv() {
+                Ok(results) => {
+                    self.snapshot = None;
+                    self.apply_snapshot(results);
                 }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.snapshot = None,
             }
         }
+        if now.duration_since(self.last_snapshot) < SNAPSHOT {
+            return;
+        }
+        self.last_snapshot = now;
+        for agent in self.agents.values_mut() {
+            if !agent.status.is_running() {
+                agent.group = agent.group.filter(|&leader| reap::group_exists(leader));
+            }
+        }
+        let requests: Vec<(AgentId, u64, u32, Vec<Tracked>)> = self
+            .agents
+            .values()
+            .filter(|agent| agent.status.is_running())
+            .filter_map(|agent| {
+                let root = agent.terminal.as_ref()?.pid();
+                Some((
+                    agent.record.id,
+                    agent.generation,
+                    root,
+                    agent.tracked.clone(),
+                ))
+            })
+            .collect();
+        if requests.is_empty() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.snapshot = Some(rx);
+        std::thread::spawn(move || {
+            let table = ProcessTable::read();
+            let results = requests
+                .into_iter()
+                .map(|(id, generation, root, previous)| {
+                    (id, generation, table.track(root, &previous))
+                })
+                .collect();
+            let _ = tx.send(results);
+        });
+    }
+
+    /// Stores each agent's new tracked list; an agent that exited while the snapshot ran
+    /// has its newly seen descendants stopped right away.
+    fn apply_snapshot(&mut self, results: Snapshot) {
+        for (id, generation, tracked) in results {
+            let Some(agent) = self.agents.get_mut(&id) else {
+                continue;
+            };
+            if agent.generation != generation {
+                continue;
+            }
+            if agent.status.is_running() {
+                agent.tracked = tracked;
+            } else {
+                reap::terminate(&[], &[], &tracked, STOP_GRACE);
+            }
+        }
+    }
+
+    fn tick(&mut self) {
+        let now = Instant::now();
+        self.refresh_tracked(now);
         let mut changed = Vec::new();
         for (id, agent) in &mut self.agents {
             if agent.record.kind == AgentKind::Generic

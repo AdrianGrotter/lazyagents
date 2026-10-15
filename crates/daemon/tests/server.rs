@@ -876,6 +876,47 @@ async fn exited_agent_leaves_no_detached_descendants() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn exited_agent_leaves_no_group_members() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let script = format!(
+        "(nohup sleep 311 >/dev/null 2>&1 & echo $! > '{}'); sleep 2; exit 0",
+        pidfile.display()
+    );
+    let agent = create_owned(&mut conn, &project, "member", &sh(&script)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    conn.wait_status(agent.id, Status::Exited(0)).await;
+    assert_eq!(
+        gone_within(&leaves, Duration::from_secs(5)).await,
+        Vec::<u32>::new(),
+        "survived the agent's exit"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_stops_a_detached_descendant_whose_parent_exited() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let script = format!(
+        "(perl -e 'use POSIX; setsid(); exec q(sleep), 312' & echo $! > '{}'; sleep 2); exec sleep 313",
+        pidfile.display()
+    );
+    let started = tokio::time::Instant::now();
+    let agent = create_owned(&mut conn, &project, "reparent", &sh(&script)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    tokio::time::sleep_until(started + Duration::from_millis(4500)).await;
+    assert_eq!(leaves.alive(), leaves.0, "descendant never ran");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn remove_stops_the_agent_tree() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;
