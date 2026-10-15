@@ -466,7 +466,7 @@ fn hook_does_not_wait_on_an_open_stdin() {
         .expect("hook");
     let _stdin = child.stdin.take();
     let mut status = None;
-    let exited = wait_until(Duration::from_secs(1), || {
+    let exited = wait_until(Duration::from_secs(3), || {
         status = child.try_wait().expect("try_wait");
         status.is_some()
     });

@@ -29,7 +29,7 @@ launch "$name"
 "$h" keys "$name" a
 "$h" wait-for "$name" ' Add project ' 5
 "$h" keys "$name" Enter
-"$h" wait-for "$name" 'tui-smoke-project' 5
+"$h" wait-for "$name" '▸ tui-smoke-project' 5
 
 "$h" keys "$name" n
 "$h" wait-for "$name" ' New agent ' 5
