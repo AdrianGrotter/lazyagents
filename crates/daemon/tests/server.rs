@@ -896,6 +896,45 @@ async fn exited_agent_leaves_no_group_members() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn exit_reaping_does_not_block_requests() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let script = format!(
+        "(nohup sh -c \"trap '' TERM HUP; echo \\$\\$ > '{}'; exec sleep 315\" </dev/null >/dev/null 2>&1 &); sleep 1; exit 0",
+        pidfile.display()
+    );
+    let agent = create_owned(&mut conn, &project, "stubborn", &sh(&script)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let mut slowest = Duration::ZERO;
+    loop {
+        let asked = tokio::time::Instant::now();
+        let Ok(Response::Agents(agents)) = conn.request(Request::ListAgents).await else {
+            panic!("list")
+        };
+        slowest = slowest.max(asked.elapsed());
+        let exited = agents
+            .iter()
+            .any(|a| a.id == agent.id && a.status == Status::Exited(0));
+        if exited && leaves.alive().is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "agent never exited or {:?} survived",
+            leaves.alive()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        slowest < Duration::from_millis(300),
+        "a request took {slowest:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn kill_stops_a_detached_descendant_whose_parent_exited() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;

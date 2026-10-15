@@ -220,11 +220,32 @@ struct Agent {
 }
 
 impl Agent {
+    fn new(record: AgentRecord) -> Self {
+        Self {
+            record,
+            status: Status::Stopped,
+            terminal: None,
+            generation: 0,
+            started: Instant::now(),
+            status_since: Instant::now(),
+            last_output: None,
+            dirty: false,
+            tracked: Vec::new(),
+            group: None,
+        }
+    }
+
     fn set_status(&mut self, status: Status) {
         if status != self.status {
             self.status = status;
             self.status_since = Instant::now();
         }
+    }
+
+    /// A hook counts as activity even when it leaves the status unchanged.
+    fn hooked(&mut self, kind: HookKind, now: Instant) {
+        self.status = on_hook(kind);
+        self.status_since = now;
     }
 }
 
@@ -269,21 +290,7 @@ impl Daemon {
         let agents = state
             .agents
             .into_iter()
-            .map(|record| {
-                let agent = Agent {
-                    record,
-                    status: Status::Stopped,
-                    terminal: None,
-                    generation: 0,
-                    started: Instant::now(),
-                    status_since: Instant::now(),
-                    last_output: None,
-                    dirty: false,
-                    tracked: Vec::new(),
-                    group: None,
-                };
-                (agent.record.id, agent)
-            })
+            .map(|record| (record.id, Agent::new(record)))
             .collect();
         Self {
             paths,
@@ -568,21 +575,7 @@ impl Daemon {
             resumable: false,
         };
         let id = record.id;
-        self.agents.insert(
-            id,
-            Agent {
-                record,
-                status: Status::Stopped,
-                terminal: None,
-                generation: 0,
-                started: Instant::now(),
-                status_since: Instant::now(),
-                last_output: None,
-                dirty: false,
-                tracked: Vec::new(),
-                group: None,
-            },
-        );
+        self.agents.insert(id, Agent::new(record));
         let started = self.start(id, Launch::Fresh, PaneSize::new(create.cols, create.rows));
         self.persist();
         self.announce(id);
@@ -786,7 +779,7 @@ impl Daemon {
             agent.record.resumable = matches!(source, Some("resume" | "compact"));
             changed_record = true;
         }
-        agent.set_status(on_hook(kind));
+        agent.hooked(kind, Instant::now());
         if changed_record {
             self.persist();
         }
@@ -814,8 +807,8 @@ impl Daemon {
                 agent.set_status(Status::Exited(code));
                 agent.dirty = true;
                 let tracked = std::mem::take(&mut agent.tracked);
-                reap::terminate(&[], &[root], &tracked, STOP_GRACE);
                 agent.group = reap::group_exists(root).then_some(root);
+                reap_off_loop(vec![root], tracked);
                 self.announce(event.agent);
             }
             Outcome::Nothing => {}
@@ -862,17 +855,19 @@ impl Daemon {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        self.snapshot = Some(rx);
-        std::thread::spawn(move || {
-            let table = ProcessTable::read();
-            let results = requests
-                .into_iter()
-                .map(|(id, generation, root, previous)| {
-                    (id, generation, table.track(root, &previous))
-                })
-                .collect();
-            let _ = tx.send(results);
-        });
+        let job = requests.clone();
+        let spawned = std::thread::Builder::new()
+            .name("snapshot".into())
+            .spawn(move || {
+                let _ = tx.send(take_snapshot(job));
+            });
+        match spawned {
+            Ok(_) => self.snapshot = Some(rx),
+            Err(e) => {
+                tracing::error!(error = %e, "spawning the snapshot thread failed; reading inline");
+                self.apply_snapshot(take_snapshot(requests));
+            }
+        }
     }
 
     /// Stores each agent's new tracked list; an agent that exited while the snapshot ran
@@ -888,7 +883,7 @@ impl Daemon {
             if agent.status.is_running() {
                 agent.tracked = tracked;
             } else {
-                reap::terminate(&[], &[], &tracked, STOP_GRACE);
+                reap_off_loop(Vec::new(), tracked);
             }
         }
     }
@@ -942,5 +937,81 @@ impl Daemon {
         for agent in self.agents.values_mut() {
             agent.dirty = false;
         }
+    }
+}
+
+fn take_snapshot(requests: Vec<(AgentId, u64, u32, Vec<Tracked>)>) -> Snapshot {
+    let table = ProcessTable::read();
+    requests
+        .into_iter()
+        .map(|(id, generation, root, previous)| (id, generation, table.track(root, &previous)))
+        .collect()
+}
+
+/// Stops the process groups and tracked processes an exited agent left behind on a
+/// separate thread, so waiting out their grace period never blocks the event loop.
+fn reap_off_loop(groups: Vec<u32>, tracked: Vec<Tracked>) {
+    if groups.is_empty() && tracked.is_empty() {
+        return;
+    }
+    let (job_groups, job_tracked) = (groups.clone(), tracked.clone());
+    let spawned = std::thread::Builder::new()
+        .name("reap".into())
+        .spawn(move || reap::terminate(&[], &job_groups, &job_tracked, STOP_GRACE));
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "spawning a reaper thread failed; reaping inline");
+        reap::terminate(&[], &groups, &tracked, STOP_GRACE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::status::CLAUDE_SILENCE;
+
+    fn claude_agent() -> Agent {
+        Agent::new(AgentRecord {
+            id: AgentId::random(),
+            project: ProjectId::random(),
+            name: "claude".into(),
+            kind: AgentKind::Claude,
+            command: Vec::new(),
+            cwd: PathBuf::from("/p"),
+            session_id: None,
+            resumable: false,
+        })
+    }
+
+    #[test]
+    fn a_hook_that_keeps_the_status_still_counts_as_activity() {
+        let mut agent = claude_agent();
+        let started = agent.started;
+        agent.hooked(HookKind::PreToolUse, started);
+        let again = started + Duration::from_secs(9);
+        agent.hooked(HookKind::PreToolUse, again);
+        assert_eq!(agent.status, Status::Working);
+        let after_first_silence = started + CLAUDE_SILENCE + Duration::from_secs(1);
+        assert_eq!(
+            settle(
+                agent.record.kind,
+                agent.status,
+                agent.started,
+                agent.status_since,
+                agent.last_output,
+                after_first_silence,
+            ),
+            None
+        );
+        assert_eq!(
+            settle(
+                agent.record.kind,
+                agent.status,
+                agent.started,
+                agent.status_since,
+                agent.last_output,
+                again + CLAUDE_SILENCE,
+            ),
+            Some(Status::Idle)
+        );
     }
 }

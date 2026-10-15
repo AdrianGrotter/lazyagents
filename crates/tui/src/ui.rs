@@ -299,12 +299,18 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
-    let line = match app.current_message(now) {
-        Some(message) => Line::from(message.to_string()).red(),
-        None if app.focus == Focus::Pane => Line::from(PANE_HINT).dark_gray(),
-        None => Line::from(SIDEBAR_HINT).dark_gray(),
+    let hint = if app.focus == Focus::Pane {
+        PANE_HINT
+    } else {
+        SIDEBAR_HINT
     };
-    frame.render_widget(Paragraph::new(line), area);
+    let mut spans = Vec::new();
+    if let Some(message) = app.current_message(now) {
+        spans.push(Span::raw(message.to_string()).red());
+        spans.push(Span::raw(" │ ").dark_gray());
+    }
+    spans.push(Span::raw(hint).dark_gray());
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -511,6 +517,31 @@ mod tests {
         app.message = None;
         let (text, _) = render(&app);
         assert!(text.contains("ctrl-] sidebar"), "{text}");
+    }
+
+    #[test]
+    fn status_bar_keeps_the_hint_after_a_red_message() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.fail("boom happened");
+        let (text, buffer) = render(&app);
+        let status = text.lines().last().expect("status line");
+        assert!(
+            status.starts_with("boom happened │ ? help · q quit · enter open"),
+            "{status}"
+        );
+        assert!(!status.contains("g next !"), "{status}");
+        let y = buffer.area.height - 1;
+        assert_eq!(buffer[(0, y)].fg, Color::Red);
+        assert_eq!(buffer[(12, y)].fg, Color::Red);
+        assert_eq!(buffer[(16, y)].fg, Color::DarkGray);
+        app.focus = Focus::Pane;
+        let (text, _) = render(&app);
+        let status = text.lines().last().expect("status line");
+        assert!(
+            status.starts_with("boom happened │ ctrl-] sidebar"),
+            "{status}"
+        );
     }
 
     #[test]

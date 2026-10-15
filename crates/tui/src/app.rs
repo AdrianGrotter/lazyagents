@@ -118,6 +118,8 @@ pub struct App {
     pending_select: Option<PendingCreate>,
     interactions: u64,
     subscribed_running: bool,
+    too_small: bool,
+    prefix_pending: bool,
     cwd: PathBuf,
     home: Option<PathBuf>,
     shell: String,
@@ -140,6 +142,8 @@ impl App {
             pending_select: None,
             interactions: 0,
             subscribed_running: false,
+            too_small: false,
+            prefix_pending: false,
             cwd,
             home,
             shell,
@@ -289,12 +293,15 @@ impl App {
         self.sync()
     }
 
-    /// Below `MIN_PANE` the size is forgotten and nothing is resized.
+    /// Below `MIN_PANE` the size is forgotten, nothing is resized and keys are ignored
+    /// except the ones that quit or leave the pane.
     pub fn set_pane_size(&mut self, cols: u16, rows: u16) -> Vec<Effect> {
-        if cols < MIN_PANE.0 || rows < MIN_PANE.1 {
+        self.too_small = cols < MIN_PANE.0 || rows < MIN_PANE.1;
+        if self.too_small {
             self.pane_size = None;
             return Vec::new();
         }
+        self.prefix_pending = false;
         if self.pane_size == Some((cols, rows)) {
             return Vec::new();
         }
@@ -311,10 +318,17 @@ impl App {
         }
     }
 
+    /// Keeps the highlighted project; if it is gone, highlights the selected agent's
+    /// project, and otherwise leaves the index to be clamped.
     fn replace_projects(&mut self, projects: Vec<Project>) {
-        let selected = self.selected_project().map(|p| p.id);
+        let highlighted = self.selected_project().map(|p| p.id);
+        let agent_project = self.selected_agent().map(|a| a.project);
         self.projects = projects;
-        if let Some(index) = selected.and_then(|id| self.projects.iter().position(|p| p.id == id)) {
+        let position = |id: ProjectId| self.projects.iter().position(|p| p.id == id);
+        if let Some(index) = highlighted
+            .and_then(position)
+            .or_else(|| agent_project.and_then(position))
+        {
             self.project_index = index;
         }
     }
@@ -455,6 +469,9 @@ impl App {
             return Vec::new();
         }
         self.interactions += 1;
+        if self.too_small {
+            return self.on_too_small_key(key);
+        }
         if self.popup.is_some() {
             return self.on_popup_key(key);
         }
@@ -464,7 +481,31 @@ impl App {
         }
     }
 
+    /// Nothing is visible, so only `q`/`ctrl-c` (quit from the sidebar) and `ctrl-q q`
+    /// (leave the pane) act; no key reaches an agent.
+    fn on_too_small_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.focus == Focus::Pane {
+            if std::mem::take(&mut self.prefix_pending) {
+                if key.code == KeyCode::Char('q') && !ctrl {
+                    self.focus = Focus::Agents;
+                }
+            } else {
+                self.prefix_pending = ctrl && key.code == KeyCode::Char('q');
+            }
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Char('q') if !ctrl => vec![Effect::Quit],
+            KeyCode::Char('c') if ctrl => vec![Effect::Quit],
+            _ => Vec::new(),
+        }
+    }
+
     pub fn on_paste(&mut self, text: String) -> Vec<Effect> {
+        if self.too_small {
+            return Vec::new();
+        }
         if self.popup.is_none() {
             return match (self.focus, self.selected_agent()) {
                 (Focus::Pane, Some(agent)) => {
@@ -1719,6 +1760,64 @@ pub(crate) mod tests {
         let _ = app.apply_response(Response::Project(projects[0].clone()));
         assert_eq!(app.selected_project().map(|x| x.id), Some(projects[0].id));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+    }
+
+    #[test]
+    fn all_view_removing_the_highlighted_project_snaps_to_the_selected_agent() {
+        let (mut app, projects, a, _) = all_view_with_three_projects();
+        let _ = app.on_key(key('h'));
+        let _ = app.on_key(key('k'));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[2].id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        let effects = app.apply_server(ServerMessage::ProjectsChanged(vec![
+            projects[0].clone(),
+            projects[1].clone(),
+        ]));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[0].id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        assert!(effects.is_empty(), "{effects:?}");
+    }
+
+    #[test]
+    fn all_view_removing_the_highlighted_project_without_agents_clamps() {
+        let p = project("p");
+        let q = project("q");
+        let r = project("r");
+        let (mut app, _) = loaded(vec![p.clone(), q.clone(), r], vec![]);
+        let _ = app.on_key(key('A'));
+        let _ = app.on_key(key('h'));
+        let _ = app.on_key(key('k'));
+        assert_eq!(app.project_index, 2);
+        let _ = app.apply_server(ServerMessage::ProjectsChanged(vec![p, q.clone()]));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(q.id));
+    }
+
+    #[test]
+    fn too_small_terminal_ignores_keys_except_the_way_out() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.set_pane_size(10, 3);
+        for event in [key('x'), key('n'), key('?'), key('j'), code(KeyCode::Enter)] {
+            assert!(app.on_key(event).is_empty(), "{event:?}");
+            assert_eq!(app.popup, None, "{event:?}");
+        }
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(app.on_key(key('q')), vec![Effect::Quit]);
+        assert_eq!(app.on_key(ctrl('c')), vec![Effect::Quit]);
+
+        let _ = app.set_pane_size(80, 20);
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Pane);
+        let _ = app.set_pane_size(10, 3);
+        assert!(app.on_paste("text".into()).is_empty());
+        for event in [key('q'), ctrl('c'), key('x'), ctrl('q'), key('x'), key('q')] {
+            assert!(app.on_key(event).is_empty(), "{event:?}");
+            assert_eq!(app.focus, Focus::Pane, "{event:?}");
+        }
+        assert!(app.on_key(ctrl('q')).is_empty());
+        assert!(app.on_key(key('q')).is_empty());
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(app.popup, None);
     }
 
     #[test]

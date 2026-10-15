@@ -38,6 +38,10 @@ reporting; otherwise it is forwarded. An exited or stopped agent's pane scrolls 
 wheel too. Planned (plan 4): mouse drag selects text inside the pane and copies it via
 OSC 52 (fallback `pbcopy`/`wl-copy`), and `ctrl-]` then `[` enters keyboard scroll mode.
 
+**Terminal too small**: while the pane would be smaller than 20×5 cells the TUI shows only
+"terminal too small", and keys and pastes do nothing except `q`/`ctrl-c` (quit, from the
+sidebar) and `ctrl-q` then `q` (leave the pane). Nothing reaches an agent.
+
 Status icons in the Agents panel:
 
 | Icon | Status |

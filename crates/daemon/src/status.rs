@@ -7,6 +7,7 @@ use protocol::{AgentKind, HookKind, Status};
 pub const ACTIVITY_WINDOW: Duration = Duration::from_secs(2);
 pub const SETTLE_AFTER: Duration = Duration::from_secs(2);
 pub const CLAUDE_SILENCE: Duration = Duration::from_secs(10);
+pub const CLAUDE_STARTUP_SILENCE: Duration = Duration::from_secs(30);
 
 pub fn on_hook(kind: HookKind) -> Status {
     match kind {
@@ -26,7 +27,8 @@ pub fn generic_status(last_output: Option<Instant>, now: Instant) -> Status {
 }
 
 /// The status a running agent moves to from output timing alone, or `None` to keep it.
-/// `status_since` is when the agent entered `status`.
+/// `status_since` is when the agent entered `status` or, for a Claude agent, last
+/// reported a hook.
 pub fn settle(
     kind: AgentKind,
     status: Status,
@@ -49,11 +51,11 @@ pub fn settle(
         }
         AgentKind::Claude => {
             let quiet_since = last_output.map_or(started, |at| at.max(started));
-            let quiet_since = quiet_since.max(status_since);
-            if status == Status::Working && now.duration_since(quiet_since) >= CLAUDE_SILENCE {
-                Status::Idle
-            } else {
-                status
+            let quiet = now.duration_since(quiet_since.max(status_since));
+            match status {
+                Status::Working if quiet >= CLAUDE_SILENCE => Status::Idle,
+                Status::Starting if quiet >= CLAUDE_STARTUP_SILENCE => Status::Idle,
+                _ => status,
             }
         }
     };
@@ -197,7 +199,7 @@ mod tests {
     fn claude_needs_input_is_not_changed_by_silence() {
         let started = Instant::now();
         let late = started + CLAUDE_SILENCE * 3;
-        for status in [Status::NeedsInput, Status::Starting, Status::Idle] {
+        for status in [Status::NeedsInput, Status::Idle] {
             assert_eq!(
                 settle(AgentKind::Claude, status, started, started, None, late),
                 None
@@ -214,6 +216,38 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn silent_claude_start_settles_to_idle() {
+        let started = Instant::now();
+        let claude = |last_output, now| {
+            settle(
+                AgentKind::Claude,
+                Status::Starting,
+                started,
+                started,
+                last_output,
+                now,
+            )
+        };
+        assert_eq!(
+            claude(
+                None,
+                started + CLAUDE_STARTUP_SILENCE - Duration::from_millis(1)
+            ),
+            None
+        );
+        assert_eq!(
+            claude(None, started + CLAUDE_STARTUP_SILENCE),
+            Some(Status::Idle)
+        );
+        let output = started + Duration::from_secs(5);
+        assert_eq!(claude(Some(output), started + CLAUDE_STARTUP_SILENCE), None);
+        assert_eq!(
+            claude(Some(output), output + CLAUDE_STARTUP_SILENCE),
+            Some(Status::Idle)
+        );
     }
 
     #[test]

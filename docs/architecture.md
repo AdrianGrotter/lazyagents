@@ -70,7 +70,9 @@ The auto-started daemon runs in its own session without a controlling terminal, 
 - **An agent that exits on its own.** When the agent's process exits, the daemon runs
   the same pass over its process group and tracked descendants, so background jobs it
   left behind go too. Descendants that a snapshot already running at that moment
-  reports are stopped as soon as it finishes.
+  reports are stopped as soon as it finishes. Both passes run on a separate thread, so
+  their grace period never blocks requests; if the thread cannot be spawned, the pass
+  runs inline, as does a snapshot whose thread cannot be spawned.
 - **The remembered group.** If members of an agent's process group outlive a stop or
   the agent's own exit, the daemon remembers the group and signals it again on the
   next kill, remove, restart or shutdown; it forgets the group once it is empty.
@@ -142,7 +144,9 @@ daemon last told it.
   client, the agent list was replaced).
 - **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane,
   the status line and popups from `App`; the pane copies the daemon's cell grid into the
-  ratatui buffer. Status glyphs animate from a frame counter the runtime ticks every
+  ratatui buffer. The status line shows a transient message in red, then `│` and the
+  key hint, cut off on the right. Below a 20×5 pane only "terminal too small" is drawn,
+  and keys do nothing except quitting from the sidebar and leaving the pane. Status glyphs animate from a frame counter the runtime ticks every
   100 ms while an agent is starting or working.
 - **Connection actor** (`connection.rs`): a task owning the `Client`. It sends requests
   in order and forwards responses, errors and server events (agent list changes, screen
