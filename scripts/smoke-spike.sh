@@ -30,11 +30,12 @@ cargo build -q -p spike --manifest-path "$root/Cargo.toml"
 "$h" wait-for "$name" 'exited (7)' 5
 
 "$h" keys "$name" C-]
+"$h" wait-for "$name" 'mode: SIDEBAR' 5
 "$h" keys "$name" q
-sleep 0.5
-if tmux -L lazyagents-harness has-session -t "$name" 2>/dev/null \
-  && tmux -L lazyagents-harness capture-pane -p -t "$name" | grep -q 'lazyagents spike'; then
-  echo "spike did not quit on q" >&2
-  exit 1
-fi
-echo "spike smoke passed"
+for _ in $(seq 25); do
+  tmux -L lazyagents-harness has-session -t "$name" 2>/dev/null || { echo "spike smoke passed"; exit 0; }
+  sleep 0.2
+done
+echo "spike did not quit on q" >&2
+"$h" capture "$name" >&2
+exit 1
