@@ -35,7 +35,8 @@
           ];
           RUST_BACKTRACE = "1";
           shellHook = ''
-            if git rev-parse --git-dir >/dev/null 2>&1; then
+            if git rev-parse --git-dir >/dev/null 2>&1 \
+              && [ "$(git config core.hooksPath)" != .githooks ]; then
               git config core.hooksPath .githooks
             fi
           '';
