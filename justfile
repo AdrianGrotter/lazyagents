@@ -20,10 +20,13 @@ test-hooks:
 test-harness:
     scripts/test-harness.sh
 
+test-spike-hangup:
+    scripts/test-spike-hangup.sh
+
 smoke-spike:
     scripts/smoke-spike.sh
 
-check: fmt-check lint test test-hooks test-harness smoke-spike
+check: fmt-check lint test test-hooks test-harness smoke-spike test-spike-hangup
 
 [no-cd]
 spike *args:

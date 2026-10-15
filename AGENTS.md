@@ -22,8 +22,9 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 | `crates/daemon` | agents, PTYs, terminal emulation, persistence, git worktrees |
 | `crates/tui` | ratatui client |
 | `crates/lazyagents` | the binary and CLI |
-| `spike/` | throwaway embedded-terminal spike; removed after milestone 1 |
-| `scripts/` | tmux harness, hook tests, spike smoke script |
+| `spike/` | throwaway embedded-terminal spike; removed once the TUI replaces it |
+| `vendor/crossterm` | crossterm 0.29.0 with a dead-terminal fix (ADR 0005); drop when upstream releases it |
+| `scripts/` | tmux harness, hook tests, spike smoke and hangup scripts |
 | `docs/` | architecture, protocol, keybindings, status detection, ADRs (`decisions/`) |
 
 ## Working rules
