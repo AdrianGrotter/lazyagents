@@ -32,7 +32,7 @@ const SIDEBAR_HINT: [(Action, &str); 12] = [
     (Action::Diff, "diff"),
 ];
 
-const SIDEBAR_HELP: [(Action, &str); 18] = [
+const SIDEBAR_HELP: [(Action, &str); 19] = [
     (Action::Down, "move down in the focused box"),
     (Action::Up, "move up in the focused box"),
     (Action::FocusProjects, "focus Projects"),
@@ -48,10 +48,12 @@ const SIDEBAR_HELP: [(Action, &str); 18] = [
     (Action::ToggleAllAgents, "all agents / this project"),
     (Action::NextAttention, "next agent needing input"),
     (Action::Diff, "diff of the agent's changes"),
+    (Action::Scroll, "scroll the agent's history"),
     (Action::Help, "help"),
     (Action::Quit, "quit (agents keep running)"),
     (Action::StopDaemon, "stop the daemon and quit"),
 ];
+const SCROLL_HINT: &str = "SCROLL · j/k ctrl-u/d g/G · q exit";
 const TOO_SMALL: &str = "terminal too small";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,7 +344,14 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
         ),
         None => " lazyagents ".to_string(),
     };
-    frame.render_widget(block(title, focused, &app.theme), areas.pane);
+    let pane_block = if app.focus == Focus::Scroll {
+        Block::bordered()
+            .title(title)
+            .border_style(app.theme.scroll)
+    } else {
+        block(title, focused, &app.theme)
+    };
+    frame.render_widget(pane_block, areas.pane);
     let Some(agent) = agent else {
         let new = app.keymap.first_key(Action::NewAgent);
         frame.render_widget(
@@ -447,6 +456,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
         }
         Focus::Pane => Span::raw(pane_hint(&app.keymap)).fg(theme.dim),
         Focus::Diff => Span::raw(diff_hint(&app.keymap)).fg(theme.dim),
+        Focus::Scroll => Span::raw(SCROLL_HINT).fg(theme.scroll),
         Focus::Projects | Focus::Agents => Span::raw(sidebar_hint(&app.keymap)).fg(theme.dim),
     });
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -537,6 +547,10 @@ fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
         (
             keymap.describe(Action::PanePrevious),
             "previous agent".to_string(),
+        ),
+        (
+            keymap.describe(Action::PaneScroll),
+            "scroll the agent's history".to_string(),
         ),
         (
             keymap.describe(Action::PaneSendPrefix),
@@ -725,6 +739,28 @@ mod tests {
     }
 
     #[test]
+    fn scroll_mode_colours_the_pane_border_and_shows_its_hint() {
+        let p = project("p");
+        let a = agent(&p, "a", Status::Idle);
+        let (mut app, _) = loaded(vec![p.clone()], vec![a]);
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        let (text, buffer) = render(&app);
+        let pane = layout(Rect::new(0, 0, 100, 30), &app).pane;
+        assert_eq!(buffer[(pane.x, pane.y)].fg, Color::Yellow);
+        let status = text.lines().last().expect("status line");
+        assert!(
+            status.starts_with("SCROLL · j/k ctrl-u/d g/G · q exit"),
+            "{status}"
+        );
+
+        let config = configured("[theme]\nscroll = \"blue\"\n");
+        let (mut app, _) = loaded_with(config, vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        let (_, buffer) = render(&app);
+        assert_eq!(buffer[(pane.x, pane.y)].fg, Color::Blue);
+    }
+
+    #[test]
     fn status_bar_shows_the_pending_prefix() {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
@@ -793,6 +829,8 @@ mod tests {
             ("ctrl-]/ctrl-5", "back to the sidebar"),
             ("ctrl-q j", "next agent"),
             ("ctrl-q k", "previous agent"),
+            ("s", "scroll the agent's history"),
+            ("ctrl-q s", "scroll the agent's history"),
             ("ctrl-q ctrl-q", "send ctrl-q to the agent"),
         ] {
             let expected = help_row(key, action);

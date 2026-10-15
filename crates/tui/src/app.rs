@@ -26,6 +26,7 @@ pub enum Focus {
     Agents,
     Pane,
     Diff,
+    Scroll,
 }
 
 /// `Configured(i)` is the i-th preset from the config file; they follow the built-ins.
@@ -138,6 +139,12 @@ pub struct DiffView {
     pub scroll: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollMode {
+    pub agent: AgentId,
+    pub from_pane: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Popup {
     Help,
@@ -180,6 +187,7 @@ pub struct App {
     pub message: Option<(String, Instant)>,
     pub git_stats: HashMap<AgentId, GitStat>,
     pub diff: Option<DiffView>,
+    pub scroll: Option<ScrollMode>,
     stats_in_flight: HashMap<AgentId, Instant>,
     diffs_in_flight: HashMap<AgentId, Instant>,
     stat_polled: Option<(AgentId, Instant)>,
@@ -215,6 +223,7 @@ impl App {
             message,
             git_stats: HashMap::new(),
             diff: None,
+            scroll: None,
             stats_in_flight: HashMap::new(),
             diffs_in_flight: HashMap::new(),
             stat_polled: None,
@@ -461,6 +470,10 @@ impl App {
         if self.focus == Focus::Diff && selected != self.diff.as_ref().map(|d| d.agent) {
             self.close_diff();
         }
+        if self.focus == Focus::Scroll && selected != self.scroll.map(|s| s.agent) {
+            self.scroll = None;
+            self.focus = Focus::Agents;
+        }
         if let Some(id) = created {
             self.select_agent(id);
             self.focus = Focus::Pane;
@@ -612,6 +625,12 @@ impl App {
 
 const DEFAULT_SIZE: (u16, u16) = (120, 40);
 const WHEEL_LINES: i32 = 3;
+const SCROLL_TOP: i32 = i32::MAX / 2;
+const SCROLL_BOTTOM: i32 = i32::MIN / 2;
+
+fn scroll_request(id: AgentId, lines: i32) -> Effect {
+    Effect::Send(Request::Scroll { id, lines })
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum Edit {
@@ -656,6 +675,7 @@ impl App {
         match self.focus {
             Focus::Pane => self.on_pane_key(key),
             Focus::Diff => self.on_diff_key(key),
+            Focus::Scroll => self.on_scroll_key(key),
             Focus::Projects | Focus::Agents => self.on_sidebar_key(key),
         }
     }
@@ -714,11 +734,83 @@ impl App {
         view.scroll = (view.scroll as i64).saturating_add(step).clamp(0, last) as usize;
     }
 
+    /// Leaves scroll mode, returning to the pane only if it was entered from there and
+    /// the agent still runs, and scrolls the agent back to the bottom.
+    fn exit_scroll(&mut self) -> Vec<Effect> {
+        let Some(mode) = self.scroll.take() else {
+            self.focus = Focus::Agents;
+            return Vec::new();
+        };
+        let running = self
+            .agents
+            .iter()
+            .any(|a| a.id == mode.agent && a.status.is_running());
+        self.focus = if mode.from_pane && running {
+            Focus::Pane
+        } else {
+            Focus::Agents
+        };
+        self.prefix_pending = false;
+        vec![scroll_request(mode.agent, SCROLL_BOTTOM)]
+    }
+
+    fn enter_scroll(&mut self, from_pane: bool) {
+        match self.selected_agent() {
+            Some(agent) if agent.status != Status::Stopped => {
+                self.scroll = Some(ScrollMode {
+                    agent: agent.id,
+                    from_pane,
+                });
+                self.focus = Focus::Scroll;
+                self.prefix_pending = false;
+            }
+            Some(_) => self.fail("nothing to scroll"),
+            None => {}
+        }
+    }
+
+    /// Exits or quits; `None` for any other key.
+    fn leave_scroll(&mut self, key: &KeyEvent) -> Option<Vec<Effect>> {
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if plain && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+            return Some(self.exit_scroll());
+        }
+        (self.keymap.sidebar(key) == Some(Action::Quit)).then(|| vec![Effect::Quit])
+    }
+
+    fn on_scroll_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if let Some(effects) = self.leave_scroll(&key) {
+            return effects;
+        }
+        let Some(mode) = self.scroll else {
+            return Vec::new();
+        };
+        let page = self.diff_page() as i32;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let lines = match (key.code, ctrl) {
+            (KeyCode::Char('j'), false) => -1,
+            (KeyCode::Char('k'), false) => 1,
+            (KeyCode::Char('d'), true) => -(page / 2),
+            (KeyCode::Char('u'), true) => page / 2,
+            (KeyCode::PageDown, _) => -page,
+            (KeyCode::PageUp, _) => page,
+            (KeyCode::Char('g'), false) => SCROLL_TOP,
+            (KeyCode::Char('G'), false) => SCROLL_BOTTOM,
+            _ => return Vec::new(),
+        };
+        vec![scroll_request(mode.agent, lines)]
+    }
+
     /// Nothing is visible, so only the quit keys (from the sidebar) and the prefix
     /// followed by a leave key (leave the pane) act; no key reaches an agent.
     fn on_too_small_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         if self.focus == Focus::Diff {
             return self.leave_diff(&key).unwrap_or_default();
+        }
+        if self.focus == Focus::Scroll {
+            return self.leave_scroll(&key).unwrap_or_default();
         }
         if self.focus == Focus::Pane {
             if std::mem::take(&mut self.prefix_pending) {
@@ -812,6 +904,10 @@ impl App {
                 Some(Action::PanePrevious) => self.cycle_in_pane(-1),
                 Some(Action::PaneLeave) => {
                     self.leave_pane();
+                    Vec::new()
+                }
+                Some(Action::PaneScroll) => {
+                    self.enter_scroll(true);
                     Vec::new()
                 }
                 Some(Action::PaneSendPrefix) => self.input(id, &self.keymap.prefix().event()),
@@ -951,8 +1047,8 @@ impl App {
                     self.select_agent(id);
                 }
             }
-            Action::Scroll
-            | Action::PaneNext
+            Action::Scroll => self.enter_scroll(false),
+            Action::PaneNext
             | Action::PanePrevious
             | Action::PaneLeave
             | Action::PaneScroll
@@ -982,7 +1078,7 @@ impl App {
                     self.highlight_project(wrap(self.project_index, step, count));
                 }
             }
-            Focus::Agents | Focus::Pane | Focus::Diff => self.move_agent(step),
+            Focus::Agents | Focus::Pane | Focus::Diff | Focus::Scroll => self.move_agent(step),
         }
     }
 
@@ -1210,6 +1306,7 @@ fn prefix_help(keymap: &Keymap) -> String {
     let parts: Vec<String> = [
         (keys(&[Action::PaneNext, Action::PanePrevious]), "switch"),
         (keys(&[Action::PaneLeave]), "sidebar"),
+        (keys(&[Action::PaneScroll]), "scroll"),
         (keys(&[Action::PaneSendPrefix]), "send"),
     ]
     .into_iter()
@@ -1809,7 +1906,7 @@ pub(crate) mod tests {
         assert_eq!(app.focus, Focus::Pane);
         assert_eq!(
             app.message.as_ref().map(|(m, _)| m.as_str()),
-            Some("ctrl-q: j/k switch · q/esc sidebar · ctrl-q send")
+            Some("ctrl-q: j/k switch · q/esc sidebar · s scroll · ctrl-q send")
         );
         assert_eq!(
             app.on_key(key('x')),
@@ -2209,7 +2306,7 @@ pub(crate) mod tests {
         assert!(app.on_key(key('z')).is_empty());
         assert_eq!(
             app.message.as_ref().map(|(m, _)| m.as_str()),
-            Some("ctrl-a: n/p switch · x sidebar · ctrl-a send")
+            Some("ctrl-a: n/p switch · x sidebar · s scroll · ctrl-a send")
         );
     }
 
@@ -2972,6 +3069,124 @@ pub(crate) mod tests {
         let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
         assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+    }
+
+    fn scroll_effects(id: AgentId, lines: i32) -> Vec<Effect> {
+        vec![Effect::Send(Request::Scroll { id, lines })]
+    }
+
+    fn running_pair() -> (App, AgentInfo, AgentInfo) {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a.clone(), b.clone()]);
+        let _ = app.set_pane_size(80, 10);
+        (app, a, b)
+    }
+
+    #[test]
+    fn scroll_mode_from_sidebar_and_prefix() {
+        let (mut app, a, _) = running_pair();
+        assert!(app.on_key(key('s')).is_empty());
+        assert_eq!(app.focus, Focus::Scroll);
+        assert_eq!(
+            app.scroll,
+            Some(ScrollMode {
+                agent: a.id,
+                from_pane: false
+            })
+        );
+        let _ = app.on_key(key('q'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Pane);
+        let _ = app.on_key(ctrl('q'));
+        assert!(app.prefix_pending);
+        assert!(app.on_key(key('s')).is_empty());
+        assert_eq!(app.focus, Focus::Scroll);
+        assert!(!app.prefix_pending);
+        assert_eq!(app.scroll.map(|s| s.from_pane), Some(true));
+    }
+
+    #[test]
+    fn scroll_keys_send_scroll_requests() {
+        let (mut app, a, _) = running_pair();
+        let _ = app.on_key(key('s'));
+        for (event, lines) in [
+            (key('j'), -1),
+            (key('k'), 1),
+            (ctrl('d'), -5),
+            (ctrl('u'), 5),
+            (code(KeyCode::PageDown), -10),
+            (code(KeyCode::PageUp), 10),
+            (key('g'), i32::MAX / 2),
+            (key('G'), i32::MIN / 2),
+        ] {
+            assert_eq!(app.on_key(event), scroll_effects(a.id, lines), "{event:?}");
+            assert_eq!(app.focus, Focus::Scroll, "{event:?}");
+        }
+        for event in [key('x'), key('d'), key('n'), code(KeyCode::Enter), key('s')] {
+            assert!(app.on_key(event).is_empty(), "{event:?}");
+            assert_eq!((app.focus, &app.popup), (Focus::Scroll, &None), "{event:?}");
+        }
+        assert_eq!(app.on_key(ctrl('c')), vec![Effect::Quit]);
+    }
+
+    #[test]
+    fn scroll_exit_returns_to_origin_and_bottoms() {
+        let (mut app, a, _) = running_pair();
+        let bottom = scroll_effects(a.id, i32::MIN / 2);
+        for exit in [key('q'), code(KeyCode::Esc)] {
+            let _ = app.on_key(key('s'));
+            assert_eq!(app.on_key(exit), bottom, "{exit:?}");
+            assert_eq!((app.focus, app.scroll), (Focus::Agents, None), "{exit:?}");
+
+            let _ = app.on_key(code(KeyCode::Enter));
+            let _ = app.on_key(ctrl('q'));
+            let _ = app.on_key(key('s'));
+            assert_eq!(app.on_key(exit), bottom, "{exit:?}");
+            assert_eq!((app.focus, app.scroll), (Focus::Pane, None), "{exit:?}");
+            assert!(!app.prefix_pending);
+            app.focus = Focus::Agents;
+        }
+
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(ctrl('q'));
+        let _ = app.on_key(key('s'));
+        let _ = app.apply_server(ServerMessage::AgentUpdated(AgentInfo {
+            status: Status::Exited(0),
+            ..a.clone()
+        }));
+        assert_eq!(app.focus, Focus::Scroll);
+        assert_eq!(app.on_key(key('q')), bottom);
+        assert_eq!(app.focus, Focus::Agents);
+    }
+
+    #[test]
+    fn scroll_mode_closes_when_its_agent_disappears() {
+        let (mut app, a, b) = running_pair();
+        let _ = app.on_key(key('s'));
+        let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
+        assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+    }
+
+    #[test]
+    fn scroll_needs_a_terminal() {
+        let p = project("p");
+        let stopped = agent(&p, "stopped", Status::Stopped);
+        let exited = agent(&p, "exited", Status::Exited(1));
+        let (mut app, _) = loaded(vec![p], vec![stopped, exited.clone()]);
+        assert!(app.on_key(key('s')).is_empty());
+        assert_eq!(app.focus, Focus::Scroll);
+        assert_eq!(app.scroll.map(|s| s.agent), Some(exited.id));
+        let _ = app.on_key(key('q'));
+        let _ = app.on_key(key('k'));
+        assert!(app.on_key(key('s')).is_empty());
+        assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("nothing to scroll")
+        );
     }
 
     #[test]

@@ -1,7 +1,6 @@
 # Keybindings
 
-Status: implemented in crates/tui (app.rs, keymap.rs, keys.rs, config.rs), except keyboard
-scroll mode (plan 4).
+Status: implemented in crates/tui (app.rs, keymap.rs, keys.rs, config.rs).
 
 The keys below are the defaults. Every sidebar key, the pane prefix, the keys after it and
 the direct-leave keys can be changed in `config.toml` (`[keys.sidebar]` and `[keys.pane]`);
@@ -26,6 +25,7 @@ Two input modes:
 | `A` | toggle between the selected project's agents and all agents |
 | `g` | jump to next agent with `NeedsInput` |
 | `D` | diff view of the agent's changes in the main pane |
+| `s` | scroll mode: browse the agent's terminal history (running or exited agents) |
 | `?` | help popup |
 | `q`, `ctrl-c` | quit TUI (agents keep running) |
 | `Q` | quit and stop daemon (confirm) |
@@ -76,6 +76,7 @@ After `ctrl-q`, one more key picks a pane action:
 | `ctrl-q j` | next agent in the Agents panel, staying in the pane |
 | `ctrl-q k` | previous agent in the Agents panel, staying in the pane |
 | `ctrl-q q`, `ctrl-q esc` | back to the sidebar |
+| `ctrl-q s` | scroll mode |
 | `ctrl-q ctrl-q` | send one `ctrl-q` to the agent |
 
 While the prefix waits for its second key the status bar shows `ctrl-q …`. Any other key
@@ -91,7 +92,26 @@ any other key.
 Mouse wheel scrolls the emulator's scrollback when the agent hasn't enabled mouse
 reporting; otherwise it is forwarded. An exited or stopped agent's pane scrolls with the
 wheel too. Planned (plan 4): mouse drag selects text inside the pane and copies it via
-OSC 52 (fallback `pbcopy`/`wl-copy`), and a keyboard scroll mode.
+OSC 52 (fallback `pbcopy`/`wl-copy`).
+
+**Scroll mode** (`s` in the sidebar, `ctrl-q s` in the pane): keys move the selected
+agent's terminal through its history instead of reaching the agent. It needs an agent with
+a terminal, running or exited; for a stopped agent the status bar says `nothing to scroll`.
+The pane border takes the `[theme]` `scroll` colour (default yellow) and the status bar
+shows `SCROLL · j/k ctrl-u/d g/G · q exit`.
+
+| Key | Action |
+|---|---|
+| `j`/`k` | one line towards the bottom / back in history |
+| `ctrl-d`/`ctrl-u` | half a page towards the bottom / back |
+| `pagedown`/`pageup` | a page towards the bottom / back |
+| `g`/`G` | top of the history / bottom |
+| `q`, `esc` | scroll back to the bottom and exit |
+| `ctrl-c` | quit the TUI (agents keep running) |
+
+Exiting returns to the pane if scroll mode was entered from the pane and the agent still
+runs, otherwise to the Agents box. The mode closes by itself, back to the Agents box, if its
+agent is removed. The mouse wheel behaves as before.
 
 **Terminal too small**: while the pane would be smaller than 20×5 cells the TUI shows only
 "terminal too small", and keys and pastes do nothing except the quit keys (`q`/`ctrl-c`,
