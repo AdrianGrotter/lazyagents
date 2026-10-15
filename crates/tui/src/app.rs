@@ -246,6 +246,11 @@ pub enum AgentView {
     All,
 }
 
+struct PendingRemove {
+    agent: AgentId,
+    interactions: u64,
+}
+
 struct PendingCreate {
     project: ProjectId,
     name: String,
@@ -271,7 +276,7 @@ pub struct App {
     stats_in_flight: HashMap<AgentId, Instant>,
     diffs_in_flight: HashMap<AgentId, Instant>,
     stat_polled: Option<(AgentId, Instant)>,
-    pending_remove: Option<AgentId>,
+    pending_remove: Option<PendingRemove>,
     pending_select: Option<PendingCreate>,
     interactions: u64,
     subscribed_running: bool,
@@ -379,18 +384,32 @@ impl App {
         self.message = Some((message.into(), Instant::now()));
     }
 
+    /// A dirty-worktree refusal opens the force prompt only while the user is still
+    /// waiting for it in the sidebar; otherwise the prompt could take keys typed for an
+    /// agent and force-remove its changes.
     pub fn request_failed(&mut self, message: impl Into<String>) {
         let message = message.into();
         self.pending_select = None;
-        if let Some(id) = self.pending_remove.take()
+        if let Some(pending) = self.pending_remove.take()
             && let Some(files) = message.strip_prefix(DIRTY_WORKTREE)
-            && self.popup.is_none()
-            && self.agents.iter().any(|a| a.id == id)
+            && let Some(name) = self
+                .agents
+                .iter()
+                .find(|a| a.id == pending.agent)
+                .map(|a| a.name.clone())
         {
-            self.popup = Some(Popup::Confirm {
-                prompt: force_prompt(files),
-                action: Confirmed::ForceRemove(id),
-            });
+            let waiting = self.popup.is_none()
+                && matches!(self.focus, Focus::Projects | Focus::Agents)
+                && pending.interactions == self.interactions;
+            if waiting {
+                self.popup = Some(Popup::Confirm {
+                    prompt: force_prompt(files),
+                    action: Confirmed::ForceRemove(pending.agent),
+                });
+            } else {
+                let retry = self.keymap.first_key(Action::Remove);
+                self.fail(format!("{name}: {DIRTY_WORKTREE} — {retry} to try again"));
+            }
             return;
         }
         self.fail(message);
@@ -1426,7 +1445,10 @@ impl App {
     /// Remembers a remove that the daemon may refuse for a dirty worktree, so the refusal
     /// can offer to force it.
     fn remove(&mut self, id: AgentId, remove_worktree: bool, force: bool) -> Vec<Effect> {
-        self.pending_remove = (remove_worktree && !force).then_some(id);
+        self.pending_remove = (remove_worktree && !force).then_some(PendingRemove {
+            agent: id,
+            interactions: self.interactions,
+        });
         vec![Effect::Send(Request::RemoveAgent {
             id,
             remove_worktree,
@@ -3164,6 +3186,32 @@ pub(crate) mod tests {
         let _ = app.on_key(key('d'));
         assert!(app.on_key(code(KeyCode::Esc)).is_empty());
         assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn dirty_worktree_refusal_after_the_user_moved_on_is_only_a_message() {
+        let p = project("p");
+        let wt = worktree_agent(&p, "wt");
+        let (mut app, _) = loaded(vec![p], vec![wt.clone()]);
+        let _ = app.on_key(key('d'));
+        let _ = app.on_key(key('y'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(
+            app.on_key(key('y')),
+            vec![input_key(
+                wt.id,
+                protocol::Key::new(protocol::KeyCode::Char('y'), protocol::Modifiers::NONE)
+            )]
+        );
+
+        app.request_failed("worktree has uncommitted changes:\nf.txt");
+        assert_eq!(app.popup, None);
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("wt: worktree has uncommitted changes — d to try again")
+        );
     }
 
     #[test]

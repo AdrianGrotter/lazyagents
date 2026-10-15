@@ -49,7 +49,9 @@ n: cancel`:
 If the worktree has uncommitted changes the daemon refuses, and a second prompt lists the
 changed files (up to 8, then `… and N more`) and asks `Remove anyway? y/n`: `y` removes the
 worktree with its changes, `n`/`esc` keeps everything. `enter` does nothing in these two
-prompts.
+prompts. The second prompt opens only while focus is still in the sidebar and no key or
+click came after the `y`; otherwise the status bar shows `<name>: worktree has uncommitted
+changes — d to try again` (with the configured remove key), and focus stays where it is.
 
 **Protocol mismatch**: when the running daemon speaks another protocol version, the TUI
 opens on a full-screen prompt instead of the sidebar. `y` stops that daemon and its agents
