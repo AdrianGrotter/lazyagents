@@ -110,6 +110,13 @@ daemon last told it.
   daemon. Selection follows an agent's id across list changes. The TUI is subscribed to
   at most one agent's screen, the selected one, and sizes a running agent's PTY to the
   pane.
+- **Focus rule**: keys reach an agent only while the pane has focus, and focus moves into
+  the pane only on an explicit user action: `enter` on a running agent, or a successful
+  create from the new agent form, provided no key was pressed and no popup opened
+  between submitting and the daemon's answer. A failed request clears the pending
+  create. Focus returns to the sidebar when the selected agent stops running or when the
+  selection changes for any reason other than a key (the agent was removed by another
+  client, the agent list was replaced).
 - **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane,
   the status line and popups from `App`; the pane copies the daemon's cell grid into the
   ratatui buffer. Status glyphs animate from a frame counter the runtime ticks every

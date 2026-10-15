@@ -95,6 +95,12 @@ pub enum AgentView {
     All,
 }
 
+struct PendingCreate {
+    project: ProjectId,
+    name: String,
+    interactions: u64,
+}
+
 pub struct App {
     pub projects: Vec<Project>,
     pub agents: Vec<AgentInfo>,
@@ -107,7 +113,8 @@ pub struct App {
     pub screen: Screen,
     pub pane_size: Option<(u16, u16)>,
     pub message: Option<(String, Instant)>,
-    pending_select: Option<(ProjectId, String)>,
+    pending_select: Option<PendingCreate>,
+    interactions: u64,
     subscribed_running: bool,
     cwd: PathBuf,
     shell: String,
@@ -128,6 +135,7 @@ impl App {
             pane_size: None,
             message: None,
             pending_select: None,
+            interactions: 0,
             subscribed_running: false,
             cwd,
             shell,
@@ -190,7 +198,13 @@ impl App {
         self.message = Some((message.into(), Instant::now()));
     }
 
+    pub fn request_failed(&mut self, message: impl Into<String>) {
+        self.pending_select = None;
+        self.fail(message);
+    }
+
     pub fn apply_server(&mut self, message: ServerMessage) -> Vec<Effect> {
+        let before = self.selected_agent().map(|a| a.id);
         match message {
             ServerMessage::AgentUpdated(info) => self.upsert_agent(info),
             ServerMessage::AgentRemoved(id) => {
@@ -211,10 +225,12 @@ impl App {
             }
             ServerMessage::Welcome { .. } | ServerMessage::Response { .. } => {}
         }
-        self.sync()
+        self.sync_after_server(before, None)
     }
 
     pub fn apply_response(&mut self, response: Response) -> Vec<Effect> {
+        let before = self.selected_agent().map(|a| a.id);
+        let mut created = None;
         match response {
             Response::Projects(projects) => {
                 let selected = self.selected_agent().map(|a| a.id);
@@ -235,8 +251,37 @@ impl App {
                     self.agent_index = 0;
                 }
             }
-            Response::Agent(info) => self.upsert_agent(info),
+            Response::Agent(info) => {
+                let pending = self
+                    .pending_select
+                    .take_if(|p| p.project == info.project && p.name == info.name);
+                let undisturbed = pending.is_some_and(|p| p.interactions == self.interactions)
+                    && self.popup.is_none();
+                if undisturbed && info.status.is_running() {
+                    created = Some(info.id);
+                }
+                self.upsert_agent(info);
+            }
             Response::Ok => {}
+        }
+        self.sync_after_server(before, created)
+    }
+
+    /// Focus enters the pane only through an explicit user action, so a selection
+    /// change caused by the daemon returns focus to the sidebar. `created` is the agent
+    /// the user just created and has not navigated away from since.
+    fn sync_after_server(
+        &mut self,
+        before: Option<AgentId>,
+        created: Option<AgentId>,
+    ) -> Vec<Effect> {
+        self.clamp();
+        if self.focus == Focus::Pane && self.selected_agent().map(|a| a.id) != before {
+            self.focus = Focus::Agents;
+        }
+        if let Some(id) = created {
+            self.select_agent(id);
+            self.focus = Focus::Pane;
         }
         self.sync()
     }
@@ -269,20 +314,10 @@ impl App {
     fn upsert_agent(&mut self, info: AgentInfo) {
         let selected = self.selected_agent().map(|a| a.id);
         match self.agents.iter_mut().find(|a| a.id == info.id) {
-            Some(existing) => *existing = info.clone(),
-            None => self.agents.push(info.clone()),
+            Some(existing) => *existing = info,
+            None => self.agents.push(info),
         }
-        let wanted = self
-            .pending_select
-            .as_ref()
-            .is_some_and(|(project, name)| *project == info.project && *name == info.name);
-        if wanted {
-            self.pending_select = None;
-            self.select_agent(info.id);
-            self.focus = Focus::Pane;
-        } else if let Some(id) = selected {
-            self.select_agent(id);
-        }
+        self.reselect(selected);
     }
 
     fn reselect(&mut self, selected: Option<AgentId>) {
@@ -303,17 +338,21 @@ impl App {
         }
     }
 
-    fn sync(&mut self) -> Vec<Effect> {
+    fn clamp(&mut self) {
         self.project_index = self
             .project_index
             .min(self.projects.len().saturating_sub(1));
         let count = self.visible_agents().len();
         self.agent_index = self.agent_index.min(count.saturating_sub(1));
+    }
+
+    fn sync(&mut self) -> Vec<Effect> {
+        self.clamp();
         let wanted = self.selected_agent().map(|a| (a.id, a.status.is_running()));
-        if wanted.is_none() && self.focus == Focus::Pane {
+        let running = wanted.is_some_and(|(_, running)| running);
+        if !running && self.focus == Focus::Pane {
             self.focus = Focus::Agents;
         }
-        let running = wanted.is_some_and(|(_, running)| running);
         if wanted.map(|(id, _)| id) == self.subscribed {
             let started = running && !self.subscribed_running;
             self.subscribed_running = running;
@@ -376,6 +415,7 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return Vec::new();
         }
+        self.interactions += 1;
         if self.popup.is_some() {
             return self.on_popup_key(key);
         }
@@ -482,10 +522,14 @@ impl App {
                     Focus::Projects
                 };
             }
-            KeyCode::Enter => match self.focus {
-                Focus::Projects => self.focus = Focus::Agents,
-                _ if self.selected_agent().is_some() => self.focus = Focus::Pane,
-                _ => {}
+            KeyCode::Enter => match (self.focus, self.selected_agent()) {
+                (Focus::Projects, _) => self.focus = Focus::Agents,
+                (_, Some(agent)) if agent.status.is_running() => self.focus = Focus::Pane,
+                (_, Some(agent)) => {
+                    let message = format!("{} is not running — r restarts", agent.name);
+                    self.fail(message);
+                }
+                (_, None) => {}
             },
             KeyCode::Char('n') => self.open_new_agent(),
             KeyCode::Char('a') => {
@@ -689,7 +733,11 @@ impl App {
             }
         };
         let (cols, rows) = self.pane_size.unwrap_or(DEFAULT_SIZE);
-        self.pending_select = Some((project, name.clone()));
+        self.pending_select = Some(PendingCreate {
+            project,
+            name: name.clone(),
+            interactions: self.interactions,
+        });
         vec![Effect::Send(Request::CreateAgent(CreateAgent {
             project,
             name,
@@ -954,40 +1002,6 @@ pub(crate) mod tests {
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
         assert_eq!(app.subscribed, Some(b.id));
         assert!(effects.is_empty());
-    }
-
-    #[test]
-    fn pending_select_selects_and_focuses_the_new_agent_via_update() {
-        let p = project("p");
-        let a = agent(&p, "alpha", Status::Idle);
-        let (mut app, _) = loaded(vec![p.clone()], vec![a]);
-        app.pending_select = Some((p.id, "aaa".into()));
-        let new = agent(&p, "aaa", Status::Starting);
-        let effects = app.apply_server(ServerMessage::AgentUpdated(new.clone()));
-        assert_eq!(app.selected_agent().map(|x| x.id), Some(new.id));
-        assert_eq!(app.focus, Focus::Pane);
-        assert_eq!(app.pending_select, None);
-        assert_eq!(
-            effects,
-            vec![Effect::Send(Request::Subscribe { id: new.id })]
-        );
-    }
-
-    #[test]
-    fn pending_select_selects_and_focuses_the_new_agent_via_response() {
-        let p = project("p");
-        let a = agent(&p, "alpha", Status::Idle);
-        let (mut app, _) = loaded(vec![p.clone()], vec![a]);
-        app.pending_select = Some((p.id, "aaa".into()));
-        let new = agent(&p, "aaa", Status::Starting);
-        let effects = app.apply_response(Response::Agent(new.clone()));
-        assert_eq!(app.selected_agent().map(|x| x.id), Some(new.id));
-        assert_eq!(app.focus, Focus::Pane);
-        assert_eq!(app.pending_select, None);
-        assert_eq!(
-            effects,
-            vec![Effect::Send(Request::Subscribe { id: new.id })]
-        );
     }
 
     #[test]
@@ -1305,31 +1319,113 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn created_agent_gets_selected_and_focused() {
-        let (mut app, _, _) = two_agents();
+    fn submit_shell_agent(app: &mut App, name: &str) -> AgentInfo {
         let project = app.selected_project().map(|p| p.id).expect("project");
         let _ = app.on_key(key('n'));
-        type_text(&mut app, "zed");
+        type_text(app, name);
         let _ = app.on_key(code(KeyCode::Tab));
         let _ = app.on_key(code(KeyCode::Right));
         let _ = created(app.on_key(code(KeyCode::Enter)));
-        let info = AgentInfo {
+        AgentInfo {
             id: AgentId::random(),
             project,
-            name: "zed".into(),
+            name: name.into(),
             kind: AgentKind::Generic,
             command: vec!["/bin/sh".into()],
             cwd: "/p/p".into(),
             status: Status::Starting,
-        };
-        let effects = app.apply_server(ServerMessage::AgentUpdated(info.clone()));
+        }
+    }
+
+    #[test]
+    fn created_agent_is_selected_and_focused_by_the_create_response() {
+        let (mut app, a, _) = two_agents();
+        let info = submit_shell_agent(&mut app, "zed");
+        let _ = app.apply_server(ServerMessage::AgentUpdated(info.clone()));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        assert_eq!(app.focus, Focus::Agents);
+        let effects = app.apply_response(Response::Agent(info.clone()));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(info.id));
         assert_eq!(app.focus, Focus::Pane);
         assert_eq!(
             effects,
             vec![Effect::Send(Request::Subscribe { id: info.id })]
         );
+    }
+
+    #[test]
+    fn failed_create_never_selects_a_same_named_agent_later() {
+        let (mut app, a, b) = two_agents();
+        let _ = app.on_key(key('j'));
+        let _ = submit_shell_agent(&mut app, "alpha");
+        app.request_failed("an agent named alpha already exists");
+        let waiting = AgentInfo {
+            status: Status::NeedsInput,
+            ..a.clone()
+        };
+        let _ = app.apply_server(ServerMessage::AgentUpdated(waiting.clone()));
+        let _ = app.apply_response(Response::Agent(waiting));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(
+            app.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("an agent named alpha already exists")
+        );
+    }
+
+    #[test]
+    fn create_response_after_moving_does_not_steal_the_selection_or_focus() {
+        let (mut app, _, b) = two_agents();
+        let info = submit_shell_agent(&mut app, "zed");
+        let _ = app.on_key(key('j'));
+        let _ = app.apply_server(ServerMessage::AgentUpdated(info.clone()));
+        let _ = app.apply_response(Response::Agent(info));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.focus, Focus::Agents);
+    }
+
+    #[test]
+    fn removing_the_focused_agent_returns_focus_to_the_sidebar() {
+        let (mut app, a, b) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Pane);
+        let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        let effects = app.on_key(key('x'));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Send(Request::Input { .. }))),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_stopped_agent_stays_in_the_sidebar() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Exited(1));
+        let (mut app, _) = loaded(vec![p], vec![a]);
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(
+            app.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("alpha is not running — r restarts")
+        );
+    }
+
+    #[test]
+    fn focused_agent_exiting_returns_focus_to_the_sidebar() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        let exited = AgentInfo {
+            status: Status::Exited(0),
+            ..a.clone()
+        };
+        let effects = app.apply_server(ServerMessage::AgentUpdated(exited));
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(app.subscribed, Some(a.id));
+        assert!(effects.is_empty(), "{effects:?}");
     }
 
     #[test]

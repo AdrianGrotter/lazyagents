@@ -134,7 +134,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                 Some(Incoming::Server(message)) => app.apply_server(message),
                 Some(Incoming::Response(response)) => app.apply_response(response),
                 Some(Incoming::Failed(error)) => {
-                    app.fail(error);
+                    app.request_failed(error);
                     Vec::new()
                 }
                 Some(Incoming::Closed) | None => anyhow::bail!("the daemon stopped"),
