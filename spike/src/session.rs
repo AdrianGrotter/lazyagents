@@ -194,6 +194,12 @@ impl Session {
     }
 }
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.sender.send(Msg::Shutdown);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +310,41 @@ mod tests {
         s.resize(PaneSize::new(33, 7));
         s.wait_for_exit(Duration::from_secs(5)).expect("exits");
         assert!(s.screen_text().contains("7 33"), "{}", s.screen_text());
+    }
+
+    #[test]
+    fn dropping_session_stops_the_child() {
+        let pid_file =
+            std::env::temp_dir().join(format!("lazyagents-spike-pid-{}", std::process::id()));
+        let _ = std::fs::remove_file(&pid_file);
+        let script = format!("echo $$ > {}; exec sleep 30", pid_file.display());
+        let mut s = sh(&script);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid = loop {
+            s.pump();
+            let text = std::fs::read_to_string(&pid_file).unwrap_or_default();
+            if !text.trim().is_empty() {
+                break text.trim().to_string();
+            }
+            assert!(Instant::now() < deadline, "child never wrote its pid");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        drop(s);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut gone = false;
+        while Instant::now() < deadline {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .status()
+                .map(|st| st.success())
+                .unwrap_or(false);
+            if !alive {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(gone, "child {pid} still alive after drop");
     }
 }
