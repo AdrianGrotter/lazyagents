@@ -934,6 +934,64 @@ async fn exit_reaping_does_not_block_requests() {
     );
 }
 
+fn exits_leaving_a_stubborn_session(pidfile: &Path, marker: u32) -> Vec<String> {
+    sh(&format!(
+        "perl -e 'use POSIX; setsid(); $SIG{{TERM}}=q(IGNORE); $SIG{{HUP}}=q(IGNORE); exec q(sleep), {marker}' & echo $! > '{}'; sleep 2; exit 0",
+        pidfile.display()
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_during_an_exit_reap_leaves_nothing() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let agent = create_owned(
+        &mut conn,
+        &project,
+        "stubborn",
+        &exits_leaving_a_stubborn_session(&pidfile, 316),
+    )
+    .await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    conn.wait_status(agent.id, Status::Exited(0)).await;
+    assert_eq!(leaves.alive(), leaves.0, "descendant never ran");
+    conn.request(Request::Shutdown).await.expect("shutdown");
+    daemon.exits_within(WAIT).await;
+    assert_eq!(
+        gone_within(&leaves, Duration::from_millis(200)).await,
+        Vec::<u32>::new(),
+        "survived shutdown"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_during_an_exit_reap_covers_its_descendants() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let agent = create_owned(
+        &mut conn,
+        &project,
+        "stubborn",
+        &exits_leaving_a_stubborn_session(&pidfile, 317),
+    )
+    .await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    conn.wait_status(agent.id, Status::Exited(0)).await;
+    assert_eq!(leaves.alive(), leaves.0, "descendant never ran");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    assert_eq!(
+        gone_within(&leaves, Duration::from_millis(200)).await,
+        Vec::<u32>::new(),
+        "survived kill"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn kill_stops_a_detached_descendant_whose_parent_exited() {
     let daemon = TestDaemon::start().await;

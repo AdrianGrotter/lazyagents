@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -252,6 +254,15 @@ impl Agent {
 /// Tracked descendants computed off the event loop for one agent generation.
 type Snapshot = Vec<(AgentId, u64, Vec<Tracked>)>;
 
+/// A reap running on its own thread. Its processes stay visible here until the thread
+/// finishes, so a stop of the same agent, or shutdown, covers them too.
+struct Reaper {
+    agent: AgentId,
+    groups: Arc<[u32]>,
+    tracked: Arc<[Tracked]>,
+    thread: JoinHandle<()>,
+}
+
 struct Subscription {
     agent: AgentId,
     last: Option<Screen>,
@@ -272,6 +283,7 @@ struct Daemon {
     events: UnboundedSender<TerminalEvent>,
     last_snapshot: Instant,
     snapshot: Option<std::sync::mpsc::Receiver<Snapshot>>,
+    reapers: Vec<Reaper>,
 }
 
 impl Drop for Daemon {
@@ -302,6 +314,7 @@ impl Daemon {
             events,
             last_snapshot: Instant::now(),
             snapshot: None,
+            reapers: Vec::new(),
         }
     }
 
@@ -664,6 +677,10 @@ impl Daemon {
                 tracked.append(&mut agent.tracked);
             }
         }
+        for reaper in self.reapers.iter().filter(|r| ids.contains(&r.agent)) {
+            groups.extend(reaper.groups.iter().copied());
+            tracked.extend(reaper.tracked.iter().cloned());
+        }
         reap::terminate(&trees, &groups, &tracked, grace);
         for id in ids {
             if let Some(agent) = self.agents.get_mut(id) {
@@ -808,7 +825,7 @@ impl Daemon {
                 agent.dirty = true;
                 let tracked = std::mem::take(&mut agent.tracked);
                 agent.group = reap::group_exists(root).then_some(root);
-                reap_off_loop(vec![root], tracked);
+                self.reap_off_loop(event.agent, vec![root], tracked);
                 self.announce(event.agent);
             }
             Outcome::Nothing => {}
@@ -873,6 +890,7 @@ impl Daemon {
     /// Stores each agent's new tracked list; an agent that exited while the snapshot ran
     /// has its newly seen descendants stopped right away.
     fn apply_snapshot(&mut self, results: Snapshot) {
+        let mut orphaned = Vec::new();
         for (id, generation, tracked) in results {
             let Some(agent) = self.agents.get_mut(&id) else {
                 continue;
@@ -883,13 +901,43 @@ impl Daemon {
             if agent.status.is_running() {
                 agent.tracked = tracked;
             } else {
-                reap_off_loop(Vec::new(), tracked);
+                orphaned.push((id, tracked));
+            }
+        }
+        for (id, tracked) in orphaned {
+            self.reap_off_loop(id, Vec::new(), tracked);
+        }
+    }
+
+    /// Stops the process groups and tracked processes an exited agent left behind on a
+    /// separate thread, so waiting out their grace period never blocks the event loop.
+    fn reap_off_loop(&mut self, agent: AgentId, groups: Vec<u32>, tracked: Vec<Tracked>) {
+        if groups.is_empty() && tracked.is_empty() {
+            return;
+        }
+        let groups: Arc<[u32]> = groups.into();
+        let tracked: Arc<[Tracked]> = tracked.into();
+        let (job_groups, job_tracked) = (Arc::clone(&groups), Arc::clone(&tracked));
+        let spawned = std::thread::Builder::new()
+            .name("reap".into())
+            .spawn(move || reap::terminate(&[], &job_groups, &job_tracked, STOP_GRACE));
+        match spawned {
+            Ok(thread) => self.reapers.push(Reaper {
+                agent,
+                groups,
+                tracked,
+                thread,
+            }),
+            Err(e) => {
+                tracing::error!(error = %e, "spawning a reaper thread failed; reaping inline");
+                reap::terminate(&[], &groups, &tracked, STOP_GRACE);
             }
         }
     }
 
     fn tick(&mut self) {
         let now = Instant::now();
+        self.reapers.retain(|reaper| !reaper.thread.is_finished());
         self.refresh_tracked(now);
         let mut changed = Vec::new();
         for (id, agent) in &mut self.agents {
@@ -946,22 +994,6 @@ fn take_snapshot(requests: Vec<(AgentId, u64, u32, Vec<Tracked>)>) -> Snapshot {
         .into_iter()
         .map(|(id, generation, root, previous)| (id, generation, table.track(root, &previous)))
         .collect()
-}
-
-/// Stops the process groups and tracked processes an exited agent left behind on a
-/// separate thread, so waiting out their grace period never blocks the event loop.
-fn reap_off_loop(groups: Vec<u32>, tracked: Vec<Tracked>) {
-    if groups.is_empty() && tracked.is_empty() {
-        return;
-    }
-    let (job_groups, job_tracked) = (groups.clone(), tracked.clone());
-    let spawned = std::thread::Builder::new()
-        .name("reap".into())
-        .spawn(move || reap::terminate(&[], &job_groups, &job_tracked, STOP_GRACE));
-    if let Err(e) = spawned {
-        tracing::error!(error = %e, "spawning a reaper thread failed; reaping inline");
-        reap::terminate(&[], &groups, &tracked, STOP_GRACE);
-    }
 }
 
 #[cfg(test)]

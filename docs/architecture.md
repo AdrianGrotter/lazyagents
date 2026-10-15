@@ -72,7 +72,9 @@ The auto-started daemon runs in its own session without a controlling terminal, 
   left behind go too. Descendants that a snapshot already running at that moment
   reports are stopped as soon as it finishes. Both passes run on a separate thread, so
   their grace period never blocks requests; if the thread cannot be spawned, the pass
-  runs inline, as does a snapshot whose thread cannot be spawned.
+  runs inline, as does a snapshot whose thread cannot be spawned. Until such a pass
+  finishes, its processes stay listed with the agent, so a kill, remove, restart or
+  shutdown that arrives meanwhile stops them too before it answers or exits.
 - **The remembered group.** If members of an agent's process group outlive a stop or
   the agent's own exit, the daemon remembers the group and signals it again on the
   next kill, remove, restart or shutdown; it forgets the group once it is empty.
