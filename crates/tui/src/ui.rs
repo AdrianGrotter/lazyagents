@@ -9,11 +9,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{AgentView, App, Field, Focus, MIN_PANE, NewAgentForm, Popup, Preset};
+use crate::keymap::{Action, Keymap};
 
 pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const SIDEBAR_HINT: &str = "? help · q quit · enter open · n new · x stop · r restart · d remove · R rename · a add project · A all · g next !";
-const PANE_HINT: &str = "ctrl-] sidebar · alt-[ alt-] previous/next agent";
 const FORM_HINT: &str = "tab field · ←/→ preset · enter start · esc cancel";
 const CONFIRM_HINT: &str = "y/enter confirm · n/esc cancel";
 
@@ -33,14 +33,6 @@ const SIDEBAR_KEYS: [(&str, &str); 15] = [
     ("?", "help"),
     ("q, ctrl-c", "quit (agents keep running)"),
     ("Q", "stop the daemon and quit"),
-];
-const PANE_KEYS: [(&str, &str); 2] = [
-    ("ctrl-]", "back to the sidebar"),
-    ("alt-[ alt-]", "previous / next agent"),
-];
-const PANE_NOTE: [&str; 2] = [
-    "alt-[ may not work in legacy terminals;",
-    "use ctrl-] then j/k there",
 ];
 const TOO_SMALL: &str = "terminal too small";
 
@@ -165,7 +157,7 @@ pub fn draw(frame: &mut Frame, app: &App, areas: &Areas, now: Instant, tick: u64
     draw_pane(frame, app, areas);
     draw_status(frame, app, areas.status, now);
     if let Some(popup) = &app.popup {
-        draw_popup(frame, popup, frame.area());
+        draw_popup(frame, popup, &app.keymap, frame.area());
     }
 }
 
@@ -298,18 +290,28 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     }
 }
 
+fn pane_hint(keymap: &Keymap) -> String {
+    format!(
+        "{} sidebar · {} next agent · {} previous agent",
+        keymap.describe(Action::PaneLeave),
+        keymap.describe(Action::PaneNext),
+        keymap.describe(Action::PanePrevious),
+    )
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
-    let hint = if app.focus == Focus::Pane {
-        PANE_HINT
-    } else {
-        SIDEBAR_HINT
-    };
     let mut spans = Vec::new();
     if let Some(message) = app.current_message(now) {
         spans.push(Span::raw(message.to_string()).red());
         spans.push(Span::raw(" │ ").dark_gray());
     }
-    spans.push(Span::raw(hint).dark_gray());
+    spans.push(match app.focus {
+        Focus::Pane if app.prefix_pending => {
+            Span::raw(format!("{} …", app.keymap.prefix())).yellow()
+        }
+        Focus::Pane => Span::raw(pane_hint(&app.keymap)).dark_gray(),
+        Focus::Projects | Focus::Agents => Span::raw(SIDEBAR_HINT).dark_gray(),
+    });
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -339,10 +341,10 @@ fn draw_too_small(frame: &mut Frame) {
     );
 }
 
-fn draw_popup(frame: &mut Frame, popup: &Popup, screen: Rect) {
+fn draw_popup(frame: &mut Frame, popup: &Popup, keymap: &Keymap, screen: Rect) {
     let (title, width, height, lines) = match popup {
         Popup::Help => {
-            let lines = help_lines();
+            let lines = help_lines(keymap);
             let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
             let height = lines.len() as u16 + 2;
             (" Help ", width, height, lines)
@@ -375,22 +377,43 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, screen: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block(title, true)), area);
 }
 
-fn help_lines() -> Vec<Line<'static>> {
-    let section = |title: &'static str, keys: &[(&'static str, &'static str)]| {
+fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
+    let section = |title: &'static str, keys: Vec<(String, String)>| {
         let heading = Line::from(title).bold();
         let rows = keys
-            .iter()
+            .into_iter()
             .map(|(key, action)| Line::from(format!("  {key:<14}{action}")));
         std::iter::once(heading).chain(rows).collect::<Vec<_>>()
     };
-    let mut lines = section("Sidebar", &SIDEBAR_KEYS);
+    let sidebar = SIDEBAR_KEYS
+        .iter()
+        .map(|(key, action)| (key.to_string(), action.to_string()))
+        .collect();
+    let direct_leave = keymap
+        .direct_leave()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("/");
+    let pane = vec![
+        (
+            keymap.describe(Action::PaneLeave),
+            "back to the sidebar".to_string(),
+        ),
+        (direct_leave, "back to the sidebar".to_string()),
+        (keymap.describe(Action::PaneNext), "next agent".to_string()),
+        (
+            keymap.describe(Action::PanePrevious),
+            "previous agent".to_string(),
+        ),
+        (
+            keymap.describe(Action::PaneSendPrefix),
+            format!("send {} to the agent", keymap.prefix()),
+        ),
+    ];
+    let mut lines = section("Sidebar", sidebar);
     lines.push(Line::default());
-    lines.extend(section("Agent pane", &PANE_KEYS));
-    lines.extend(
-        PANE_NOTE
-            .iter()
-            .map(|note| Line::from(format!("  {note}")).dark_gray()),
-    );
+    lines.extend(section("Agent pane", pane));
     lines
 }
 
@@ -423,6 +446,7 @@ mod tests {
     use super::*;
     use crate::app::tests::{agent, loaded, project};
     use crate::app::{App, Focus, Popup};
+    use crate::keymap::Keymap;
     use protocol::{Cell, Color as ScreenColor, Screen, Status, Style as ScreenStyle};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -454,7 +478,7 @@ mod tests {
 
     #[test]
     fn empty_state_shows_hints() {
-        let app = App::new("/w".into(), "/bin/sh".into(), None);
+        let app = App::new("/w".into(), "/bin/sh".into(), None, Keymap::defaults());
         let (text, _) = render(&app);
         assert!(text.contains("press a to add a project"), "{text}");
         assert!(text.contains("press n to start an agent"), "{text}");
@@ -516,7 +540,7 @@ mod tests {
         app.focus = Focus::Pane;
         app.message = None;
         let (text, _) = render(&app);
-        assert!(text.contains("ctrl-] sidebar"), "{text}");
+        assert!(text.contains("ctrl-q q/esc sidebar"), "{text}");
     }
 
     #[test]
@@ -539,9 +563,21 @@ mod tests {
         let (text, _) = render(&app);
         let status = text.lines().last().expect("status line");
         assert!(
-            status.starts_with("boom happened │ ctrl-] sidebar"),
+            status.starts_with("boom happened │ ctrl-q q/esc sidebar"),
             "{status}"
         );
+    }
+
+    #[test]
+    fn status_bar_shows_the_pending_prefix() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.focus = Focus::Pane;
+        app.prefix_pending = true;
+        let (text, _) = render(&app);
+        let status = text.lines().last().expect("status line");
+        assert!(status.starts_with("ctrl-q …"), "{status}");
+        assert!(!status.contains("sidebar"), "{status}");
     }
 
     #[test]
@@ -572,7 +608,7 @@ mod tests {
 
     #[test]
     fn help_lists_every_binding_at_100x30() {
-        let mut app = App::new("/w".into(), "/bin/sh".into(), None);
+        let mut app = App::new("/w".into(), "/bin/sh".into(), None, Keymap::defaults());
         app.popup = Some(Popup::Help);
         let (text, _) = render(&app);
         for expected in [
@@ -591,10 +627,11 @@ mod tests {
             "?             help",
             "q, ctrl-c",
             "Q             stop the daemon and quit",
-            "ctrl-]        back to the sidebar",
-            "alt-[ alt-]   previous / next agent",
-            "legacy terminals",
-            "use ctrl-] then j/k",
+            "ctrl-q q/esc  back to the sidebar",
+            "ctrl-]/ctrl-5 back to the sidebar",
+            "ctrl-q j      next agent",
+            "ctrl-q k      previous agent",
+            "ctrl-q ctrl-q send ctrl-q to the agent",
         ] {
             assert!(text.contains(expected), "missing {expected:?}\n{text}");
         }

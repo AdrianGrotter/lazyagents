@@ -2086,6 +2086,7 @@ dependencies = [
  "daemon",
  "protocol",
  "ratatui",
+ "serde",
  "tempfile",
  "tokio",
 ]

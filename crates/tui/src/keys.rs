@@ -30,22 +30,6 @@ pub fn to_protocol(key: &KeyEvent) -> Option<Key> {
     Some(Key::new(code, mods))
 }
 
-pub fn is_detach(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
-}
-
-pub fn cycle_step(key: &KeyEvent) -> Option<i32> {
-    if !key.modifiers.contains(KeyModifiers::ALT) {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('[') => Some(-1),
-        KeyCode::Char(']') => Some(1),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,29 +68,6 @@ mod tests {
         );
         assert_eq!(
             to_protocol(&ev(KeyCode::CapsLock, KeyModifiers::NONE)),
-            None
-        );
-    }
-
-    #[test]
-    fn detach_matches_ctrl_bracket_and_legacy_ctrl_5() {
-        assert!(is_detach(&ev(KeyCode::Char(']'), KeyModifiers::CONTROL)));
-        assert!(is_detach(&ev(KeyCode::Char('5'), KeyModifiers::CONTROL)));
-        assert!(!is_detach(&ev(KeyCode::Char(']'), KeyModifiers::NONE)));
-    }
-
-    #[test]
-    fn alt_brackets_cycle() {
-        assert_eq!(
-            cycle_step(&ev(KeyCode::Char('['), KeyModifiers::ALT)),
-            Some(-1)
-        );
-        assert_eq!(
-            cycle_step(&ev(KeyCode::Char(']'), KeyModifiers::ALT)),
-            Some(1)
-        );
-        assert_eq!(
-            cycle_step(&ev(KeyCode::Char(']'), KeyModifiers::NONE)),
             None
         );
     }

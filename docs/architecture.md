@@ -164,10 +164,16 @@ daemon last told it.
 - **Focus rule**: keys reach an agent only while the pane has focus, and focus moves into
   the pane only on an explicit user action: `enter` on a running agent, or a successful
   create from the new agent form, provided no key was pressed and no popup opened
-  between submitting and the daemon's answer. A failed request clears the pending
+  between submitting and the daemon's answer. `ctrl-q j`/`k` switch agents from inside
+  the pane and keep focus there only when the new agent is running. A failed request clears the pending
   create. Focus returns to the sidebar when the selected agent stops running or when the
   selection changes for any reason other than a key (the agent was removed by another
   client, the agent list was replaced).
+- **Keys** (`keymap.rs`): a `Keymap` maps key events to `Action`s in three scopes: the
+  sidebar, the keys after the pane prefix (`ctrl-q`), and the direct leave keys
+  (`ctrl-]`). Key strings such as `ctrl-q`, `shift-tab` or `A` parse into `KeySpec`s, and
+  `describe` renders an action's keys for the help popup and the hints. The pane prefix
+  state lives in `App` and is cleared whenever focus leaves the pane.
 - **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane,
   the status line and popups from `App`; the pane copies the daemon's cell grid into the
   ratatui buffer. The status line shows a transient message in red, then `│` and the

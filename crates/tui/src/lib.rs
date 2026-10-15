@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod connection;
+pub mod keymap;
 pub mod keys;
 mod run;
 pub mod ui;

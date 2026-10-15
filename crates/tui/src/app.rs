@@ -7,10 +7,12 @@ use protocol::{
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::keymap::{Action, Keymap};
 use crate::keys;
 
 pub const MESSAGE_TTL: Duration = Duration::from_secs(5);
 pub const MIN_PANE: (u16, u16) = (20, 5);
+const PREFIX_HELP: &str = "ctrl-q: j/k switch · q sidebar · s scroll · ctrl-q send";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -119,14 +121,15 @@ pub struct App {
     interactions: u64,
     subscribed_running: bool,
     too_small: bool,
-    prefix_pending: bool,
+    pub prefix_pending: bool,
+    pub keymap: Keymap,
     cwd: PathBuf,
     home: Option<PathBuf>,
     shell: String,
 }
 
 impl App {
-    pub fn new(cwd: PathBuf, shell: String, home: Option<PathBuf>) -> Self {
+    pub fn new(cwd: PathBuf, shell: String, home: Option<PathBuf>, keymap: Keymap) -> Self {
         Self {
             projects: Vec::new(),
             agents: Vec::new(),
@@ -144,6 +147,7 @@ impl App {
             subscribed_running: false,
             too_small: false,
             prefix_pending: false,
+            keymap,
             cwd,
             home,
             shell,
@@ -284,7 +288,7 @@ impl App {
     ) -> Vec<Effect> {
         self.clamp();
         if self.focus == Focus::Pane && self.selected_agent().map(|a| a.id) != before {
-            self.focus = Focus::Agents;
+            self.leave_pane();
         }
         if let Some(id) = created {
             self.select_agent(id);
@@ -296,12 +300,15 @@ impl App {
     /// Below `MIN_PANE` the size is forgotten, nothing is resized and keys are ignored
     /// except the ones that quit or leave the pane.
     pub fn set_pane_size(&mut self, cols: u16, rows: u16) -> Vec<Effect> {
-        self.too_small = cols < MIN_PANE.0 || rows < MIN_PANE.1;
+        let was_too_small =
+            std::mem::replace(&mut self.too_small, cols < MIN_PANE.0 || rows < MIN_PANE.1);
         if self.too_small {
             self.pane_size = None;
             return Vec::new();
         }
-        self.prefix_pending = false;
+        if was_too_small {
+            self.prefix_pending = false;
+        }
         if self.pane_size == Some((cols, rows)) {
             return Vec::new();
         }
@@ -404,7 +411,7 @@ impl App {
         let wanted = self.selected_agent().map(|a| (a.id, a.status.is_running()));
         let running = wanted.is_some_and(|(_, running)| running);
         if !running && self.focus == Focus::Pane {
-            self.focus = Focus::Agents;
+            self.leave_pane();
         }
         if wanted.map(|(id, _)| id) == self.subscribed {
             let started = running && !self.subscribed_running;
@@ -481,20 +488,20 @@ impl App {
         }
     }
 
-    /// Nothing is visible, so only `q`/`ctrl-c` (quit from the sidebar) and `ctrl-q q`
-    /// (leave the pane) act; no key reaches an agent.
+    /// Nothing is visible, so only `q`/`ctrl-c` (quit from the sidebar) and the prefix
+    /// followed by a leave key (leave the pane) act; no key reaches an agent.
     fn on_too_small_key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if self.focus == Focus::Pane {
             if std::mem::take(&mut self.prefix_pending) {
-                if key.code == KeyCode::Char('q') && !ctrl {
-                    self.focus = Focus::Agents;
+                if self.keymap.after_prefix(&key) == Some(Action::PaneLeave) {
+                    self.leave_pane();
                 }
             } else {
-                self.prefix_pending = ctrl && key.code == KeyCode::Char('q');
+                self.prefix_pending = self.keymap.is_prefix(&key);
             }
             return Vec::new();
         }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') if !ctrl => vec![Effect::Quit],
             KeyCode::Char('c') if ctrl => vec![Effect::Quit],
@@ -559,18 +566,38 @@ impl App {
 
     fn on_pane_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         let Some(id) = self.selected_agent().map(|a| a.id) else {
-            self.focus = Focus::Agents;
+            self.leave_pane();
             return Vec::new();
         };
-        if keys::is_detach(&key) {
-            self.focus = Focus::Agents;
+        if std::mem::take(&mut self.prefix_pending) {
+            return match self.keymap.after_prefix(&key) {
+                Some(Action::PaneNext) => self.cycle_in_pane(1),
+                Some(Action::PanePrevious) => self.cycle_in_pane(-1),
+                Some(Action::PaneLeave) => {
+                    self.leave_pane();
+                    Vec::new()
+                }
+                Some(Action::PaneSendPrefix) => self.input(id, &self.keymap.prefix().event()),
+                Some(_) => Vec::new(),
+                None => {
+                    self.fail(PREFIX_HELP);
+                    Vec::new()
+                }
+            };
+        }
+        if self.keymap.is_prefix(&key) {
+            self.prefix_pending = true;
             return Vec::new();
         }
-        if let Some(step) = keys::cycle_step(&key) {
-            self.move_agent(step);
-            return self.sync();
+        if self.keymap.is_direct_leave(&key) {
+            self.leave_pane();
+            return Vec::new();
         }
-        match keys::to_protocol(&key) {
+        self.input(id, &key)
+    }
+
+    fn input(&self, id: AgentId, key: &KeyEvent) -> Vec<Effect> {
+        match keys::to_protocol(key) {
             Some(key) => vec![Effect::Send(Request::Input {
                 id,
                 event: InputEvent::Key(key),
@@ -579,34 +606,41 @@ impl App {
         }
     }
 
+    fn cycle_in_pane(&mut self, step: i32) -> Vec<Effect> {
+        self.move_agent(step);
+        self.sync()
+    }
+
+    fn leave_pane(&mut self) {
+        self.focus = Focus::Agents;
+        self.prefix_pending = false;
+    }
+
     fn on_sidebar_key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            return match key.code {
-                KeyCode::Char('c') => vec![Effect::Quit],
-                _ => Vec::new(),
-            };
-        }
-        match key.code {
-            KeyCode::Char('q') => return vec![Effect::Quit],
-            KeyCode::Char('Q') => {
+        let Some(action) = self.keymap.sidebar(&key) else {
+            return Vec::new();
+        };
+        match action {
+            Action::Quit => return vec![Effect::Quit],
+            Action::StopDaemon => {
                 self.popup = Some(Popup::Confirm {
                     prompt: "Stop the daemon and every agent?".into(),
                     action: Confirmed::StopDaemon,
                 });
             }
-            KeyCode::Char('?') => self.popup = Some(Popup::Help),
-            KeyCode::Char('j') | KeyCode::Down => self.step(1),
-            KeyCode::Char('k') | KeyCode::Up => self.step(-1),
-            KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab => self.focus = Focus::Projects,
-            KeyCode::Char('l') | KeyCode::Right => self.focus = Focus::Agents,
-            KeyCode::Tab => {
+            Action::Help => self.popup = Some(Popup::Help),
+            Action::Down => self.step(1),
+            Action::Up => self.step(-1),
+            Action::FocusProjects => self.focus = Focus::Projects,
+            Action::FocusAgents => self.focus = Focus::Agents,
+            Action::ToggleFocus => {
                 self.focus = if self.focus == Focus::Projects {
                     Focus::Agents
                 } else {
                     Focus::Projects
                 };
             }
-            KeyCode::Enter => match (self.focus, self.selected_agent()) {
+            Action::Open => match (self.focus, self.selected_agent()) {
                 (Focus::Projects, _) => self.focus = Focus::Agents,
                 (_, Some(agent)) if agent.status.is_running() => self.focus = Focus::Pane,
                 (_, Some(agent)) => {
@@ -615,22 +649,22 @@ impl App {
                 }
                 (_, None) => {}
             },
-            KeyCode::Char('n') => self.open_new_agent(),
-            KeyCode::Char('a') => {
+            Action::NewAgent => self.open_new_agent(),
+            Action::AddProject => {
                 self.popup = Some(Popup::AddProject {
                     input: self.cwd.display().to_string(),
                 });
             }
-            KeyCode::Char('x') => self.confirm_for_selected("Stop", Confirmed::Kill),
-            KeyCode::Char('d') => self.confirm_for_selected("Remove", Confirmed::Remove),
-            KeyCode::Char('r') => match self.selected_agent() {
+            Action::Stop => self.confirm_for_selected("Stop", Confirmed::Kill),
+            Action::Remove => self.confirm_for_selected("Remove", Confirmed::Remove),
+            Action::Restart => match self.selected_agent() {
                 Some(agent) if agent.status.is_running() => {
                     self.confirm_for_selected("Restart", Confirmed::Restart)
                 }
                 Some(agent) => return vec![self.restart(agent.id)],
                 None => {}
             },
-            KeyCode::Char('R') => {
+            Action::Rename => {
                 if let Some(agent) = self.selected_agent() {
                     self.popup = Some(Popup::Rename {
                         agent: agent.id,
@@ -638,8 +672,8 @@ impl App {
                     });
                 }
             }
-            KeyCode::Char('g') => self.next_attention(),
-            KeyCode::Char('A') => {
+            Action::NextAttention => self.next_attention(),
+            Action::ToggleAllAgents => {
                 let selected = self.selected_agent().map(|a| a.id);
                 self.view = match self.view {
                     AgentView::Project => AgentView::All,
@@ -650,7 +684,13 @@ impl App {
                     self.select_agent(id);
                 }
             }
-            _ => {}
+            Action::Diff
+            | Action::Scroll
+            | Action::PaneNext
+            | Action::PanePrevious
+            | Action::PaneLeave
+            | Action::PaneScroll
+            | Action::PaneSendPrefix => {}
         }
         self.sync()
     }
@@ -899,7 +939,12 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn loaded(projects: Vec<Project>, agents: Vec<AgentInfo>) -> (App, Vec<Effect>) {
-        let mut app = App::new("/work".into(), "/bin/sh".into(), Some("/home/u".into()));
+        let mut app = App::new(
+            "/work".into(),
+            "/bin/sh".into(),
+            Some("/home/u".into()),
+            Keymap::defaults(),
+        );
         let mut effects = app.apply_response(Response::Projects(projects));
         effects.extend(app.apply_response(Response::Agents(agents)));
         (app, effects)
@@ -1071,7 +1116,12 @@ pub(crate) mod tests {
     fn subscribing_sends_the_known_pane_size() {
         let p = project("p");
         let a = agent(&p, "alpha", Status::Idle);
-        let mut app = App::new("/work".into(), "/bin/sh".into(), Some("/home/u".into()));
+        let mut app = App::new(
+            "/work".into(),
+            "/bin/sh".into(),
+            Some("/home/u".into()),
+            Keymap::defaults(),
+        );
         let _ = app.set_pane_size(70, 15);
         let _ = app.apply_response(Response::Projects(vec![p]));
         let effects = app.apply_response(Response::Agents(vec![a.clone()]));
@@ -1099,7 +1149,12 @@ pub(crate) mod tests {
 
     #[test]
     fn messages_expire() {
-        let mut app = App::new("/work".into(), "/bin/sh".into(), Some("/home/u".into()));
+        let mut app = App::new(
+            "/work".into(),
+            "/bin/sh".into(),
+            Some("/home/u".into()),
+            Keymap::defaults(),
+        );
         app.fail("boom");
         let now = Instant::now();
         assert_eq!(app.current_message(now), Some("boom"));
@@ -1269,14 +1324,147 @@ pub(crate) mod tests {
         }
     }
 
+    fn char_input(id: AgentId, c: char, modifiers: protocol::Modifiers) -> Effect {
+        input_key(
+            id,
+            protocol::Key::new(protocol::KeyCode::Char(c), modifiers),
+        )
+    }
+
     #[test]
-    fn alt_brackets_switch_agents_inside_the_pane() {
-        let (mut app, _, b) = two_agents();
+    fn prefix_then_j_switches_and_stays_in_the_pane() {
+        let (mut app, a, b) = two_agents();
         let _ = app.on_key(code(KeyCode::Enter));
-        let effects = app.on_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT));
+        assert!(app.on_key(ctrl('q')).is_empty());
+        assert!(app.prefix_pending);
+        let effects = app.on_key(key('j'));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
         assert_eq!(app.focus, Focus::Pane);
+        assert!(!app.prefix_pending);
         assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: b.id })]);
+        assert!(app.on_key(ctrl('q')).is_empty());
+        let effects = app.on_key(key('k'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: a.id })]);
+    }
+
+    #[test]
+    fn prefix_survives_the_redraw_between_keys() {
+        let (mut app, _, b) = two_agents();
+        let _ = app.set_pane_size(80, 20);
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(ctrl('q'));
+        assert!(app.set_pane_size(80, 20).is_empty());
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.focus, Focus::Pane);
+    }
+
+    #[test]
+    fn prefix_onto_a_stopped_agent_returns_to_the_sidebar() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Stopped);
+        let (mut app, _) = loaded(vec![p], vec![a, b.clone()]);
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(ctrl('q'));
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.focus, Focus::Agents);
+        assert!(!app.prefix_pending);
+    }
+
+    #[test]
+    fn prefix_then_q_and_esc_leave() {
+        for leave in [key('q'), code(KeyCode::Esc)] {
+            let (mut app, _, _) = two_agents();
+            let _ = app.on_key(code(KeyCode::Enter));
+            let _ = app.on_key(ctrl('q'));
+            assert!(app.on_key(leave).is_empty(), "{leave:?}");
+            assert_eq!(app.focus, Focus::Agents, "{leave:?}");
+            assert!(!app.prefix_pending, "{leave:?}");
+        }
+    }
+
+    #[test]
+    fn prefix_twice_sends_one_ctrl_q() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert!(app.on_key(ctrl('q')).is_empty());
+        assert_eq!(
+            app.on_key(ctrl('q')),
+            vec![char_input(a.id, 'q', protocol::Modifiers::CTRL)]
+        );
+        assert_eq!(app.focus, Focus::Pane);
+        assert!(!app.prefix_pending);
+        assert_eq!(
+            app.on_key(key('j')),
+            vec![char_input(a.id, 'j', protocol::Modifiers::NONE)]
+        );
+    }
+
+    #[test]
+    fn prefix_then_unknown_sends_nothing() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(ctrl('q'));
+        assert!(app.on_key(key('x')).is_empty());
+        assert!(!app.prefix_pending);
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(
+            app.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("ctrl-q: j/k switch · q sidebar · s scroll · ctrl-q send")
+        );
+        assert_eq!(
+            app.on_key(key('x')),
+            vec![char_input(a.id, 'x', protocol::Modifiers::NONE)]
+        );
+    }
+
+    #[test]
+    fn prefix_clears_when_the_agent_exits() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(ctrl('q'));
+        let exited = AgentInfo {
+            status: Status::Exited(0),
+            ..a.clone()
+        };
+        let _ = app.apply_server(ServerMessage::AgentUpdated(exited));
+        assert_eq!(app.focus, Focus::Agents);
+        assert!(!app.prefix_pending);
+        let _ = app.apply_server(ServerMessage::AgentUpdated(a.clone()));
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(
+            app.on_key(key('j')),
+            vec![char_input(a.id, 'j', protocol::Modifiers::NONE)]
+        );
+    }
+
+    #[test]
+    fn ctrl_bracket_still_leaves() {
+        for leave in [ctrl(']'), ctrl('5')] {
+            let (mut app, _, _) = two_agents();
+            let _ = app.on_key(code(KeyCode::Enter));
+            assert!(app.on_key(leave).is_empty(), "{leave:?}");
+            assert_eq!(app.focus, Focus::Agents, "{leave:?}");
+        }
+    }
+
+    #[test]
+    fn alt_brackets_are_plain_input_by_default() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        for c in ['[', ']'] {
+            assert_eq!(
+                app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)),
+                vec![char_input(a.id, c, protocol::Modifiers::ALT)]
+            );
+            assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+            assert_eq!(app.focus, Focus::Pane);
+        }
     }
 
     #[test]
