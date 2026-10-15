@@ -70,6 +70,7 @@ const STOP_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const HOUSEKEEPING: Duration = Duration::from_secs(1);
 const SNAPSHOT: Duration = Duration::from_secs(1);
+const SNAPSHOT_WAIT: Duration = Duration::from_secs(2);
 const WHEEL_LINES: i32 = 3;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
@@ -746,8 +747,10 @@ impl Daemon {
     }
 
     /// Terminates the given agents' process trees, process groups and tracked
-    /// descendants, then drops their terminals.
+    /// descendants, including those a snapshot still running reports, then drops their
+    /// terminals.
     fn stop(&mut self, ids: &[AgentId], grace: Duration) {
+        self.finish_snapshot();
         let mut trees = Vec::new();
         let mut groups = Vec::new();
         let mut tracked = Vec::new();
@@ -778,8 +781,19 @@ impl Daemon {
     }
 
     fn stop_all(&mut self) {
-        let ids: Vec<AgentId> = self.agents.keys().copied().collect();
+        let mut ids: Vec<AgentId> = self.agents.keys().copied().collect();
+        ids.extend(self.reapers.iter().map(|r| r.agent));
         self.stop(&ids, SHUTDOWN_GRACE);
+    }
+
+    fn finish_snapshot(&mut self) {
+        let Some(pending) = self.snapshot.take() else {
+            return;
+        };
+        match pending.recv_timeout(SNAPSHOT_WAIT) {
+            Ok(results) => self.apply_snapshot(results),
+            Err(e) => tracing::warn!(error = %e, "stopping without the running snapshot"),
+        }
     }
 
     fn kill_agent(&mut self, id: AgentId) -> Result<AgentInfo, String> {
@@ -1037,21 +1051,16 @@ impl Daemon {
         }
     }
 
-    /// Stores each agent's new tracked list; an agent that exited while the snapshot ran
-    /// has its newly seen descendants stopped right away.
+    /// Stores each agent's new tracked list; descendants of an agent that exited, was
+    /// stopped or was removed while the snapshot ran are stopped right away.
     fn apply_snapshot(&mut self, results: Snapshot) {
         let mut orphaned = Vec::new();
         for (id, generation, tracked) in results {
-            let Some(agent) = self.agents.get_mut(&id) else {
-                continue;
-            };
-            if agent.generation != generation {
-                continue;
-            }
-            if agent.status.is_running() {
-                agent.tracked = tracked;
-            } else {
-                orphaned.push((id, tracked));
+            match self.agents.get_mut(&id) {
+                Some(agent) if agent.generation == generation && agent.status.is_running() => {
+                    agent.tracked = tracked;
+                }
+                _ => orphaned.push((id, tracked)),
             }
         }
         for (id, tracked) in orphaned {
@@ -1187,6 +1196,104 @@ mod tests {
             resumable: false,
             worktree: None,
         })
+    }
+
+    struct Stubborn(std::process::Child);
+
+    impl Stubborn {
+        fn spawn() -> (Self, Tracked) {
+            let child = std::process::Command::new("sh")
+                .args(["-c", "trap '' TERM HUP; exec sleep 300"])
+                .spawn()
+                .expect("spawn");
+            let pid = child.id();
+            let stubborn = Self(child);
+            let tracked = reap::snapshot(std::process::id())
+                .into_iter()
+                .find(|t| t.pid == pid)
+                .expect("ps lists the child");
+            (stubborn, tracked)
+        }
+
+        fn exited(&mut self) -> bool {
+            self.0.try_wait().expect("try_wait").is_some()
+        }
+
+        fn exits_within(&mut self, limit: Duration) -> bool {
+            let deadline = Instant::now() + limit;
+            while Instant::now() < deadline {
+                if self.exited() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            self.exited()
+        }
+    }
+
+    impl Drop for Stubborn {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn test_daemon(dir: &Path) -> Daemon {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        Daemon::new(
+            StatePaths::new(dir),
+            PathBuf::from("/usr/bin/true"),
+            StoredState::default(),
+            events,
+        )
+    }
+
+    fn add_agent(daemon: &mut Daemon, status: Status) -> AgentId {
+        let mut agent = claude_agent();
+        agent.status = status;
+        let id = agent.record.id;
+        daemon.agents.insert(id, agent);
+        id
+    }
+
+    #[test]
+    fn kill_waits_for_a_running_snapshot_and_stops_what_it_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut daemon = test_daemon(dir.path());
+        let id = add_agent(&mut daemon, Status::Exited(0));
+        let (mut child, tracked) = Stubborn::spawn();
+        let (tx, rx) = std::sync::mpsc::channel();
+        daemon.snapshot = Some(rx);
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = tx.send(vec![(id, 0, vec![tracked])]);
+        });
+        daemon.kill_agent(id).expect("kill");
+        late.join().expect("snapshot thread");
+        assert!(child.exited(), "kill answered while the child still ran");
+    }
+
+    #[test]
+    fn a_snapshot_for_a_removed_agent_is_reaped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut daemon = test_daemon(dir.path());
+        let (mut child, tracked) = Stubborn::spawn();
+        daemon.apply_snapshot(vec![(AgentId::random(), 0, vec![tracked])]);
+        assert!(child.exits_within(Duration::from_secs(3)), "child survived");
+    }
+
+    #[test]
+    fn a_snapshot_for_an_earlier_generation_is_reaped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut daemon = test_daemon(dir.path());
+        let id = add_agent(&mut daemon, Status::Idle);
+        if let Some(agent) = daemon.agents.get_mut(&id) {
+            agent.generation = 1;
+        }
+        let (mut child, tracked) = Stubborn::spawn();
+        daemon.apply_snapshot(vec![(id, 0, vec![tracked])]);
+        assert!(child.exits_within(Duration::from_secs(3)), "child survived");
+        assert!(daemon.agents[&id].tracked.is_empty());
     }
 
     #[test]

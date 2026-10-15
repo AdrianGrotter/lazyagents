@@ -66,16 +66,19 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   period until all of it is gone. Survivors, including descendants forked meanwhile,
   and the group get SIGKILL, followed by a short wait (500 ms). The grace period is 1 s
   for one agent and 2 s shared by all agents on shutdown, which stops every agent in
-  that single pass. The request is answered only once this is done, and a restart
-  spawns the new process only afterwards.
+  that single pass. A snapshot still running when the stop begins is waited for (up
+  to 2 s) first, so the descendants it reports are part of that pass. The request is
+  answered only once this is done, and a restart spawns the new process only
+  afterwards.
 - **An agent that exits on its own.** When the agent's process exits, the daemon runs
   the same pass over its process group and tracked descendants, so background jobs it
-  left behind go too. Descendants that a snapshot already running at that moment
-  reports are stopped as soon as it finishes. Both passes run on a separate thread, so
+  left behind go too. Descendants that a snapshot reports after its agent exited, was
+  stopped, restarted or removed are stopped as soon as it finishes. Both passes run on a separate thread, so
   their grace period never blocks requests; if the thread cannot be spawned, the pass
   runs inline, as does a snapshot whose thread cannot be spawned. Until such a pass
   finishes, its processes stay listed with the agent, so a kill, remove, restart or
-  shutdown that arrives meanwhile stops them too before it answers or exits.
+  shutdown that arrives meanwhile stops them too before it answers or exits; shutdown
+  also covers passes whose agent was already removed.
 - **The remembered group.** If members of an agent's process group outlive a stop or
   the agent's own exit, the daemon remembers the group and signals it again on the
   next kill, remove, restart or shutdown; it forgets the group once it is empty.
