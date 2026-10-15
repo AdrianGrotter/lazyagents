@@ -1444,6 +1444,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ctrl_shift_q_reaches_the_agent() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char('q'), ctrl_shift)),
+            vec![char_input(
+                a.id,
+                'q',
+                protocol::Modifiers {
+                    shift: true,
+                    alt: false,
+                    ctrl: true
+                }
+            )]
+        );
+        assert!(!app.prefix_pending);
+    }
+
+    #[test]
     fn ctrl_bracket_still_leaves() {
         for leave in [ctrl(']'), ctrl('5')] {
             let (mut app, _, _) = two_agents();

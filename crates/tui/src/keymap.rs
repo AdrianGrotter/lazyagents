@@ -98,14 +98,24 @@ impl KeySpec {
         })
     }
 
-    /// Terminals report a shifted character as the character itself, with or without
-    /// SHIFT, and shift-tab as BackTab, so SHIFT only counts for the other keys.
+    /// A bare character matches on the character alone, since terminals send typed text
+    /// with or without SHIFT. With ctrl or alt held, SHIFT counts, and an uppercase letter
+    /// stands for its lowercase letter plus SHIFT: `ctrl-Q` matches kitty-protocol
+    /// terminals' `q` with CONTROL|SHIFT, and `ctrl-q` does not. Legacy terminals send
+    /// ctrl-shift-q as plain ctrl-q, so there `ctrl-Q` never matches. shift-tab arrives as
+    /// BackTab, with or without SHIFT.
     pub fn matches(&self, key: &KeyEvent) -> bool {
-        let shift_counts = !matches!(self.code, KeyCode::Char(_) | KeyCode::BackTab);
-        self.code == key.code
-            && self.ctrl == key.modifiers.contains(KeyModifiers::CONTROL)
-            && self.alt == key.modifiers.contains(KeyModifiers::ALT)
-            && (!shift_counts || self.shift == key.modifiers.contains(KeyModifiers::SHIFT))
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if (self.ctrl, self.alt) != (ctrl, alt) {
+            return false;
+        }
+        match self.code {
+            KeyCode::Char(_) if !ctrl && !alt => self.code == key.code,
+            KeyCode::BackTab => key.code == KeyCode::BackTab,
+            _ => fold_case(self.code, self.shift) == fold_case(key.code, shift),
+        }
     }
 
     pub fn event(&self) -> KeyEvent {
@@ -121,6 +131,16 @@ impl KeySpec {
         }
         KeyEvent::new(self.code, modifiers)
     }
+}
+
+fn fold_case(code: KeyCode, shift: bool) -> (KeyCode, bool) {
+    if let KeyCode::Char(c) = code
+        && c.is_uppercase()
+        && let Some(KeyCode::Char(lower)) = single_char(&c.to_lowercase().to_string())
+    {
+        return (KeyCode::Char(lower), true);
+    }
+    (code, shift)
 }
 
 fn function_key(name: &str) -> Option<KeyCode> {
@@ -407,6 +427,41 @@ mod tests {
             KeyCode::Char('q'),
             KeyModifiers::CONTROL | KeyModifiers::ALT
         )));
+    }
+
+    #[test]
+    fn shift_counts_once_ctrl_or_alt_is_held() {
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+
+        let ctrl_q = KeySpec::parse("ctrl-q").expect("ctrl-q");
+        assert!(!ctrl_q.matches(&ev(KeyCode::Char('q'), ctrl_shift)));
+        assert!(!ctrl_q.matches(&ev(KeyCode::Char('Q'), KeyModifiers::CONTROL)));
+
+        let ctrl_big_q = KeySpec::parse("ctrl-Q").expect("ctrl-Q");
+        assert_eq!(KeySpec::parse("ctrl-shift-q"), Ok(ctrl_big_q));
+        assert!(ctrl_big_q.matches(&ev(KeyCode::Char('q'), ctrl_shift)));
+        assert!(ctrl_big_q.matches(&ev(KeyCode::Char('Q'), ctrl_shift)));
+        assert!(ctrl_big_q.matches(&ev(KeyCode::Char('Q'), KeyModifiers::CONTROL)));
+        assert!(!ctrl_big_q.matches(&ev(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+
+        let alt_big_a = KeySpec::parse("alt-A").expect("alt-A");
+        assert!(alt_big_a.matches(&ev(KeyCode::Char('A'), alt_shift)));
+        assert!(alt_big_a.matches(&ev(KeyCode::Char('a'), alt_shift)));
+        assert!(!alt_big_a.matches(&ev(KeyCode::Char('a'), KeyModifiers::ALT)));
+
+        let alt_a = KeySpec::parse("alt-a").expect("alt-a");
+        assert!(alt_a.matches(&ev(KeyCode::Char('a'), KeyModifiers::ALT)));
+        assert!(!alt_a.matches(&ev(KeyCode::Char('a'), alt_shift)));
+        assert!(!alt_a.matches(&ev(KeyCode::Char('A'), alt_shift)));
+
+        let ctrl_1 = KeySpec::parse("ctrl-1").expect("ctrl-1");
+        assert!(ctrl_1.matches(&ev(KeyCode::Char('1'), KeyModifiers::CONTROL)));
+        assert!(!ctrl_1.matches(&ev(KeyCode::Char('1'), ctrl_shift)));
+
+        for spec in [ctrl_q, ctrl_big_q, alt_big_a, alt_a, ctrl_1] {
+            assert!(spec.matches(&spec.event()), "{spec}");
+        }
     }
 
     #[test]
