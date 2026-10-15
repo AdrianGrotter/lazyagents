@@ -86,6 +86,59 @@ async fn version_mismatch_is_reported() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sent_requests_get_their_own_replies_in_any_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path());
+    let listener = UnixListener::bind(paths.socket()).expect("bind");
+    let fake = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        write_message(
+            &mut stream,
+            &ServerMessage::Welcome {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_version: "test".into(),
+            },
+        )
+        .await
+        .expect("welcome");
+        let _: Option<ClientMessage> = read_message(&mut stream).await.expect("hello");
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            match read_message(&mut stream).await.expect("request") {
+                Some(ClientMessage::Request { id, request }) => ids.push((id, request)),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        for (id, request) in ids.into_iter().rev() {
+            let result = match request {
+                Request::GitDiff { .. } => Ok(Response::Diff("+slow".into())),
+                _ => Err("fast".into()),
+            };
+            write_message(&mut stream, &ServerMessage::Response { id, result })
+                .await
+                .expect("reply");
+        }
+        let _: Option<ClientMessage> = read_message(&mut stream).await.ok().flatten();
+    });
+    let mut client = Client::connect(&paths).await.expect("connect");
+    let id = protocol::AgentId::random();
+    let slow = client.send(Request::GitDiff { id }).await.expect("send");
+    let fast = client.send(Request::ListAgents).await.expect("send");
+    let fast = tokio::time::timeout(Duration::from_secs(2), fast.wait())
+        .await
+        .expect("fast reply in time")
+        .expect_err("fast fails");
+    assert_eq!(fast.to_string(), "fast");
+    let slow = tokio::time::timeout(Duration::from_secs(2), slow.wait())
+        .await
+        .expect("slow reply in time")
+        .expect("slow succeeds");
+    assert_eq!(slow, Response::Diff("+slow".into()));
+    drop(client);
+    fake.await.expect("fake server");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn connect_without_daemon_fails_fast() {
     let dir = tempfile::tempdir().expect("tempdir");
     assert!(Client::connect(&StatePaths::new(dir.path())).await.is_err());

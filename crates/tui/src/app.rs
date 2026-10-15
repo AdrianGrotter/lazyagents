@@ -1,9 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use protocol::{
-    AgentId, AgentInfo, AgentKind, CreateAgent, InputEvent, Project, ProjectId, Request, Response,
-    Screen, ServerMessage, Status,
+    AgentId, AgentInfo, AgentKind, CreateAgent, GitStat, InputEvent, Project, ProjectId, Request,
+    Response, Screen, ServerMessage, Status, WorktreeRequest,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -13,12 +14,17 @@ use crate::keys;
 
 pub const MESSAGE_TTL: Duration = Duration::from_secs(5);
 pub const MIN_PANE: (u16, u16) = (20, 5);
+pub const STAT_INTERVAL: Duration = Duration::from_secs(5);
+pub const DIFF_LINE_CAP: usize = 20_000;
+const DIRTY_WORKTREE: &str = "worktree has uncommitted changes";
+const DIRTY_FILES_SHOWN: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Projects,
     Agents,
     Pane,
+    Diff,
 }
 
 /// `Configured(i)` is the i-th preset from the config file; they follow the built-ins.
@@ -69,6 +75,8 @@ pub enum Field {
     Name,
     Preset,
     Command,
+    Worktree,
+    Base,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +84,29 @@ pub struct NewAgentForm {
     pub name: String,
     pub preset: Preset,
     pub command: String,
+    pub worktree: bool,
+    pub base: String,
     pub field: Field,
+}
+
+impl NewAgentForm {
+    pub fn fields(&self) -> Vec<Field> {
+        let mut fields = vec![Field::Name, Field::Preset];
+        if self.preset == Preset::Custom {
+            fields.push(Field::Command);
+        }
+        fields.push(Field::Worktree);
+        if self.worktree {
+            fields.push(Field::Base);
+        }
+        fields
+    }
+
+    fn step_field(&mut self, step: i32) {
+        let fields = self.fields();
+        let index = fields.iter().position(|f| *f == self.field).unwrap_or(0);
+        self.field = fields[wrap(index, step, fields.len())];
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +114,27 @@ pub enum Confirmed {
     Kill(AgentId),
     Restart(AgentId),
     Remove(AgentId),
+    RemoveWorktree(AgentId),
+    ForceRemove(AgentId),
     StopDaemon,
+}
+
+impl Confirmed {
+    /// Prompts for these actions name their own keys.
+    pub fn names_its_keys(&self) -> bool {
+        matches!(
+            self,
+            Confirmed::RemoveWorktree(_) | Confirmed::ForceRemove(_)
+        )
+    }
+}
+
+/// `lines` is `None` until the daemon's diff arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffView {
+    pub agent: AgentId,
+    pub lines: Option<Vec<String>>,
+    pub scroll: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +177,11 @@ pub struct App {
     pub screen: Screen,
     pub pane_size: Option<(u16, u16)>,
     pub message: Option<(String, Instant)>,
+    pub git_stats: HashMap<AgentId, GitStat>,
+    pub diff: Option<DiffView>,
+    stats_in_flight: HashSet<AgentId>,
+    stat_polled: Option<(AgentId, Instant)>,
+    pending_remove: Option<AgentId>,
     pending_select: Option<PendingCreate>,
     interactions: u64,
     subscribed_running: bool,
@@ -156,6 +211,11 @@ impl App {
             screen: Screen::blank(0, 0),
             pane_size: None,
             message,
+            git_stats: HashMap::new(),
+            diff: None,
+            stats_in_flight: HashSet::new(),
+            stat_polled: None,
+            pending_remove: None,
             pending_select: None,
             interactions: 0,
             subscribed_running: false,
@@ -227,8 +287,87 @@ impl App {
     }
 
     pub fn request_failed(&mut self, message: impl Into<String>) {
+        let message = message.into();
         self.pending_select = None;
+        if let Some(id) = self.pending_remove.take()
+            && let Some(files) = message.strip_prefix(DIRTY_WORKTREE)
+            && self.popup.is_none()
+            && self.agents.iter().any(|a| a.id == id)
+        {
+            self.popup = Some(Popup::Confirm {
+                prompt: force_prompt(files),
+                action: Confirmed::ForceRemove(id),
+            });
+            return;
+        }
         self.fail(message);
+    }
+
+    /// Asks for the selected agent's git stat when the selection changed, and then every
+    /// `STAT_INTERVAL`, with at most one request per agent in flight.
+    pub fn on_tick(&mut self, now: Instant) -> Vec<Effect> {
+        let Some(id) = self.selected_agent().map(|a| a.id) else {
+            self.stat_polled = None;
+            return Vec::new();
+        };
+        let due = match self.stat_polled {
+            Some((polled, at)) if polled == id => {
+                now.saturating_duration_since(at) >= STAT_INTERVAL
+            }
+            _ => true,
+        };
+        if !due {
+            return Vec::new();
+        }
+        self.stat_polled = Some((id, now));
+        if !self.stats_in_flight.insert(id) {
+            return Vec::new();
+        }
+        vec![Effect::Send(Request::GitStat { id })]
+    }
+
+    /// An error means no stat to show, such as a cwd outside any git repository.
+    pub fn apply_git_stat(&mut self, id: AgentId, result: Result<GitStat, String>) {
+        self.stats_in_flight.remove(&id);
+        if !self.agents.iter().any(|a| a.id == id) {
+            return;
+        }
+        match result {
+            Ok(stat) => {
+                self.git_stats.insert(id, stat);
+            }
+            Err(_) => {
+                self.git_stats.remove(&id);
+            }
+        }
+    }
+
+    pub fn apply_diff(&mut self, id: AgentId, result: Result<String, String>) {
+        let Some(view) = self
+            .diff
+            .as_mut()
+            .filter(|view| view.agent == id && view.lines.is_none())
+        else {
+            return;
+        };
+        match result {
+            Ok(text) => view.lines = Some(diff_lines(&text)),
+            Err(message) => {
+                self.close_diff();
+                self.fail(message);
+            }
+        }
+    }
+
+    fn close_diff(&mut self) {
+        self.diff = None;
+        self.focus = Focus::Agents;
+    }
+
+    fn forget_gone_agents(&mut self) {
+        let exists = |id: &AgentId| self.agents.iter().any(|a| a.id == *id);
+        self.git_stats.retain(|id, _| exists(id));
+        self.stats_in_flight.retain(exists);
     }
 
     pub fn apply_server(&mut self, message: ServerMessage) -> Vec<Effect> {
@@ -258,6 +397,7 @@ impl App {
 
     pub fn apply_response(&mut self, response: Response) -> Vec<Effect> {
         let before = self.selected_agent().map(|a| a.id);
+        self.pending_remove = None;
         let mut created = None;
         match response {
             Response::Projects(projects) => {
@@ -303,8 +443,13 @@ impl App {
         created: Option<AgentId>,
     ) -> Vec<Effect> {
         self.clamp();
-        if self.focus == Focus::Pane && self.selected_agent().map(|a| a.id) != before {
+        self.forget_gone_agents();
+        let selected = self.selected_agent().map(|a| a.id);
+        if self.focus == Focus::Pane && selected != before {
             self.leave_pane();
+        }
+        if self.focus == Focus::Diff && selected != self.diff.as_ref().map(|d| d.agent) {
+            self.close_diff();
         }
         if let Some(id) = created {
             self.select_agent(id);
@@ -500,13 +645,68 @@ impl App {
         }
         match self.focus {
             Focus::Pane => self.on_pane_key(key),
+            Focus::Diff => {
+                self.on_diff_key(key);
+                Vec::new()
+            }
             Focus::Projects | Focus::Agents => self.on_sidebar_key(key),
         }
+    }
+
+    fn closes_diff(&self, key: &KeyEvent) -> bool {
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let fixed = matches!(key.code, KeyCode::Char('q' | 'D') | KeyCode::Esc);
+        (plain && fixed) || self.keymap.sidebar(key) == Some(Action::Diff)
+    }
+
+    fn diff_page(&self) -> usize {
+        usize::from(self.pane_size.map_or(DEFAULT_SIZE.1, |(_, rows)| rows)).max(1)
+    }
+
+    fn on_diff_key(&mut self, key: KeyEvent) {
+        if self.closes_diff(&key) {
+            self.close_diff();
+            return;
+        }
+        let page = self.diff_page() as i64;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let step = match (key.code, ctrl) {
+            (KeyCode::Char('j') | KeyCode::Down, false) => 1,
+            (KeyCode::Char('k') | KeyCode::Up, false) => -1,
+            (KeyCode::Char('d'), true) => page / 2,
+            (KeyCode::Char('u'), true) => -page / 2,
+            (KeyCode::PageDown, _) => page,
+            (KeyCode::PageUp, _) => -page,
+            (KeyCode::Char('g'), false) => i64::MIN / 2,
+            (KeyCode::Char('G'), false) => i64::MAX / 2,
+            _ => return,
+        };
+        self.scroll_diff(step);
+    }
+
+    fn scroll_diff(&mut self, step: i64) {
+        let page = self.diff_page();
+        let Some(view) = self.diff.as_mut() else {
+            return;
+        };
+        let last = view
+            .lines
+            .as_ref()
+            .map_or(0, |lines| lines.len().saturating_sub(page)) as i64;
+        view.scroll = (view.scroll as i64).saturating_add(step).clamp(0, last) as usize;
     }
 
     /// Nothing is visible, so only the quit keys (from the sidebar) and the prefix
     /// followed by a leave key (leave the pane) act; no key reaches an agent.
     fn on_too_small_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if self.focus == Focus::Diff {
+            if self.closes_diff(&key) {
+                self.close_diff();
+            }
+            return Vec::new();
+        }
         if self.focus == Focus::Pane {
             if std::mem::take(&mut self.prefix_pending) {
                 if self.keymap.after_prefix(&key) == Some(Action::PaneLeave) {
@@ -551,7 +751,8 @@ impl App {
             Some(Popup::NewAgent(form)) => match form.field {
                 Field::Name => form.name.push_str(&line),
                 Field::Command => form.command.push_str(&line),
-                Field::Preset => {}
+                Field::Base => form.base.push_str(&line),
+                Field::Preset | Field::Worktree => {}
             },
             Some(Popup::Help | Popup::Confirm { .. }) | None => {}
         }
@@ -560,6 +761,14 @@ impl App {
 
     pub fn on_wheel(&mut self, up: bool, col: u16, row: u16) -> Vec<Effect> {
         if self.popup.is_some() {
+            return Vec::new();
+        }
+        if self.focus == Focus::Diff {
+            self.scroll_diff(if up {
+                -i64::from(WHEEL_LINES)
+            } else {
+                i64::from(WHEEL_LINES)
+            });
             return Vec::new();
         }
         let Some(agent) = self.selected_agent() else {
@@ -675,7 +884,29 @@ impl App {
                 });
             }
             Action::Stop => self.confirm_for_selected("Stop", Confirmed::Kill),
-            Action::Remove => self.confirm_for_selected("Remove", Confirmed::Remove),
+            Action::Remove => match self.selected_agent() {
+                Some(agent) if agent.worktree.is_some() => {
+                    self.popup = Some(Popup::Confirm {
+                        prompt: format!(
+                            "Remove {}? y: agent + worktree · k: keep worktree · n: cancel",
+                            agent.name
+                        ),
+                        action: Confirmed::RemoveWorktree(agent.id),
+                    });
+                }
+                _ => self.confirm_for_selected("Remove", Confirmed::Remove),
+            },
+            Action::Diff => {
+                if let Some(id) = self.selected_agent().map(|a| a.id) {
+                    self.diff = Some(DiffView {
+                        agent: id,
+                        lines: None,
+                        scroll: 0,
+                    });
+                    self.focus = Focus::Diff;
+                    return vec![Effect::Send(Request::GitDiff { id })];
+                }
+            }
             Action::Restart => match self.selected_agent() {
                 Some(agent) if agent.status.is_running() => {
                     self.confirm_for_selected("Restart", Confirmed::Restart)
@@ -703,8 +934,7 @@ impl App {
                     self.select_agent(id);
                 }
             }
-            Action::Diff
-            | Action::Scroll
+            Action::Scroll
             | Action::PaneNext
             | Action::PanePrevious
             | Action::PaneLeave
@@ -735,7 +965,7 @@ impl App {
                     self.highlight_project(wrap(self.project_index, step, count));
                 }
             }
-            Focus::Agents | Focus::Pane => self.move_agent(step),
+            Focus::Agents | Focus::Pane | Focus::Diff => self.move_agent(step),
         }
     }
 
@@ -763,6 +993,8 @@ impl App {
             name: String::new(),
             preset: Preset::Claude,
             command: String::new(),
+            worktree: false,
+            base: String::new(),
             field: Field::Name,
         }));
     }
@@ -791,19 +1023,9 @@ impl App {
         };
         match popup {
             Popup::Help => Vec::new(),
-            Popup::Confirm { prompt, action } => match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => match action {
-                    Confirmed::Kill(id) => vec![Effect::Send(Request::KillAgent { id })],
-                    Confirmed::Restart(id) => vec![self.restart(id)],
-                    Confirmed::Remove(id) => vec![Effect::Send(Request::RemoveAgent {
-                        id,
-                        remove_worktree: false,
-                        force: false,
-                    })],
-                    Confirmed::StopDaemon => vec![Effect::StopDaemonAndQuit],
-                },
-                KeyCode::Char('n') | KeyCode::Esc => Vec::new(),
-                _ => {
+            Popup::Confirm { prompt, action } => match self.on_confirm_key(&action, &key) {
+                Some(effects) => effects,
+                None => {
                     self.popup = Some(Popup::Confirm { prompt, action });
                     Vec::new()
                 }
@@ -834,6 +1056,42 @@ impl App {
         }
     }
 
+    /// `None` keeps the prompt open.
+    fn on_confirm_key(&mut self, action: &Confirmed, key: &KeyEvent) -> Option<Vec<Effect>> {
+        let effects = match (action, key.code) {
+            (_, KeyCode::Char('n') | KeyCode::Esc) => Vec::new(),
+            (Confirmed::RemoveWorktree(id), KeyCode::Char('y')) => self.remove(*id, true, false),
+            (Confirmed::RemoveWorktree(id), KeyCode::Char('k')) => self.remove(*id, false, false),
+            (Confirmed::ForceRemove(id), KeyCode::Char('y')) => self.remove(*id, true, true),
+            (Confirmed::RemoveWorktree(_) | Confirmed::ForceRemove(_), _) => return None,
+            (Confirmed::Kill(id), KeyCode::Char('y') | KeyCode::Enter) => {
+                vec![Effect::Send(Request::KillAgent { id: *id })]
+            }
+            (Confirmed::Restart(id), KeyCode::Char('y') | KeyCode::Enter) => {
+                vec![self.restart(*id)]
+            }
+            (Confirmed::Remove(id), KeyCode::Char('y') | KeyCode::Enter) => {
+                self.remove(*id, false, false)
+            }
+            (Confirmed::StopDaemon, KeyCode::Char('y') | KeyCode::Enter) => {
+                vec![Effect::StopDaemonAndQuit]
+            }
+            _ => return None,
+        };
+        Some(effects)
+    }
+
+    /// Remembers a remove that the daemon may refuse for a dirty worktree, so the refusal
+    /// can offer to force it.
+    fn remove(&mut self, id: AgentId, remove_worktree: bool, force: bool) -> Vec<Effect> {
+        self.pending_remove = (remove_worktree && !force).then_some(id);
+        vec![Effect::Send(Request::RemoveAgent {
+            id,
+            remove_worktree,
+            force,
+        })]
+    }
+
     fn project_path(&self, input: &str) -> PathBuf {
         let home = self.home.as_ref();
         match (input, input.strip_prefix("~/"), home) {
@@ -847,19 +1105,25 @@ impl App {
         match key.code {
             KeyCode::Esc => return Vec::new(),
             KeyCode::Enter => return self.submit_form(form),
-            KeyCode::Tab | KeyCode::Down => form.field = next_field(form.field, form.preset),
-            KeyCode::BackTab | KeyCode::Up => form.field = previous_field(form.field, form.preset),
+            KeyCode::Tab | KeyCode::Down => form.step_field(1),
+            KeyCode::BackTab | KeyCode::Up => form.step_field(-1),
             KeyCode::Left if form.field == Field::Preset => {
                 form.preset = form.preset.previous(self.presets.len())
             }
             KeyCode::Right | KeyCode::Char(' ') if form.field == Field::Preset => {
                 form.preset = form.preset.next(self.presets.len())
             }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if form.field == Field::Worktree =>
+            {
+                form.worktree = !form.worktree
+            }
             _ => {
                 let target = match form.field {
                     Field::Name => Some(&mut form.name),
                     Field::Command => Some(&mut form.command),
-                    Field::Preset => None,
+                    Field::Base => Some(&mut form.base),
+                    Field::Preset | Field::Worktree => None,
                 };
                 if let Some(target) = target {
                     edit(target, &key);
@@ -897,6 +1161,12 @@ impl App {
                 None => return Vec::new(),
             },
         };
+        let worktree = form.worktree.then(|| {
+            let base = form.base.trim();
+            WorktreeRequest {
+                base: (!base.is_empty()).then(|| base.to_string()),
+            }
+        });
         let (cols, rows) = self.pane_size.unwrap_or(DEFAULT_SIZE);
         self.pending_select = Some(PendingCreate {
             project,
@@ -910,7 +1180,7 @@ impl App {
             command,
             cols,
             rows,
-            worktree: None,
+            worktree,
         }))]
     }
 }
@@ -936,21 +1206,47 @@ fn wrap(index: usize, step: i32, count: usize) -> usize {
     (index as i64 + i64::from(step)).rem_euclid(count as i64) as usize
 }
 
-fn next_field(field: Field, preset: Preset) -> Field {
-    match (field, preset) {
-        (Field::Name, _) => Field::Preset,
-        (Field::Preset, Preset::Custom) => Field::Command,
-        (Field::Preset, _) | (Field::Command, _) => Field::Name,
+/// `files` is the daemon's refusal after `DIRTY_WORKTREE`: a colon, then one path per line.
+fn force_prompt(files: &str) -> String {
+    let files: Vec<&str> = files
+        .strip_prefix(':')
+        .unwrap_or(files)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let mut lines = vec!["Worktree has uncommitted changes:".to_string()];
+    lines.extend(
+        files
+            .iter()
+            .take(DIRTY_FILES_SHOWN)
+            .map(ToString::to_string),
+    );
+    if files.len() > DIRTY_FILES_SHOWN {
+        lines.push(format!("… and {} more", files.len() - DIRTY_FILES_SHOWN));
     }
+    lines.push("Remove anyway? y/n".to_string());
+    lines.join("\n")
 }
 
-fn previous_field(field: Field, preset: Preset) -> Field {
-    match (field, preset) {
-        (Field::Name, Preset::Custom) => Field::Command,
-        (Field::Name, _) => Field::Preset,
-        (Field::Preset, _) => Field::Name,
-        (Field::Command, _) => Field::Preset,
+/// Splits a diff into display lines, at most `DIFF_LINE_CAP` plus a truncation notice.
+/// Tabs become spaces and other control characters are dropped, so file contents
+/// cannot move the cursor or restyle the terminal.
+fn diff_lines(text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .lines()
+        .take(DIFF_LINE_CAP)
+        .map(|line| {
+            line.replace('\t', "    ")
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect()
+        })
+        .collect();
+    let rest = text.lines().skip(DIFF_LINE_CAP).count();
+    if rest > 0 {
+        lines.push(format!("… diff truncated ({rest} more lines)"));
     }
+    lines
 }
 
 #[cfg(test)]
@@ -2290,5 +2586,383 @@ pub(crate) mod tests {
         let mut release = key('q');
         release.kind = KeyEventKind::Release;
         assert!(app.on_key(release).is_empty());
+    }
+
+    pub(crate) fn worktree_agent(project: &Project, name: &str) -> AgentInfo {
+        AgentInfo {
+            cwd: format!("/s/worktrees/{name}").into(),
+            worktree: Some(protocol::WorktreeInfo {
+                path: format!("/s/worktrees/{name}").into(),
+                branch: format!("lazyagents/{name}"),
+                base: "main".into(),
+            }),
+            ..agent(project, name, Status::Idle)
+        }
+    }
+
+    fn form(app: &App) -> NewAgentForm {
+        match &app.popup {
+            Some(Popup::NewAgent(form)) => form.clone(),
+            other => panic!("no form: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn form_worktree_toggle_and_base_field() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        let mut order = vec![form(&app).field];
+        for _ in 0..3 {
+            let _ = app.on_key(code(KeyCode::Tab));
+            order.push(form(&app).field);
+        }
+        assert_eq!(
+            order,
+            [Field::Name, Field::Preset, Field::Worktree, Field::Name]
+        );
+        let _ = app.on_key(code(KeyCode::BackTab));
+        assert_eq!(form(&app).field, Field::Worktree);
+        for (event, on) in [
+            (key(' '), true),
+            (code(KeyCode::Left), false),
+            (code(KeyCode::Right), true),
+        ] {
+            let _ = app.on_key(event);
+            assert_eq!(form(&app).worktree, on, "{event:?}");
+        }
+        let _ = app.on_key(key('j'));
+        assert!(form(&app).worktree);
+        let _ = app.on_key(code(KeyCode::Tab));
+        assert_eq!(form(&app).field, Field::Base);
+        type_text(&mut app, "dev");
+        let _ = app.on_paste("-x\nignored".into());
+        assert_eq!(form(&app).base, "dev-x");
+        let _ = app.on_key(code(KeyCode::Tab));
+        assert_eq!(form(&app).field, Field::Name);
+        let _ = app.on_key(code(KeyCode::BackTab));
+        assert_eq!(form(&app).field, Field::Base);
+
+        let _ = app.on_key(code(KeyCode::Up));
+        let _ = app.on_key(code(KeyCode::Up));
+        assert_eq!(form(&app).field, Field::Preset);
+        let _ = app.on_key(code(KeyCode::Left));
+        assert_eq!(form(&app).preset, Preset::Custom);
+        let mut order = vec![form(&app).field];
+        for _ in 0..5 {
+            let _ = app.on_key(code(KeyCode::Down));
+            order.push(form(&app).field);
+        }
+        assert_eq!(
+            order,
+            [
+                Field::Preset,
+                Field::Command,
+                Field::Worktree,
+                Field::Base,
+                Field::Name,
+                Field::Preset
+            ]
+        );
+    }
+
+    #[test]
+    fn form_sends_worktree_request_when_on() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "wt");
+        let _ = app.on_key(code(KeyCode::Tab));
+        let _ = app.on_key(code(KeyCode::Right));
+        let _ = app.on_key(code(KeyCode::Tab));
+        let _ = app.on_key(key(' '));
+        let c = created(app.on_key(code(KeyCode::Enter)));
+        assert_eq!(
+            (c.kind, c.worktree),
+            (
+                AgentKind::Generic,
+                Some(protocol::WorktreeRequest { base: None })
+            )
+        );
+
+        for (typed, base) in [(" dev ", Some("dev".to_string())), ("  ", None)] {
+            let (mut app, _, _) = two_agents();
+            let _ = app.on_key(key('n'));
+            type_text(&mut app, "wt");
+            let _ = app.on_key(code(KeyCode::Up));
+            let _ = app.on_key(key(' '));
+            let _ = app.on_key(code(KeyCode::Down));
+            type_text(&mut app, typed);
+            let c = created(app.on_key(code(KeyCode::Enter)));
+            assert_eq!(c.worktree, Some(protocol::WorktreeRequest { base }));
+        }
+    }
+
+    #[test]
+    fn form_worktree_is_off_by_default() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        assert!(!form(&app).worktree);
+        assert_eq!(form(&app).base, "");
+        type_text(&mut app, "api");
+        let c = created(app.on_key(code(KeyCode::Enter)));
+        assert_eq!(c.worktree, None);
+    }
+
+    fn stat(insertions: u32) -> GitStat {
+        GitStat {
+            insertions,
+            deletions: 1,
+            files: 2,
+            uncommitted: 3,
+        }
+    }
+
+    #[test]
+    fn stat_requested_on_select_and_every_5s() {
+        let (mut app, a, b) = two_agents();
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let ask = |id| vec![Effect::Send(Request::GitStat { id })];
+        assert_eq!(app.on_tick(t0), ask(a.id));
+        assert!(app.on_tick(at(1)).is_empty());
+        app.apply_git_stat(a.id, Ok(stat(5)));
+        assert_eq!(app.git_stats.get(&a.id), Some(&stat(5)));
+        assert!(app.on_tick(at(4)).is_empty());
+        assert_eq!(app.on_tick(at(5)), ask(a.id));
+        assert!(app.on_tick(at(11)).is_empty(), "one request in flight");
+
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.on_tick(at(11)), ask(b.id));
+        let _ = app.on_key(key('k'));
+        assert!(app.on_tick(at(12)).is_empty(), "a is still in flight");
+        app.apply_git_stat(a.id, Ok(stat(7)));
+        assert_eq!(app.git_stats.get(&a.id), Some(&stat(7)));
+        assert_eq!(app.git_stats.get(&b.id), None);
+
+        app.apply_git_stat(a.id, Err("not a git repository".into()));
+        assert_eq!(app.git_stats.get(&a.id), None);
+        assert_eq!(app.message, None);
+
+        app.apply_git_stat(b.id, Ok(stat(1)));
+        let _ = app.apply_server(ServerMessage::AgentRemoved(b.id));
+        assert_eq!(app.git_stats.get(&b.id), None);
+        app.apply_git_stat(b.id, Ok(stat(1)));
+        assert_eq!(app.git_stats.get(&b.id), None);
+
+        let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
+        assert!(app.on_tick(at(30)).is_empty());
+    }
+
+    #[test]
+    fn remove_worktree_agent_offers_keep_or_remove() {
+        let p = project("p");
+        let wt = worktree_agent(&p, "wt");
+        let (mut app, _) = loaded(vec![p], vec![wt.clone()]);
+        let remove = |remove_worktree| {
+            vec![Effect::Send(Request::RemoveAgent {
+                id: wt.id,
+                remove_worktree,
+                force: false,
+            })]
+        };
+        let _ = app.on_key(key('d'));
+        assert_eq!(
+            app.popup,
+            Some(Popup::Confirm {
+                prompt: "Remove wt? y: agent + worktree · k: keep worktree · n: cancel".into(),
+                action: Confirmed::RemoveWorktree(wt.id),
+            })
+        );
+        assert!(app.on_key(key('x')).is_empty());
+        assert!(app.popup.is_some());
+        assert_eq!(app.on_key(key('y')), remove(true));
+        assert_eq!(app.popup, None);
+        let _ = app.on_key(key('d'));
+        assert_eq!(app.on_key(key('k')), remove(false));
+        let _ = app.on_key(key('d'));
+        assert!(app.on_key(key('n')).is_empty());
+        assert_eq!(app.popup, None);
+        let _ = app.on_key(key('d'));
+        assert!(app.on_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn dirty_worktree_error_asks_to_force() {
+        let p = project("p");
+        let wt = worktree_agent(&p, "wt");
+        let (mut app, _) = loaded(vec![p], vec![wt.clone()]);
+        let dirty = |count: usize| {
+            let files: Vec<String> = (1..=count).map(|i| format!("f{i}.txt")).collect();
+            format!("worktree has uncommitted changes:\n{}", files.join("\n"))
+        };
+
+        let _ = app.on_key(key('d'));
+        let _ = app.on_key(key('y'));
+        app.request_failed(dirty(2));
+        assert_eq!(
+            app.popup,
+            Some(Popup::Confirm {
+                prompt: "Worktree has uncommitted changes:\nf1.txt\nf2.txt\nRemove anyway? y/n"
+                    .into(),
+                action: Confirmed::ForceRemove(wt.id),
+            })
+        );
+        assert_eq!(app.message, None);
+        assert!(app.on_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(
+            app.on_key(key('y')),
+            vec![Effect::Send(Request::RemoveAgent {
+                id: wt.id,
+                remove_worktree: true,
+                force: true,
+            })]
+        );
+        app.request_failed(dirty(1));
+        assert_eq!(app.popup, None, "a forced remove is never asked again");
+
+        let _ = app.on_key(key('d'));
+        let _ = app.on_key(key('y'));
+        app.request_failed(dirty(10));
+        let Some(Popup::Confirm { prompt, .. }) = &app.popup else {
+            panic!("no confirm: {:?}", app.popup);
+        };
+        let lines: Vec<&str> = prompt.lines().collect();
+        assert_eq!(lines.len(), 11, "{prompt}");
+        assert_eq!(lines[8], "f8.txt");
+        assert_eq!(lines[9], "… and 2 more");
+        assert!(app.on_key(key('n')).is_empty());
+        assert_eq!(app.popup, None);
+
+        let _ = app.on_key(key('d'));
+        let _ = app.on_key(key('y'));
+        let _ = app.apply_response(Response::Agents(vec![wt.clone()]));
+        app.request_failed(dirty(1));
+        assert_eq!(app.popup, None);
+
+        let _ = app.on_key(key('d'));
+        let _ = app.on_key(key('y'));
+        app.apply_git_stat(wt.id, Ok(stat(1)));
+        app.request_failed(dirty(1));
+        assert!(
+            matches!(app.popup, Some(Popup::Confirm { .. })),
+            "git answers arrive out of band"
+        );
+
+        let _ = app.on_key(key('n'));
+        let _ = app.on_key(key('d'));
+        let _ = app.on_key(key('k'));
+        app.request_failed(dirty(1));
+        assert_eq!(app.popup, None);
+        assert!(
+            app.current_message(Instant::now())
+                .is_some_and(|m| m.starts_with("worktree has uncommitted changes"))
+        );
+    }
+
+    fn open_diff(app: &mut App, id: AgentId) {
+        assert_eq!(
+            app.on_key(key('D')),
+            vec![Effect::Send(Request::GitDiff { id })]
+        );
+        assert_eq!(app.focus, Focus::Diff);
+    }
+
+    fn diff_scroll(app: &App) -> usize {
+        app.diff.as_ref().expect("diff view").scroll
+    }
+
+    #[test]
+    fn diff_view_opens_scrolls_and_closes() {
+        let (mut app, a, b) = two_agents();
+        let _ = app.set_pane_size(80, 10);
+        open_diff(&mut app, a.id);
+        assert_eq!(app.diff.as_ref().and_then(|d| d.lines.as_ref()), None);
+        let text: Vec<String> = (0..100).map(|i| format!(" line {i}")).collect();
+        app.apply_diff(b.id, Ok("+other".into()));
+        assert_eq!(app.diff.as_ref().and_then(|d| d.lines.as_ref()), None);
+        app.apply_diff(a.id, Ok(text.join("\n")));
+        assert_eq!(
+            app.diff.as_ref().and_then(|d| d.lines.as_ref()),
+            Some(&text)
+        );
+        for (event, expected) in [
+            (key('j'), 1),
+            (key('k'), 0),
+            (key('k'), 0),
+            (ctrl('d'), 5),
+            (ctrl('u'), 0),
+            (code(KeyCode::PageDown), 10),
+            (code(KeyCode::PageUp), 0),
+            (key('G'), 90),
+            (key('j'), 90),
+            (code(KeyCode::PageDown), 90),
+            (key('g'), 0),
+        ] {
+            assert!(app.on_key(event).is_empty(), "{event:?}");
+            assert_eq!(diff_scroll(&app), expected, "{event:?}");
+        }
+        for event in [key('x'), key('d'), key('n'), code(KeyCode::Enter)] {
+            assert!(app.on_key(event).is_empty(), "{event:?}");
+            assert_eq!((app.focus, &app.popup), (Focus::Diff, &None), "{event:?}");
+        }
+        for close in [key('D'), key('q'), code(KeyCode::Esc)] {
+            assert!(app.on_key(close).is_empty());
+            assert_eq!(app.focus, Focus::Agents, "{close:?}");
+            assert_eq!(app.diff, None, "{close:?}");
+            assert!(!app.prefix_pending);
+            open_diff(&mut app, a.id);
+        }
+        app.apply_diff(a.id, Ok("+late".into()));
+        let _ = app.on_key(key('q'));
+        app.apply_diff(a.id, Ok("+late".into()));
+        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+
+        open_diff(&mut app, a.id);
+        let _ = app.apply_server(ServerMessage::AgentUpdated(AgentInfo {
+            status: Status::Exited(0),
+            ..a.clone()
+        }));
+        assert_eq!(app.focus, Focus::Diff);
+        let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
+        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+    }
+
+    #[test]
+    fn diff_view_caps_huge_diffs() {
+        let (mut app, a, _) = two_agents();
+        open_diff(&mut app, a.id);
+        let text: Vec<String> = (0..DIFF_LINE_CAP + 5).map(|i| format!("+{i}")).collect();
+        app.apply_diff(a.id, Ok(text.join("\n")));
+        let lines = app
+            .diff
+            .as_ref()
+            .and_then(|d| d.lines.clone())
+            .expect("lines");
+        assert_eq!(lines.len(), DIFF_LINE_CAP + 1);
+        assert_eq!(lines[DIFF_LINE_CAP - 1], format!("+{}", DIFF_LINE_CAP - 1));
+        assert_eq!(lines[DIFF_LINE_CAP], "… diff truncated (5 more lines)");
+
+        let _ = app.on_key(key('q'));
+        open_diff(&mut app, a.id);
+        app.apply_diff(a.id, Ok("+\tx\u{1b}[2J\r".into()));
+        let lines = app
+            .diff
+            .as_ref()
+            .and_then(|d| d.lines.clone())
+            .expect("lines");
+        assert_eq!(lines, ["+    x[2J"]);
+    }
+
+    #[test]
+    fn diff_error_closes_with_message() {
+        let (mut app, a, _) = two_agents();
+        open_diff(&mut app, a.id);
+        app.apply_diff(a.id, Err("not a git repository".into()));
+        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("not a git repository")
+        );
     }
 }

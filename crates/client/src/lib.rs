@@ -154,6 +154,12 @@ impl Client {
     }
 
     pub async fn request(&mut self, request: Request) -> anyhow::Result<Response> {
+        self.send(request).await?.wait().await
+    }
+
+    /// Sends `request` without waiting for its reply, so other requests can go out while
+    /// the daemon works on it.
+    pub async fn send(&mut self, request: Request) -> anyhow::Result<Reply> {
         let id = self.next_id;
         self.next_id += 1;
         let (tx, rx) = oneshot::channel();
@@ -164,15 +170,23 @@ impl Client {
             .ok_or_else(|| anyhow::anyhow!("daemon closed the connection"))?
             .insert(id, tx);
         write_message(&mut self.write, &ClientMessage::Request { id, request }).await?;
-        match rx.await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(message)) => Err(anyhow::anyhow!(message)),
-            Err(_) => anyhow::bail!("daemon closed the connection"),
-        }
+        Ok(Reply(rx))
     }
 
     pub async fn next_event(&mut self) -> Option<ServerMessage> {
         self.events.recv().await
+    }
+}
+
+pub struct Reply(oneshot::Receiver<Result<Response, String>>);
+
+impl Reply {
+    pub async fn wait(self) -> anyhow::Result<Response> {
+        match self.0.await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(message)) => Err(anyhow::anyhow!(message)),
+            Err(_) => anyhow::bail!("daemon closed the connection"),
+        }
     }
 }
 

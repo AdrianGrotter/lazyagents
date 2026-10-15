@@ -8,16 +8,16 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{AgentView, App, Field, Focus, MIN_PANE, NewAgentForm, Popup, Preset};
+use crate::app::{AgentView, App, DiffView, Field, Focus, MIN_PANE, NewAgentForm, Popup, Preset};
 use crate::config::Theme;
 use crate::keymap::{Action, Keymap};
 
 pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-const FORM_HINT: &str = "tab field · ←/→ preset · enter start · esc cancel";
+const FORM_HINT: &str = "tab field · ←/→ change · enter start · esc cancel";
 const CONFIRM_HINT: &str = "y/enter confirm · n/esc cancel";
 
-const SIDEBAR_HINT: [(Action, &str); 11] = [
+const SIDEBAR_HINT: [(Action, &str); 12] = [
     (Action::Help, "help"),
     (Action::Quit, "quit"),
     (Action::Open, "open"),
@@ -29,9 +29,10 @@ const SIDEBAR_HINT: [(Action, &str); 11] = [
     (Action::AddProject, "add project"),
     (Action::ToggleAllAgents, "all"),
     (Action::NextAttention, "next !"),
+    (Action::Diff, "diff"),
 ];
 
-const SIDEBAR_HELP: [(Action, &str); 17] = [
+const SIDEBAR_HELP: [(Action, &str); 18] = [
     (Action::Down, "move down in the focused box"),
     (Action::Up, "move up in the focused box"),
     (Action::FocusProjects, "focus Projects"),
@@ -46,6 +47,7 @@ const SIDEBAR_HELP: [(Action, &str); 17] = [
     (Action::AddProject, "add project"),
     (Action::ToggleAllAgents, "all agents / this project"),
     (Action::NextAttention, "next agent needing input"),
+    (Action::Diff, "diff of the agent's changes"),
     (Action::Help, "help"),
     (Action::Quit, "quit (agents keep running)"),
     (Action::StopDaemon, "stop the daemon and quit"),
@@ -256,24 +258,39 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect, tick: u64) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+fn kind_label(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "claude",
+        AgentKind::Generic => "generic",
+    }
+}
+
+/// Git lines come right after the status, since the panel clips what does not fit.
 fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
     let lines: Vec<String> = match (app.selected_agent(), app.selected_project()) {
         (Some(agent), _) => {
-            let kind = match agent.kind {
-                AgentKind::Claude => "claude",
-                AgentKind::Generic => "generic",
-            };
             let command = if agent.command.is_empty() {
                 "claude".to_string()
             } else {
                 agent.command.join(" ")
             };
-            vec![
-                format!("kind: {kind}"),
-                format!("status: {}", agent.status.label()),
+            let mut lines = vec![format!("status: {}", agent.status.label())];
+            if let Some(worktree) = &agent.worktree {
+                lines.push(format!("branch: {}", worktree.branch));
+            }
+            if let Some(stat) = app.git_stats.get(&agent.id) {
+                lines.push(format!(
+                    "+{} −{} · {} files",
+                    stat.insertions, stat.deletions, stat.files
+                ));
+                lines.push(format!("{} uncommitted", stat.uncommitted));
+            }
+            lines.extend([
                 format!("cmd: {command}"),
                 format!("cwd: {}", agent.cwd.display()),
-            ]
+                format!("kind: {}", kind_label(agent.kind)),
+            ]);
+            lines
         }
         (None, Some(project)) => vec![format!("path: {}", project.path.display())],
         (None, None) => Vec::new(),
@@ -286,21 +303,44 @@ fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     let focused = app.focus == Focus::Pane;
     let agent = app.selected_agent();
+    if let (Some(view), Some(agent)) = (&app.diff, agent) {
+        let title = format!(" diff · {} ", agent.name);
+        frame.render_widget(block(title, true, &app.theme), areas.pane);
+        frame.render_widget(
+            diff_text(view, &app.theme, areas.pane_inner.height),
+            areas.pane_inner,
+        );
+        return;
+    }
     let title = match agent {
-        Some(agent) => {
-            let kind = match agent.kind {
-                AgentKind::Claude => "claude",
-                AgentKind::Generic => "generic",
-            };
-            format!(" {} · {kind} · {} ", agent.name, agent.status.label())
-        }
+        Some(agent) => format!(
+            " {} · {} · {} ",
+            agent.name,
+            kind_label(agent.kind),
+            agent.status.label()
+        ),
         None => " lazyagents ".to_string(),
     };
     frame.render_widget(block(title, focused, &app.theme), areas.pane);
-    if agent.is_none() {
+    let Some(agent) = agent else {
         let new = app.keymap.first_key(Action::NewAgent);
         frame.render_widget(
             Paragraph::new(format!("press {new} to start an agent")),
+            areas.pane_inner,
+        );
+        return;
+    };
+    if let Some(error) = &agent.last_error
+        && !agent.status.is_running()
+        && app.screen.text().trim().is_empty()
+    {
+        let retry = app.keymap.first_key(Action::Restart);
+        let text = vec![
+            Line::from(format!("failed to start: {error}")).fg(app.theme.attention),
+            Line::from(format!("press {retry} to retry")).fg(app.theme.dim),
+        ];
+        frame.render_widget(
+            Paragraph::new(text).wrap(Wrap { trim: false }),
             areas.pane_inner,
         );
         return;
@@ -309,6 +349,48 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     if let (true, Some(position)) = (focused, cursor) {
         frame.set_cursor_position(position);
     }
+}
+
+fn diff_text(view: &DiffView, theme: &Theme, height: u16) -> Paragraph<'static> {
+    let Some(lines) = &view.lines else {
+        return Paragraph::new("loading diff…").fg(theme.dim);
+    };
+    if lines.is_empty() {
+        return Paragraph::new("no changes").fg(theme.dim);
+    }
+    let visible = lines.iter().skip(view.scroll).take(usize::from(height));
+    let styled = visible.map(|line| {
+        let header = ["diff", "index", "---", "+++"]
+            .iter()
+            .any(|prefix| line.starts_with(prefix));
+        let style = if header {
+            Style::new().bold()
+        } else if line.starts_with("@@") {
+            Style::new().fg(theme.diff_hunk)
+        } else if line.starts_with('+') {
+            Style::new().fg(theme.diff_add)
+        } else if line.starts_with('-') {
+            Style::new().fg(theme.diff_remove)
+        } else {
+            Style::new()
+        };
+        Line::styled(line.clone(), style)
+    });
+    Paragraph::new(styled.collect::<Vec<_>>())
+}
+
+fn diff_hint(keymap: &Keymap) -> String {
+    let mut close = vec!["q".to_string(), "esc".to_string(), "D".to_string()];
+    for key in keymap.keys(Action::Diff) {
+        let key = key.to_string();
+        if !close.contains(&key) {
+            close.push(key);
+        }
+    }
+    format!(
+        "{} close · j/k scroll · ctrl-d/ctrl-u half page · pagedown/pageup page · g/G top/bottom",
+        close.join("/")
+    )
 }
 
 fn pane_hint(keymap: &Keymap) -> String {
@@ -343,6 +425,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
             Span::raw(format!("{} …", app.keymap.prefix())).fg(theme.working)
         }
         Focus::Pane => Span::raw(pane_hint(&app.keymap)).fg(theme.dim),
+        Focus::Diff => Span::raw(diff_hint(&app.keymap)).fg(theme.dim),
         Focus::Projects | Focus::Agents => Span::raw(sidebar_hint(&app.keymap)).fg(theme.dim),
     });
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -383,7 +466,10 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
             let height = lines.len() as u16 + 2;
             (" Help ", width, height, lines)
         }
-        Popup::NewAgent(form) => (" New agent ", 56, 8, form_lines(form, app)),
+        Popup::NewAgent(form) => {
+            let lines = form_lines(form, app);
+            (" New agent ", 56, lines.len() as u16 + 2, lines)
+        }
         Popup::Rename { input, .. } => (
             " Rename ",
             60,
@@ -396,15 +482,14 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
             5,
             vec![Line::from(format!("Path: {input}"))],
         ),
-        Popup::Confirm { prompt, .. } => (
-            " Confirm ",
-            50,
-            4,
-            vec![
-                Line::from(prompt.clone()),
-                Line::from(CONFIRM_HINT).fg(theme.dim),
-            ],
-        ),
+        Popup::Confirm { prompt, action } => {
+            let mut lines: Vec<Line> = prompt.lines().map(|l| Line::from(l.to_string())).collect();
+            if !action.names_its_keys() {
+                lines.push(Line::from(CONFIRM_HINT).fg(theme.dim));
+            }
+            let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
+            (" Confirm ", width.max(50), lines.len() as u16 + 2, lines)
+        }
     };
     let area = centered(screen, width, height);
     frame.render_widget(Clear, area);
@@ -475,6 +560,16 @@ fn form_lines(form: &NewAgentForm, app: &App) -> Vec<Line<'static>> {
     if form.preset == Preset::Custom {
         lines.push(field(Field::Command, format!("Command: {}", form.command)));
     }
+    let toggle = if form.worktree { "[x]" } else { "[ ]" };
+    lines.push(field(Field::Worktree, format!("Worktree: {toggle}")));
+    if form.worktree {
+        let base = if form.base.is_empty() && form.field != Field::Base {
+            "(current branch)"
+        } else {
+            form.base.as_str()
+        };
+        lines.push(field(Field::Base, format!("Base:    {base}")));
+    }
     lines.push(Line::default());
     lines.push(Line::from(FORM_HINT).fg(app.theme.dim));
     lines
@@ -483,13 +578,14 @@ fn form_lines(form: &NewAgentForm, app: &App) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{agent, loaded, loaded_with, project};
+    use crate::app::tests::{agent, loaded, loaded_with, project, worktree_agent};
     use crate::app::{App, Focus, Popup};
     use crate::config::Config;
-    use protocol::{Cell, Color as ScreenColor, Screen, Status, Style as ScreenStyle};
+    use protocol::{Cell, Color as ScreenColor, GitStat, Screen, Status, Style as ScreenStyle};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
     use std::time::Instant;
 
@@ -886,6 +982,8 @@ mod tests {
             name: "api".into(),
             preset,
             command: "make".into(),
+            worktree: false,
+            base: String::new(),
             field: Field::Name,
         };
         app.popup = Some(Popup::NewAgent(form(Preset::Claude)));
@@ -930,6 +1028,176 @@ mod tests {
         assert_eq!(buf[(3, 1)].symbol(), "b");
         assert_eq!(buf[(4, 1)].symbol(), " ");
         assert_eq!(cursor, Some(ratatui::layout::Position::new(3, 1)));
+    }
+
+    #[test]
+    fn info_shows_branch_and_stats() {
+        let p = project("p");
+        let plain = agent(&p, "plain", Status::Idle);
+        let wt = worktree_agent(&p, "wt");
+        let (mut app, _) = loaded(vec![p], vec![plain.clone(), wt.clone()]);
+        let stat = |insertions, uncommitted| GitStat {
+            insertions,
+            deletions: 1,
+            files: 2,
+            uncommitted,
+        };
+        let info = |app: &App| {
+            let (text, _) = render(app);
+            let layout = areas(Rect::new(0, 0, 100, 30), app.projects.len());
+            text.lines()
+                .skip(usize::from(layout.info.y))
+                .take(usize::from(layout.info.height))
+                .map(|line| line.chars().take(usize::from(layout.info.width)).collect())
+                .collect::<Vec<String>>()
+                .join("\n")
+        };
+
+        let text = info(&app);
+        assert!(
+            !text.contains("files") && !text.contains("branch:"),
+            "{text}"
+        );
+        app.apply_git_stat(plain.id, Ok(stat(3, 4)));
+        let text = info(&app);
+        assert!(text.contains("+3 −1 · 2 files"), "{text}");
+        assert!(text.contains("4 uncommitted"), "{text}");
+        assert!(!text.contains("branch:"), "{text}");
+
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let text = info(&app);
+        assert!(text.contains("branch: lazyagents/wt"), "{text}");
+        assert!(!text.contains("files"), "{text}");
+        app.apply_git_stat(wt.id, Ok(stat(10, 1)));
+        let text = info(&app);
+        let lines: Vec<&str> = text.lines().collect();
+        let row = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?}\n{text}"))
+        };
+        assert!(
+            row("branch: lazyagents/wt") < row("+10 −1 · 2 files"),
+            "{text}"
+        );
+        assert!(row("+10 −1 · 2 files") < row("1 uncommitted"), "{text}");
+        assert!(text.contains("status: idle"), "{text}");
+
+        app.apply_git_stat(wt.id, Err("git failed".into()));
+        let text = info(&app);
+        assert!(text.contains("branch: lazyagents/wt"), "{text}");
+        assert!(!text.contains("files"), "{text}");
+        let (text, _) = render(&app);
+        assert!(!text.contains("git failed"), "{text}");
+    }
+
+    #[test]
+    fn spawn_error_shows_in_pane() {
+        let p = project("p");
+        let failed = AgentInfo {
+            last_error: Some("No such file or directory (os error 2)".into()),
+            ..agent(&p, "bad", Status::Exited(127))
+        };
+        let (app, _) = loaded(vec![p.clone()], vec![failed]);
+        let (text, _) = render(&app);
+        assert!(
+            text.contains("failed to start: No such file or directory (os error 2)"),
+            "{text}"
+        );
+        assert!(text.contains("press r to retry"), "{text}");
+
+        let (app, _) = loaded(
+            vec![p.clone()],
+            vec![AgentInfo {
+                last_error: Some("old".into()),
+                ..agent(&p, "ok", Status::Idle)
+            }],
+        );
+        let (text, _) = render(&app);
+        assert!(!text.contains("failed to start"), "{text}");
+
+        let (app, _) = loaded_with(
+            configured("[keys.sidebar]\nrestart = \"F\"\n"),
+            vec![p.clone()],
+            vec![AgentInfo {
+                last_error: Some("boom".into()),
+                ..agent(&p, "bad", Status::Exited(127))
+            }],
+        );
+        let (text, _) = render(&app);
+        assert!(text.contains("press F to retry"), "{text}");
+    }
+
+    fn open_diff(app: &mut App, text: &str) {
+        let id = app.selected_agent().map(|a| a.id).expect("agent");
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        let (screen, _) = render(app);
+        assert!(screen.contains("loading diff…"), "{screen}");
+        app.apply_diff(id, Ok(text.to_string()));
+    }
+
+    const SAMPLE_DIFF: &str =
+        "diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n same";
+
+    #[test]
+    fn diff_view_colours_lines() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        open_diff(&mut app, SAMPLE_DIFF);
+        let (text, buffer) = render(&app);
+        let layout = areas(Rect::new(0, 0, 100, 30), 1);
+        let at = |needle: &str| {
+            let y = text
+                .lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?}\n{text}"));
+            &buffer[(layout.pane_inner.x, y as u16)]
+        };
+        for header in ["diff --git", "index 1..2", "--- a/f", "+++ b/f"] {
+            assert!(at(header).modifier.contains(Modifier::BOLD), "{header}");
+            assert_eq!(at(header).fg, Color::Reset, "{header}");
+        }
+        assert_eq!(at("@@ -1 +1 @@").fg, Color::Cyan);
+        assert_eq!(at("-old").fg, Color::Red);
+        assert_eq!(at("+new").fg, Color::Green);
+        assert!(!at("+new").modifier.contains(Modifier::BOLD));
+        assert_eq!(at(" same").fg, Color::Reset);
+        assert_eq!(buffer[(layout.pane.x, layout.pane.y)].fg, Color::Green);
+        assert!(text.contains(" diff · a "), "{text}");
+        let status = text.lines().last().expect("status line");
+        assert!(status.contains("q/esc/D close"), "{status}");
+        let _ = app.set_pane_size(73, 5);
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let (text, _) = render(&app);
+        let first = text
+            .lines()
+            .nth(usize::from(layout.pane_inner.y))
+            .expect("row");
+        assert!(first.contains("│index 1..2"), "{text}");
+
+        let config = configured(
+            "[theme]\ndiff_add = \"blue\"\ndiff_remove = \"magenta\"\ndiff_hunk = \"yellow\"\n",
+        );
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let (mut app, _) = loaded_with(config, vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        open_diff(&mut app, SAMPLE_DIFF);
+        let (text, buffer) = render(&app);
+        let at = |needle: &str| {
+            let y = text
+                .lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?}\n{text}"));
+            buffer[(layout.pane_inner.x, y as u16)].fg
+        };
+        assert_eq!(at("@@ -1 +1 @@"), Color::Yellow);
+        assert_eq!(at("-old"), Color::Magenta);
+        assert_eq!(at("+new"), Color::Blue);
+
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        open_diff(&mut app, "");
+        let (text, _) = render(&app);
+        assert!(text.contains("no changes"), "{text}");
     }
 
     #[test]

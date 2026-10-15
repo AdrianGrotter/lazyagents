@@ -136,6 +136,14 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
             message = incoming.recv() => match message {
                 Some(Incoming::Server(message)) => app.apply_server(message),
                 Some(Incoming::Response(response)) => app.apply_response(response),
+                Some(Incoming::GitStat { id, result }) => {
+                    app.apply_git_stat(id, result);
+                    Vec::new()
+                }
+                Some(Incoming::Diff { id, result }) => {
+                    app.apply_diff(id, result);
+                    Vec::new()
+                }
                 Some(Incoming::Failed(error)) => {
                     app.request_failed(error);
                     Vec::new()
@@ -147,6 +155,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
             _ = interrupt.recv() => return Ok(()),
             _ = tick.tick() => {
                 frame_counter = frame_counter.wrapping_add(1);
+                send_all(&requests, app.on_tick(Instant::now()));
                 redraw = app.animating() || message_shown;
                 continue;
             }

@@ -30,6 +30,9 @@ pub struct Theme {
     pub idle: Color,
     pub dim: Color,
     pub border: Color,
+    pub diff_add: Color,
+    pub diff_remove: Color,
+    pub diff_hunk: Color,
 }
 
 impl Default for Theme {
@@ -41,6 +44,9 @@ impl Default for Theme {
             idle: Color::Green,
             dim: Color::DarkGray,
             border: Color::DarkGray,
+            diff_add: Color::Green,
+            diff_remove: Color::Red,
+            diff_hunk: Color::Cyan,
         }
     }
 }
@@ -305,6 +311,9 @@ impl Config {
                 "idle" => &mut theme.idle,
                 "dim" => &mut theme.dim,
                 "border" => &mut theme.border,
+                "diff_add" => &mut theme.diff_add,
+                "diff_remove" => &mut theme.diff_remove,
+                "diff_hunk" => &mut theme.diff_hunk,
                 _ => {
                     self.warn(format!("unknown setting theme.{name}"));
                     continue;
@@ -629,6 +638,7 @@ mod tests {
                 idle: Color::LightGreen,
                 dim: Color::Magenta,
                 border: Color::Indexed(12),
+                ..Theme::default()
             }
         );
 
