@@ -4,5 +4,16 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+[dependencies]
+anyhow.workspace = true
+client = { path = "../client" }
+protocol = { path = "../protocol" }
+ratatui.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+daemon = { path = "../daemon" }
+tempfile.workspace = true
+
 [lints]
 workspace = true

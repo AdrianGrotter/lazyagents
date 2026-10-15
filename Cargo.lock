@@ -2089,6 +2089,15 @@ dependencies = [
 [[package]]
 name = "tui"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "client",
+ "daemon",
+ "protocol",
+ "ratatui",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "typenum"
