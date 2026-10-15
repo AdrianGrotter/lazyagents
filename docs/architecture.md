@@ -17,7 +17,7 @@ One binary, `lazyagents`, in a Cargo workspace:
 | Crate | Responsibility | Depends on |
 |---|---|---|
 | `crates/protocol` | Message types, framing, protocol version | serde, postcard |
-| `crates/daemon` | Agent registry, PTYs, terminal emulation, input encoding, persistence, git worktrees, hook ingestion, status | protocol, portable-pty, alacritty_terminal, tokio |
+| `crates/daemon` | Agent registry, PTYs, terminal emulation, input encoding, persistence, hook ingestion, status (git worktrees: planned) | protocol, portable-pty, alacritty_terminal, tokio |
 | `crates/client` | Connects to the daemon, starting it on demand; used by the CLI and the TUI | protocol, tokio |
 | `crates/tui` | ratatui client: layout, panels, popups, rendering of remote grids, input capture | protocol, ratatui, crossterm, tokio |
 | `crates/lazyagents` | Binary: CLI parsing and subcommand dispatch | daemon, client, protocol, clap |
@@ -63,6 +63,8 @@ function is not used; the binary on `PATH` is.
 
 ### Worktrees
 
+Planned (plan 3); the daemon does not create worktrees yet.
+
 Creating an agent with "worktree" enabled runs
 `git -C <project> worktree add -b lazyagents/<agent-name> <state>/worktrees/<project>/<agent-name> <base>`
 via the git CLI (so the user's git config applies). The agent's cwd is the worktree.
@@ -83,14 +85,21 @@ explicit confirmation is required. The branch is never deleted automatically.
 
 ## Error handling
 
-- Protocol version mismatch → TUI shows a popup offering to restart the daemon.
+- Protocol version mismatch → the client fails with `VersionMismatch`, which suggests
+  `lazyagents shutdown`; the TUI will show a popup offering to restart the daemon.
 - Socket exists but connect fails → remove stale socket, spawn daemon.
-- Daemon crash → agents die; on next start they load as `Stopped` and can be restarted
-  (Claude resumes its session).
+- Daemon crash → agents die; on next start they load as `Stopped` and can be restarted.
+  Claude resumes only sessions that received a prompt
+  (see [ADR 0006](decisions/0006-resume-only-prompted-sessions.md)).
+- A corrupt `state.toml` → the daemon refuses to start and leaves the file untouched.
 - Spawn failure (command not found, cwd missing) → agent `Exited`, error rendered in the
   pane and the status line.
 - Worktree errors (branch exists, base missing) → shown in the popup; nothing is created.
-- `lazyagents hook` never blocks or fails Claude: 200 ms total timeout, always exits 0.
+- `lazyagents hook` never blocks or fails Claude: it checks its environment, reads stdin and
+  talks to the daemon within one 200 ms budget, prints nothing and always exits 0.
+- Fatal errors while the daemon starts are written to `daemon.log`.
+- `lazyagents shutdown` waits up to 5 s for the daemon's reply and up to 3 s for the socket
+  to disappear.
 - All daemon errors logged with `tracing` to `daemon.log`; TUI shows the last error in
   the status line.
 

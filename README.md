@@ -8,15 +8,17 @@ Your own Claude Code setup (`~/.claude`, project `.claude/`, plugins, skills, MC
 
 ## Status
 
-Early development. Milestone 1 is an embedded-terminal spike (`just spike`). See `docs/architecture.md` and `docs/superpowers/specs/2026-10-15-lazyagents-design.md`.
+Early development. The daemon, protocol, client and a headless CLI exist; the TUI is next, and the embedded-terminal spike (`just spike`) is the interim interactive UI. See `docs/architecture.md` and `docs/superpowers/specs/2026-10-15-lazyagents-design.md`.
 
 ## Usage (headless, until the TUI lands)
 
 ```sh
-lazyagents new api        # start a Claude agent named api in the current project
-lazyagents ls             # projects and agents with status
-lazyagents kill api       # stop it
-lazyagents shutdown       # stop the daemon and every agent
+nix develop -c cargo build -p lazyagents
+cd ~/some-project
+~/git/lazyagents/target/debug/lazyagents new api    # start a Claude agent named api
+~/git/lazyagents/target/debug/lazyagents ls         # projects and agents with status
+~/git/lazyagents/target/debug/lazyagents kill api   # stop it
+~/git/lazyagents/target/debug/lazyagents shutdown   # stop the daemon and every agent
 ```
 
 ## Development

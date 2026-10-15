@@ -24,7 +24,9 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   `docs/decisions/0006-resume-only-prompted-sessions.md`.
 - **Generic agents**: `Starting` until their first output, then `Working`; `Idle` after
   2 s without output, `Working` again on new output.
-- **Not running**: input and hook events for exited or stopped agents are ignored.
+- **Not running**: for exited or stopped agents, input, resize and scroll requests are
+  rejected with an error and hook events are ignored. Hook events for generic agents are
+  ignored too.
 - **Both**: process exit → `Exited(code)`; agents loaded from disk at daemon start →
   `Stopped`.
 - The merge behaviour of `--settings` with user hooks was verified in the spike (see `docs/decisions/0003-status-via-claude-hooks.md`).

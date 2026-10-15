@@ -10,7 +10,7 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 
 ## Commands
 
-- `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, tmux harness self-test, spike smoke run. The done gate.
+- `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, tmux harness self-test, spike smoke run, spike hangup test. The done gate.
 - `just fmt`, `just lint`, `just test`, `just test-hooks`
 - `lazyagents ls|new|kill|restart|rm|shutdown`: manage agents through the daemon (`cargo run -p lazyagents -- ...`). Tests set `LAZYAGENTS_STATE_DIR` to a temp dir and shut the daemon down.
 - `just spike [cmd...]`: the milestone-1 embedded-terminal spike (default command `claude`); runs from any directory.
@@ -20,7 +20,7 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 | Path | Purpose |
 |---|---|
 | `crates/protocol` | client↔daemon messages and framing |
-| `crates/daemon` | agents, PTYs, terminal emulation, persistence, git worktrees |
+| `crates/daemon` | agents, PTYs, terminal emulation, persistence (git worktrees: planned) |
 | `crates/client` | connects to the daemon, starting it on demand; used by the CLI and the TUI |
 | `crates/tui` | ratatui client |
 | `crates/lazyagents` | the binary and CLI |
@@ -37,5 +37,5 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 - A choice between real alternatives gets an ADR in `docs/decisions/` (skill: recording-decisions).
 - A change to the protocol, keybindings or status detection updates its doc in `docs/` in the same commit.
 - Comments: default to none. Write one only for a non-obvious invariant or constraint that stays true as the code evolves; change history belongs in commit messages.
-- Tests and dev runs keep state in temp dirs (`LAZYAGENTS_STATE_DIR` once the daemon exists); `~/.local/state/lazyagents` belongs to the user's real agents.
+- Tests and dev runs keep state in temp dirs (they set `LAZYAGENTS_STATE_DIR` to a temp dir); `~/.local/state/lazyagents` belongs to the user's real agents.
 - The tmux harness runs on its own server (`tmux -L lazyagents-harness`), leaving the user's tmux sessions alone.
