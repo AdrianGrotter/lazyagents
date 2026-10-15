@@ -9,12 +9,13 @@ usage: tmux-harness.sh start <name> <cols> <rows> -- <command...>
        tmux-harness.sh keys <name> <key>...      send tmux key names: Enter C-] M-Enter Escape
        tmux-harness.sh capture <name>            print the visible screen
        tmux-harness.sh wait-for <name> <text> [timeout_secs=10]
+       tmux-harness.sh alive <name>              exit 0 iff the session exists
        tmux-harness.sh stop <name>
 USAGE
   exit 2
 }
 
-t() { tmux -L lazyagents-harness "$@"; }
+t() { tmux -L lazyagents-harness -f /dev/null "$@"; }
 
 cmd=${1:-}
 name=${2:-}
@@ -45,6 +46,7 @@ case $cmd in
     t capture-pane -p -t "$name" >&2
     exit 1
     ;;
+  alive) t has-session -t "$name" 2>/dev/null ;;
   stop) t kill-session -t "$name" 2>/dev/null || true ;;
   *) usage ;;
 esac

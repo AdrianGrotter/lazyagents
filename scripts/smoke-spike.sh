@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end check of the spike: shell in the pane, typing, colours, detach, exit status, quit.
+# End-to-end check of the spike: shell in the pane, typing, SGR output text, detach, exit status, quit.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -7,7 +7,7 @@ h="$root/scripts/tmux-harness.sh"
 name="spike-smoke-$$"
 trap '"$h" stop "$name"' EXIT
 
-cargo build -q -p spike --manifest-path "$root/Cargo.toml"
+cargo build --locked -q -p spike --manifest-path "$root/Cargo.toml"
 "$h" start "$name" 120 30 -- "$root/target/debug/spike" sh
 "$h" wait-for "$name" 'mode: PANE' 10
 "$h" wait-for "$name" '$' 10
@@ -33,7 +33,7 @@ cargo build -q -p spike --manifest-path "$root/Cargo.toml"
 "$h" wait-for "$name" 'mode: SIDEBAR' 5
 "$h" keys "$name" q
 for _ in $(seq 25); do
-  tmux -L lazyagents-harness has-session -t "$name" 2>/dev/null || { echo "spike smoke passed"; exit 0; }
+  "$h" alive "$name" || { echo "spike smoke passed"; exit 0; }
   sleep 0.2
 done
 echo "spike did not quit on q" >&2
