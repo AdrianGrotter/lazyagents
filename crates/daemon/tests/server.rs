@@ -321,7 +321,13 @@ async fn generic_status_follows_output() {
     .await
     .expect("create");
     conn.wait_status(agent.id, Status::Working).await;
+    let working = tokio::time::Instant::now();
     conn.wait_status(agent.id, Status::Idle).await;
+    assert!(
+        working.elapsed() >= Duration::from_millis(1500),
+        "went idle {:?} after working",
+        working.elapsed()
+    );
     conn.request(Request::KillAgent { id: agent.id })
         .await
         .expect("kill");
@@ -666,4 +672,57 @@ async fn wait_for_file(path: &Path) -> String {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_to_exited_agent_is_an_error() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "done",
+        AgentKind::Generic,
+        &["sh", "-c", "exit 0"],
+    )
+    .await
+    .expect("create");
+    conn.wait_status(agent.id, Status::Exited(0)).await;
+    let err = conn
+        .request(Request::Input {
+            id: agent.id,
+            event: key(KeyCode::Enter),
+        })
+        .await
+        .expect_err("input to exited agent");
+    assert!(err.contains("not running"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn late_hook_does_not_revive_an_exited_agent() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "gone",
+        AgentKind::Claude,
+        &["sh", "-c", "exit 0"],
+    )
+    .await
+    .expect("create");
+    conn.wait_status(agent.id, Status::Exited(0)).await;
+    conn.request(Request::Hook {
+        id: agent.id,
+        kind: HookKind::UserPromptSubmit,
+        session_id: None,
+    })
+    .await
+    .expect("late hook");
+    let Ok(Response::Agents(agents)) = conn.request(Request::ListAgents).await else {
+        panic!("list")
+    };
+    assert_eq!(agents[0].status, Status::Exited(0));
 }

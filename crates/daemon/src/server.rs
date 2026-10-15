@@ -93,6 +93,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 }
             }
             Some(event) = events.recv() => daemon.handle_terminal_event(event),
+            Some(_) = readers.join_next(), if !readers.is_empty() => {}
+            Some(_) = writers.join_next(), if !writers.is_empty() => {}
             _ = tick.tick() => daemon.tick(),
         }
     }
@@ -317,7 +319,7 @@ impl Daemon {
             .agents
             .get_mut(&id)
             .ok_or_else(|| format!("unknown agent {id}"))?;
-        if agent.terminal.is_none() {
+        if agent.terminal.is_none() || !agent.status.is_running() {
             return Err(format!("{} is not running", agent.record.name));
         }
         Ok(agent)
@@ -616,7 +618,10 @@ impl Daemon {
             .agents
             .get_mut(&id)
             .ok_or_else(|| format!("unknown agent {id}"))?;
-        if agent.record.kind != AgentKind::Claude || agent.terminal.is_none() {
+        if agent.record.kind != AgentKind::Claude
+            || agent.terminal.is_none()
+            || !agent.status.is_running()
+        {
             return Ok(());
         }
         let mut changed_record = false;
@@ -671,6 +676,7 @@ impl Daemon {
             if agent.record.kind == AgentKind::Generic
                 && agent.terminal.is_some()
                 && agent.status.is_running()
+                && agent.last_output.is_some()
             {
                 let status = generic_status(agent.last_output, now);
                 if status != agent.status {
