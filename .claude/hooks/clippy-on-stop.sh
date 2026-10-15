@@ -5,7 +5,8 @@ set -euo pipefail
 input=$(cat)
 [[ $(jq -r '.stop_hook_active // false' <<<"$input") == true ]] && exit 0
 cd "${CLAUDE_PROJECT_DIR:-.}"
-git status --porcelain -- '*.rs' '*Cargo.toml' 'Cargo.lock' | grep -q . || exit 0
+changed=$(git status --porcelain -- '*.rs' '*Cargo.toml' 'Cargo.lock')
+[[ -n $changed ]] || exit 0
 
 run() {
   if command -v cargo >/dev/null; then "$@"; else nix develop --command "$@"; fi

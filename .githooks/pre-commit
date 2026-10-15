@@ -2,7 +2,8 @@
 # Formatting and clippy gate for commits that touch Rust or Cargo files.
 set -euo pipefail
 
-git diff --cached --name-only --diff-filter=ACMR | grep -qE '(\.rs|Cargo\.(toml|lock))$' || exit 0
+changed=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(\.rs|Cargo\.(toml|lock))$' || true)
+[[ -n $changed ]] || exit 0
 if ! command -v cargo >/dev/null; then
   echo "pre-commit: cargo not on PATH; commit from the nix dev shell (direnv or nix develop)." >&2
   exit 1
