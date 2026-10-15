@@ -129,7 +129,10 @@ fn undo_add(repo: &Path, path: &Path, branch: &str, branch_existed: bool) {
 }
 
 pub fn dirty_files(worktree: &Path) -> anyhow::Result<Vec<String>> {
-    let status = git_read(worktree, ["status", "--porcelain", "-z"])?;
+    let status = git_read(
+        worktree,
+        ["status", "--porcelain", "-z", "--untracked-files=normal"],
+    )?;
     let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
     let mut paths = Vec::new();
     while let Some(entry) = entries.next() {
@@ -142,8 +145,15 @@ pub fn dirty_files(worktree: &Path) -> anyhow::Result<Vec<String>> {
     Ok(paths)
 }
 
+/// Without `force`, git refuses a worktree with changes or untracked files, whatever
+/// the user's `status.showUntrackedFiles`.
 pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> anyhow::Result<()> {
-    let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
+    let mut args = vec![
+        OsStr::new("-c"),
+        OsStr::new("status.showUntrackedFiles=normal"),
+        OsStr::new("worktree"),
+        OsStr::new("remove"),
+    ];
     if force {
         args.push(OsStr::new("--force"));
     }

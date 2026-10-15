@@ -1668,6 +1668,34 @@ async fn remove_refuses_a_dirty_worktree_and_lists_files() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn remove_refuses_untracked_files_hidden_by_the_repo_config() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    common::git(repo.path(), &["config", "status.showUntrackedFiles", "no"]);
+    let agent = create_in_worktree(&mut conn, &project, "hidden", &["sleep", "30"])
+        .await
+        .expect("create");
+    let path = agent.worktree.as_ref().expect("worktree").path.clone();
+    std::fs::write(path.join("untracked.txt"), "u\n").expect("untracked");
+
+    let err = conn
+        .request(Request::RemoveAgent {
+            id: agent.id,
+            remove_worktree: true,
+            force: false,
+        })
+        .await
+        .expect_err("untracked file");
+    assert_eq!(err, "worktree has uncommitted changes:\nuntracked.txt");
+    assert!(path.join("untracked.txt").is_file());
+    assert_eq!(list_agents(&mut conn).await.len(), 1);
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn remove_with_force_removes_the_worktree() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;

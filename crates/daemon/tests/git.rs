@@ -133,3 +133,20 @@ fn bases_never_reach_git_as_options() {
         assert!(format!("{err:#}").contains("invalid base"), "{err:#}");
     }
 }
+
+#[test]
+fn untracked_files_count_as_dirty_whatever_the_repo_config() {
+    let repo = repo();
+    git(repo.path(), &["config", "status.showUntrackedFiles", "no"]);
+    let root = tempfile::tempdir().expect("worktree root");
+    let wt = root.path().join("wt");
+    add_worktree(repo.path(), &wt, "lazyagents/wt", "main").expect("add");
+    std::fs::write(wt.join("untracked.txt"), "u\n").expect("untracked");
+
+    assert_eq!(
+        dirty_files(&wt).expect("dirty"),
+        vec!["untracked.txt".to_string()]
+    );
+    remove_worktree(repo.path(), &wt, false).expect_err("untracked file kept");
+    assert!(wt.join("untracked.txt").is_file());
+}

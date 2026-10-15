@@ -148,13 +148,15 @@ and worktree path.
 loop keeps serving. For a worktree agent they compare the working tree with `git
 merge-base <base> HEAD` (committed and uncommitted work); for any other agent with `HEAD`
 (uncommitted changes only). Untracked files appear only in `uncommitted`, the count of
-`git status --porcelain` entries, and not in the diff. A diff too large for one message is
+`git status --porcelain --untracked-files=normal` entries, and not in the diff. A diff too large for one message is
 an error.
 
-`RemoveAgent { remove_worktree: true }` refuses while `git status --porcelain` lists
-anything, answering `worktree has uncommitted changes:` and the changed paths, one per
-line (the new path of a rename), and leaves the agent running. `force: true` skips the
-check and runs `git worktree remove --force`. Without `remove_worktree` the worktree stays
+`RemoveAgent { remove_worktree: true }` refuses while `git status --porcelain
+--untracked-files=normal` lists anything, answering `worktree has uncommitted changes:`
+and the changed paths, one per line (the new path of a rename), and leaves the agent
+running. Both this check and the `git -c status.showUntrackedFiles=normal worktree
+remove` that follows see untracked files even when the user's git config hides them.
+`force: true` skips the check and runs `git worktree remove --force`. Without `remove_worktree` the worktree stays
 on disk. An agent's branch is never deleted.
 
 ### The TUI
