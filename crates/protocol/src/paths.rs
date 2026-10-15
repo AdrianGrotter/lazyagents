@@ -29,7 +29,7 @@ impl StatePaths {
     ) -> io::Result<Self> {
         let non_empty = |value: Option<OsString>| value.filter(|v| !v.is_empty());
         if let Some(dir) = non_empty(state_dir) {
-            return Ok(Self::new(dir));
+            return Ok(Self::new(std::path::absolute(dir)?));
         }
         if let Some(xdg) = non_empty(xdg_state_home) {
             return Ok(Self::new(PathBuf::from(xdg).join("lazyagents")));
@@ -97,6 +97,16 @@ mod tests {
         let paths = StatePaths::resolve(os("/tmp/la"), os("/x"), os("/home/u")).expect("paths");
         assert_eq!(paths.dir(), Path::new("/tmp/la"));
         assert_eq!(paths.socket(), Path::new("/tmp/la/daemon.sock"));
+    }
+
+    #[test]
+    fn relative_state_dir_is_made_absolute() {
+        let paths = StatePaths::resolve(os("rel/dir"), None, os("/home/u")).expect("paths");
+        assert!(paths.dir().is_absolute(), "{}", paths.dir().display());
+        assert_eq!(
+            paths.dir(),
+            std::env::current_dir().expect("cwd").join("rel/dir")
+        );
     }
 
     #[test]
