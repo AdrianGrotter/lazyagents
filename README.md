@@ -1,0 +1,22 @@
+# lazyagents
+
+A [lazygit](https://github.com/jesseduffield/lazygit)-style terminal UI for managing many coding agents at once.
+
+Instead of a tmux tab per Claude Code session, lazyagents shows every agent in one place: projects and agents in a sidebar with live status (working, needs input, idle, exited), and the selected agent's fully interactive terminal in the main pane. A background daemon keeps agents running when you close the UI. Agents can get their own git worktree and branch so parallel work does not collide.
+
+Your own Claude Code setup (`~/.claude`, project `.claude/`, plugins, skills, MCP servers, hooks) keeps working: lazyagents runs the real `claude` binary.
+
+## Status
+
+Early development. Milestone 1 is an embedded-terminal spike (`just spike`). See `docs/architecture.md` and `docs/superpowers/specs/2026-10-15-lazyagents-design.md`.
+
+## Development
+
+```sh
+direnv allow        # or: nix develop
+just check          # fmt, clippy, tests
+just spike          # run the spike with claude in the main pane
+just spike sh       # ... or any other command
+```
+
+Contributor and agent guide: [AGENTS.md](AGENTS.md).
