@@ -1,0 +1,230 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::{AgentId, AgentInfo, CreateAgent, Frame, HookKind, InputEvent, Project, ProjectId};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientMessage {
+    Hello { protocol_version: u32 },
+    Request { id: u64, request: Request },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Request {
+    ListProjects,
+    AddProject {
+        path: PathBuf,
+        name: Option<String>,
+    },
+    RemoveProject {
+        id: ProjectId,
+    },
+    ListAgents,
+    CreateAgent(CreateAgent),
+    KillAgent {
+        id: AgentId,
+    },
+    RestartAgent {
+        id: AgentId,
+        cols: u16,
+        rows: u16,
+    },
+    RemoveAgent {
+        id: AgentId,
+    },
+    RenameAgent {
+        id: AgentId,
+        name: String,
+    },
+    Subscribe {
+        id: AgentId,
+    },
+    Unsubscribe,
+    Input {
+        id: AgentId,
+        event: InputEvent,
+    },
+    Resize {
+        id: AgentId,
+        cols: u16,
+        rows: u16,
+    },
+    Scroll {
+        id: AgentId,
+        lines: i32,
+    },
+    Hook {
+        id: AgentId,
+        kind: HookKind,
+        session_id: Option<String>,
+    },
+    Shutdown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Response {
+    Ok,
+    Projects(Vec<Project>),
+    Project(Project),
+    Agents(Vec<AgentInfo>),
+    Agent(AgentInfo),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerMessage {
+    Welcome {
+        protocol_version: u32,
+        daemon_version: String,
+    },
+    Response {
+        id: u64,
+        result: Result<Response, String>,
+    },
+    AgentUpdated(AgentInfo),
+    AgentRemoved(AgentId),
+    ProjectsChanged(Vec<Project>),
+    Frame(Frame),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AgentKind, Cell, Key, KeyCode, Modifiers, ProjectId, Row, Status};
+
+    fn round_trip<T>(value: &T)
+    where
+        T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
+    {
+        let bytes = postcard::to_stdvec(value).expect("serialize");
+        let back: T = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(&back, value);
+    }
+
+    fn info() -> AgentInfo {
+        AgentInfo {
+            id: AgentId::random(),
+            project: ProjectId::random(),
+            name: "api".into(),
+            kind: AgentKind::Claude,
+            command: vec!["claude".into()],
+            cwd: "/tmp/p".into(),
+            status: Status::Exited(2),
+        }
+    }
+
+    #[test]
+    fn every_request_round_trips() {
+        let id = AgentId::random();
+        let requests = vec![
+            Request::ListProjects,
+            Request::AddProject {
+                path: "/tmp/p".into(),
+                name: Some("p".into()),
+            },
+            Request::RemoveProject {
+                id: ProjectId::random(),
+            },
+            Request::ListAgents,
+            Request::CreateAgent(CreateAgent {
+                project: ProjectId::random(),
+                name: "a".into(),
+                kind: AgentKind::Generic,
+                command: vec!["sh".into()],
+                cols: 80,
+                rows: 24,
+            }),
+            Request::KillAgent { id },
+            Request::RestartAgent {
+                id,
+                cols: 80,
+                rows: 24,
+            },
+            Request::RemoveAgent { id },
+            Request::RenameAgent {
+                id,
+                name: "b".into(),
+            },
+            Request::Subscribe { id },
+            Request::Unsubscribe,
+            Request::Input {
+                id,
+                event: InputEvent::Key(Key::new(KeyCode::Char('é'), Modifiers::ALT)),
+            },
+            Request::Input {
+                id,
+                event: InputEvent::Paste("multi\nline".into()),
+            },
+            Request::Input {
+                id,
+                event: InputEvent::Wheel {
+                    up: true,
+                    col: 3,
+                    row: 4,
+                },
+            },
+            Request::Resize {
+                id,
+                cols: 100,
+                rows: 30,
+            },
+            Request::Scroll { id, lines: -3 },
+            Request::Hook {
+                id,
+                kind: HookKind::Notification,
+                session_id: Some("s".into()),
+            },
+            Request::Shutdown,
+        ];
+        for request in requests {
+            round_trip(&ClientMessage::Request { id: 7, request });
+        }
+        round_trip(&ClientMessage::Hello {
+            protocol_version: 1,
+        });
+    }
+
+    #[test]
+    fn every_server_message_round_trips() {
+        let info = info();
+        let messages = vec![
+            ServerMessage::Welcome {
+                protocol_version: 1,
+                daemon_version: "0.1.0".into(),
+            },
+            ServerMessage::Response {
+                id: 1,
+                result: Ok(Response::Ok),
+            },
+            ServerMessage::Response {
+                id: 2,
+                result: Err("nope".into()),
+            },
+            ServerMessage::Response {
+                id: 3,
+                result: Ok(Response::Agents(vec![info.clone()])),
+            },
+            ServerMessage::AgentUpdated(info.clone()),
+            ServerMessage::AgentRemoved(info.id),
+            ServerMessage::ProjectsChanged(vec![Project {
+                id: ProjectId::random(),
+                name: "p".into(),
+                path: "/p".into(),
+            }]),
+            ServerMessage::Frame(Frame {
+                agent: info.id,
+                cols: 2,
+                rows: 1,
+                full: true,
+                lines: vec![Row {
+                    index: 0,
+                    cells: vec![Cell::default(), Cell::default()],
+                }],
+                cursor: Some((1, 0)),
+            }),
+        ];
+        for message in messages {
+            round_trip(&message);
+        }
+    }
+}
