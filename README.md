@@ -14,7 +14,7 @@ Early development. Milestone 1 is an embedded-terminal spike (`just spike`). See
 
 ```sh
 direnv allow        # or: nix develop
-just check          # fmt, clippy, tests
+just check          # fmt, clippy, tests, hook tests, harness and spike smoke runs
 just spike          # run the spike with claude in the main pane
 just spike sh       # ... or any other command
 

@@ -84,3 +84,10 @@ explicit confirmation is required. The branch is never deleted automatically.
 - `lazyagents hook` never blocks or fails Claude: 200 ms total timeout, always exits 0.
 - All daemon errors logged with `tracing` to `daemon.log`; TUI shows the last error in
   the status line.
+
+## See also
+
+- [protocol.md](protocol.md): wire format between the daemon, the TUI and the CLI.
+- [keybindings.md](keybindings.md): the TUI key map.
+- [status-detection.md](status-detection.md): how agent status is derived from hooks and the pane.
+- [decisions/](decisions/): ADRs recording the design choices behind this system.

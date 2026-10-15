@@ -1,6 +1,6 @@
 ---
 name: running-dev
-description: Drive the spike or the lazyagents TUI in an isolated tmux session: start it, send keys, assert on the screen. Load for any end-to-end or terminal-behaviour check.
+description: "Drive the spike or the lazyagents TUI in an isolated tmux session: start it, send keys, assert on the screen. Load for any end-to-end or terminal-behaviour check."
 ---
 
 # Running dev

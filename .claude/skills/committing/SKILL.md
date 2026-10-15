@@ -1,6 +1,6 @@
 ---
 name: committing
-description: Conventional Commits rules for this repo: types, scopes, subject format, commit granularity. Load before every git commit.
+description: "Conventional Commits rules for this repo: types, scopes, subject format, commit granularity. Load before every git commit."
 ---
 
 # Committing
@@ -16,8 +16,8 @@ description: Conventional Commits rules for this repo: types, scopes, subject fo
    ```
 
    - type: `feat` `fix` `docs` `refactor` `test` `chore` `build` `ci` `perf`
-   - scope (optional): `protocol` `daemon` `tui` `cli` `docs` `nix` `repo` `spike`, naming the crate or area touched; leave it out when the change spans several.
-   - subject: imperative mood, lower case, no trailing period; the whole first line is at most 72 characters.
+   - scope (optional): `protocol` `daemon` `tui` `cli` `client` `docs` `nix` `repo` `spike`, naming the crate or area touched; leave it out when the change spans several.
+   - subject: imperative mood, lower case, no trailing period; the whole first line is at most 72 characters. Count it before committing; the commit-msg hook rejects 73+.
    - breaking change to the protocol or the on-disk state format: `!` after the scope and a `BREAKING CHANGE:` footer.
 4. Commit with a heredoc so the body keeps its line breaks:
 

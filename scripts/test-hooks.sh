@@ -30,6 +30,9 @@ expect 1 "commit-msg rejects untyped subject" msg "added stuff"
 expect 1 "commit-msg rejects unknown scope" msg "feat(web): add page"
 expect 1 "commit-msg rejects unknown type" msg "feature: add page"
 expect 1 "commit-msg rejects subject over 72 chars" msg "feat: $(printf 'x%.0s' {1..80})"
+expect 1 "commit-msg rejects Reverting without a colon form" msg "Reverting stuff"
+expect 1 "commit-msg rejects Merged prefix" msg "Merged things"
+expect 0 "commit-msg accepts git revert subject" msg 'Revert "feat: x"'
 
 fmt_hook() { printf '%s' "$1" | "$root/.claude/hooks/rustfmt-edited.sh"; }
 printf 'fn  main( ){}\n' >"$tmp/ugly.rs"
@@ -41,6 +44,14 @@ expect 2 "rustfmt hook reports syntax errors" fmt_hook "{\"tool_input\":{\"file_
 
 stop_hook() { printf '%s' "$1" | CLAUDE_PROJECT_DIR="$root" "$root/.claude/hooks/clippy-on-stop.sh"; }
 expect 0 "clippy stop hook lets a re-entered stop through" stop_hook '{"stop_hook_active":true}'
+
+clean_repo="$tmp/clean-repo"
+git init -q "$clean_repo"
+stop_hook_in() { printf '%s' '{}' | CLAUDE_PROJECT_DIR="$1" "$root/.claude/hooks/clippy-on-stop.sh"; }
+expect 0 "clippy stop hook skips when no Rust files changed" stop_hook_in "$clean_repo"
+
+precommit_in() { (cd "$1" && "$root/.githooks/pre-commit"); }
+expect 0 "pre-commit skips when nothing Rust is staged" precommit_in "$clean_repo"
 
 if ((failures > 0)); then
   echo "$failures hook test(s) failed"
