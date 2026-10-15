@@ -37,7 +37,11 @@ pub fn encode_key(key: KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
 
 pub fn encode_paste(text: &str, mode: TermMode) -> Vec<u8> {
     if mode.contains(TermMode::BRACKETED_PASTE) {
-        let body = text.replace("\x1b[201~", "");
+        const END: &str = "\x1b[201~";
+        let mut body = text.to_owned();
+        while body.contains(END) {
+            body = body.replace(END, "");
+        }
         [b"\x1b[200~".as_slice(), body.as_bytes(), b"\x1b[201~"].concat()
     } else {
         text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
@@ -228,6 +232,14 @@ mod tests {
     fn bracketed_paste_strips_end_marker() {
         assert_eq!(
             encode_paste("a\x1b[201~b", TermMode::BRACKETED_PASTE),
+            b"\x1b[200~ab\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_strips_nested_end_marker() {
+        assert_eq!(
+            encode_paste("a\x1b[20\x1b[201~1~b", TermMode::BRACKETED_PASTE),
             b"\x1b[200~ab\x1b[201~"
         );
     }
