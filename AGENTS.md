@@ -20,7 +20,7 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 | Path | Purpose |
 |---|---|
 | `crates/protocol` | client↔daemon messages and framing |
-| `crates/daemon` | agents, PTYs, terminal emulation, persistence (git worktrees: planned) |
+| `crates/daemon` | agents, PTYs, terminal emulation, persistence, git worktrees |
 | `crates/client` | connects to the daemon, starting it on demand; used by the CLI and the TUI |
 | `crates/tui` | ratatui client: model (app.rs), rendering (ui.rs), connection, runtime |
 | `crates/lazyagents` | the binary and CLI |

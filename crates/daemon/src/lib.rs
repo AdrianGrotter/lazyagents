@@ -1,6 +1,7 @@
 //! The lazyagents daemon: owns agent processes, their terminals, and persisted state.
 
 pub mod encode;
+pub mod git;
 mod lock;
 pub mod reap;
 mod server;

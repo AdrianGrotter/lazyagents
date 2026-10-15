@@ -1,3 +1,5 @@
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -5,7 +7,7 @@ use daemon::{Config, run};
 use protocol::{
     AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, HookKind, InputEvent, Key, KeyCode,
     Modifiers, PROTOCOL_VERSION, Project, Request, Response, Screen, ServerMessage, StatePaths,
-    Status, read_message, write_message,
+    Status, WorktreeRequest, read_message, write_message,
 };
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -138,18 +140,27 @@ impl Conn {
     }
 
     async fn request(&mut self, request: Request) -> Result<Response, String> {
+        let id = self.send(request).await;
+        self.response(id).await
+    }
+
+    async fn send(&mut self, request: Request) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         write_message(&mut self.write, &ClientMessage::Request { id, request })
             .await
             .expect("send");
-        loop {
-            let message = self.next().await;
-            match message {
-                ServerMessage::Response { id: got, result } if got == id => return result,
-                other => self.pending.push(other),
-            }
-        }
+        id
+    }
+
+    async fn response(&mut self, id: u64) -> Result<Response, String> {
+        let message = self
+            .wait_for(|m| matches!(m, ServerMessage::Response { id: got, .. } if *got == id))
+            .await;
+        let ServerMessage::Response { result, .. } = message else {
+            unreachable!()
+        };
+        result
     }
 
     async fn next(&mut self) -> ServerMessage {
@@ -1480,4 +1491,324 @@ async fn scroll_and_resize_need_a_terminal() {
         .await
         .expect_err("resize without a terminal");
     assert!(resize.contains("has no terminal"), "{resize}");
+}
+
+async fn add_repo_project(conn: &mut Conn) -> (Project, tempfile::TempDir) {
+    let repo = common::repo();
+    let Ok(Response::Project(project)) = conn
+        .request(Request::AddProject {
+            path: repo.path().to_path_buf(),
+            name: None,
+        })
+        .await
+    else {
+        panic!("add project failed");
+    };
+    (project, repo)
+}
+
+async fn create_in_worktree(
+    conn: &mut Conn,
+    project: &Project,
+    name: &str,
+    command: &[&str],
+) -> Result<AgentInfo, String> {
+    let request = Request::CreateAgent(CreateAgent {
+        project: project.id,
+        name: name.into(),
+        kind: AgentKind::Generic,
+        command: command.iter().map(|s| s.to_string()).collect(),
+        cols: 250,
+        rows: 24,
+        worktree: Some(WorktreeRequest { base: None }),
+    });
+    match conn.request(request).await {
+        Ok(Response::Agent(info)) => Ok(info),
+        Ok(other) => panic!("unexpected {other:?}"),
+        Err(e) => Err(e),
+    }
+}
+
+fn worktree_path(daemon: &TestDaemon, project: &Project, name: &str) -> PathBuf {
+    daemon
+        .path()
+        .canonicalize()
+        .expect("canonical state dir")
+        .join("worktrees")
+        .join(format!("{}-{}", project.name, &project.id.to_string()[..8]))
+        .join(name)
+}
+
+async fn list_agents(conn: &mut Conn) -> Vec<AgentInfo> {
+    let Ok(Response::Agents(agents)) = conn.request(Request::ListAgents).await else {
+        panic!("list")
+    };
+    agents
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worktree_agent_runs_in_its_worktree() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _repo) = add_repo_project(&mut conn).await;
+    let agent = create_in_worktree(&mut conn, &project, "wt", &["sh", "-c", "pwd; sleep 30"])
+        .await
+        .expect("create");
+    let path = worktree_path(&daemon, &project, "wt");
+    let worktree = agent.worktree.clone().expect("worktree info");
+    assert_eq!(worktree.branch, "lazyagents/wt");
+    assert_eq!(worktree.base, "main");
+    assert_eq!(worktree.path, path);
+    assert_eq!(agent.cwd, path);
+    assert!(path.join("README").is_file());
+
+    conn.request(Request::Subscribe { id: agent.id })
+        .await
+        .expect("subscribe");
+    conn.wait_text(agent.id, &path.display().to_string()).await;
+
+    let Ok(Response::Agent(renamed)) = conn
+        .request(Request::RenameAgent {
+            id: agent.id,
+            name: "wt2".into(),
+        })
+        .await
+    else {
+        panic!("rename")
+    };
+    assert_eq!(renamed.worktree, Some(worktree));
+    assert_eq!(renamed.cwd, path);
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_branch_names_create_nothing() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let err = create_in_worktree(&mut conn, &project, "foo.lock", &["sleep", "30"])
+        .await
+        .expect_err("invalid branch");
+    assert!(err.contains("foo.lock"), "{err}");
+    assert!(list_agents(&mut conn).await.is_empty());
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/*"]),
+        ""
+    );
+    assert!(!worktree_path(&daemon, &project, "foo.lock").exists());
+    assert!(!daemon.path().join("worktrees").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worktree_in_non_git_project_is_an_error() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let err = create_in_worktree(&mut conn, &project, "nogit", &["sleep", "30"])
+        .await
+        .expect_err("not a repo");
+    assert!(err.contains("not a git repository"), "{err}");
+    assert!(list_agents(&mut conn).await.is_empty());
+    assert!(!daemon.path().join("worktrees").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_refuses_a_dirty_worktree_and_lists_files() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _repo) = add_repo_project(&mut conn).await;
+    let agent = create_in_worktree(&mut conn, &project, "dirty", &["sleep", "30"])
+        .await
+        .expect("create");
+    let path = agent.worktree.as_ref().expect("worktree").path.clone();
+    std::fs::write(path.join("README"), "changed\n").expect("edit");
+    std::fs::write(path.join("new.txt"), "new\n").expect("add");
+
+    let err = conn
+        .request(Request::RemoveAgent {
+            id: agent.id,
+            remove_worktree: true,
+            force: false,
+        })
+        .await
+        .expect_err("dirty worktree");
+    assert_eq!(err, "worktree has uncommitted changes:\nREADME\nnew.txt");
+    let agents = list_agents(&mut conn).await;
+    assert_eq!(agents.len(), 1);
+    assert!(agents[0].status.is_running(), "{:?}", agents[0].status);
+    assert!(path.join("new.txt").is_file());
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_with_force_removes_the_worktree() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let agent = create_in_worktree(&mut conn, &project, "forced", &["sleep", "30"])
+        .await
+        .expect("create");
+    let path = agent.worktree.as_ref().expect("worktree").path.clone();
+    std::fs::write(path.join("README"), "changed\n").expect("edit");
+
+    conn.request(Request::RemoveAgent {
+        id: agent.id,
+        remove_worktree: true,
+        force: true,
+    })
+    .await
+    .expect("forced remove");
+    assert!(!path.exists());
+    assert!(list_agents(&mut conn).await.is_empty());
+    let worktrees = common::git(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert!(!worktrees.contains("forced"), "{worktrees}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn branches_survive_worktree_removal() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let agent = create_in_worktree(&mut conn, &project, "keep", &["sleep", "30"])
+        .await
+        .expect("create");
+    let path = agent.worktree.as_ref().expect("worktree").path.clone();
+
+    conn.request(Request::RemoveAgent {
+        id: agent.id,
+        remove_worktree: true,
+        force: false,
+    })
+    .await
+    .expect("clean remove");
+    assert!(!path.exists());
+    assert!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/keep"])
+            .contains("lazyagents/keep")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_without_remove_worktree_keeps_it() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let agent = create_in_worktree(&mut conn, &project, "stay", &["sleep", "30"])
+        .await
+        .expect("create");
+    let path = agent.worktree.as_ref().expect("worktree").path.clone();
+    std::fs::write(path.join("README"), "changed\n").expect("edit");
+
+    conn.request(Request::RemoveAgent {
+        id: agent.id,
+        remove_worktree: false,
+        force: false,
+    })
+    .await
+    .expect("remove agent only");
+    assert!(list_agents(&mut conn).await.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(path.join("README")).expect("kept"),
+        "changed\n"
+    );
+    let worktrees = common::git(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert!(worktrees.contains("stay"), "{worktrees}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn git_queries_answer_while_the_loop_keeps_serving() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let lines = 400_000;
+    let numbered = |order: &dyn Fn(usize) -> usize| -> String {
+        (0..lines)
+            .map(|i| format!("line {:07}\n", order(i)))
+            .collect()
+    };
+    std::fs::write(repo.path().join("big.txt"), numbered(&|i| i)).expect("write big file");
+    common::git(repo.path(), &["add", "big.txt"]);
+    common::git(repo.path(), &["commit", "-q", "-m", "big"]);
+    let agent = create_in_worktree(&mut conn, &project, "big", &["sleep", "30"])
+        .await
+        .expect("create");
+    let path = agent.worktree.as_ref().expect("worktree").path.clone();
+    let shuffled = numbered(&|i| i * 7919 % lines);
+    assert!(shuffled.len() > 5_000_000);
+    std::fs::write(path.join("big.txt"), shuffled).expect("shuffle big file");
+
+    let sent = tokio::time::Instant::now();
+    let diff_id = conn.send(Request::GitDiff { id: agent.id }).await;
+    let list_id = conn.send(Request::ListAgents).await;
+    let mut list_after = None;
+    let mut diff = None;
+    while list_after.is_none() || diff.is_none() {
+        match conn.next().await {
+            ServerMessage::Response { id, result } if id == list_id => {
+                assert!(matches!(result, Ok(Response::Agents(_))), "{result:?}");
+                list_after = Some((sent.elapsed(), diff.is_none()));
+            }
+            ServerMessage::Response { id, result } if id == diff_id => diff = Some(result),
+            _ => {}
+        }
+    }
+    let (elapsed, list_first) = list_after.expect("list answered");
+    assert!(
+        list_first || elapsed <= Duration::from_millis(300),
+        "ListAgents took {elapsed:?} behind the diff"
+    );
+    let Some(Ok(Response::Diff(text))) = diff else {
+        panic!("diff failed: {diff:?}")
+    };
+    assert!(text.len() > 5_000_000, "{} bytes", text.len());
+    assert!(text.contains("+line 0007919\n"));
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn git_stat_and_diff_for_plain_agents_show_uncommitted_changes() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "plain",
+        AgentKind::Generic,
+        &["sleep", "30"],
+    )
+    .await
+    .expect("create");
+    assert_eq!(agent.worktree, None);
+    std::fs::write(repo.path().join("README"), "hello\nmore\n").expect("edit");
+
+    assert_eq!(
+        conn.request(Request::GitStat { id: agent.id }).await,
+        Ok(Response::GitStat(protocol::GitStat {
+            insertions: 1,
+            deletions: 0,
+            files: 1,
+            uncommitted: 1,
+        }))
+    );
+    let Ok(Response::Diff(text)) = conn.request(Request::GitDiff { id: agent.id }).await else {
+        panic!("diff")
+    };
+    assert!(text.contains("+more"), "{text}");
+    let unknown = conn
+        .request(Request::GitStat {
+            id: AgentId::random(),
+        })
+        .await
+        .expect_err("unknown agent");
+    assert!(unknown.contains("unknown agent"), "{unknown}");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
 }

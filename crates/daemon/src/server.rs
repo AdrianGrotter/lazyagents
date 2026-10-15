@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use protocol::{
     AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, HookKind, InputEvent,
-    PROTOCOL_VERSION, Project, ProjectId, Request, Response, Screen, ServerMessage, StatePaths,
-    Status, read_message, write_message,
+    MAX_MESSAGE_LEN, PROTOCOL_VERSION, Project, ProjectId, Request, Response, Screen,
+    ServerMessage, StatePaths, Status, WorktreeInfo, WorktreeRequest, read_message, write_message,
 };
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -19,6 +19,7 @@ use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::encode::encode;
+use crate::git;
 use crate::lock::InstanceLock;
 use crate::reap::{self, ProcessTable, Tracked};
 use crate::spawn::{Launch, SpawnContext, find_in_path, hook_settings, spawn_spec};
@@ -50,6 +51,18 @@ enum Command {
 enum Flow {
     Continue,
     Stop,
+}
+
+enum Reply {
+    Now(Box<Result<Response, String>>),
+    /// Answered later from another thread through the client's sender.
+    Deferred,
+}
+
+#[derive(Clone, Copy)]
+enum GitQuery {
+    Stat,
+    Diff,
 }
 
 const TICK: Duration = Duration::from_millis(33);
@@ -350,9 +363,13 @@ impl Daemon {
                 request,
             } => {
                 let stop = matches!(request, Request::Shutdown);
-                let result = self.handle_request(client, request);
-                if let Some(c) = self.clients.get(&client) {
-                    let _ = c.tx.send(ServerMessage::Response { id, result });
+                if let Reply::Now(result) = self.handle_request(client, id, request)
+                    && let Some(c) = self.clients.get(&client)
+                {
+                    let _ = c.tx.send(ServerMessage::Response {
+                        id,
+                        result: *result,
+                    });
                 }
                 if stop { Flow::Stop } else { Flow::Continue }
             }
@@ -363,8 +380,8 @@ impl Daemon {
         }
     }
 
-    fn handle_request(&mut self, client: ClientId, request: Request) -> Result<Response, String> {
-        match request {
+    fn handle_request(&mut self, client: ClientId, request_id: u64, request: Request) -> Reply {
+        let result = match request {
             Request::ListProjects => Ok(Response::Projects(self.projects.clone())),
             Request::AddProject { path, name } => {
                 self.add_project(&path, name).map(Response::Project)
@@ -376,19 +393,21 @@ impl Daemon {
             Request::RestartAgent { id, cols, rows } => self
                 .restart_agent(id, PaneSize::new(cols, rows))
                 .map(Response::Agent),
-            Request::RemoveAgent { id, .. } => self.remove_agent(id).map(|()| Response::Ok),
-            Request::GitStat { .. } | Request::GitDiff { .. } => Err("not implemented".into()),
-            Request::RenameAgent { id, name } => self.rename_agent(id, name).map(Response::Agent),
-            Request::Subscribe { id } => {
-                self.agent(id)?;
-                if let Some(c) = self.clients.get_mut(&client) {
-                    c.subscription = Some(Subscription {
-                        agent: id,
-                        last: None,
-                    });
-                }
-                Ok(Response::Ok)
+            Request::RemoveAgent {
+                id,
+                remove_worktree,
+                force,
+            } => self
+                .remove_agent(id, remove_worktree, force)
+                .map(|()| Response::Ok),
+            Request::GitStat { id } => {
+                return self.git_query(client, request_id, id, GitQuery::Stat);
             }
+            Request::GitDiff { id } => {
+                return self.git_query(client, request_id, id, GitQuery::Diff);
+            }
+            Request::RenameAgent { id, name } => self.rename_agent(id, name).map(Response::Agent),
+            Request::Subscribe { id } => self.subscribe(client, id).map(|()| Response::Ok),
             Request::Unsubscribe => {
                 if let Some(c) = self.clients.get_mut(&client) {
                     c.subscription = None;
@@ -396,22 +415,10 @@ impl Daemon {
                 Ok(Response::Ok)
             }
             Request::Input { id, event } => self.input(id, &event).map(|()| Response::Ok),
-            Request::Resize { id, cols, rows } => {
-                let agent = self.with_terminal_mut(id)?;
-                if let Some(t) = agent.terminal.as_mut() {
-                    t.resize(PaneSize::new(cols, rows));
-                }
-                agent.dirty = true;
-                Ok(Response::Ok)
-            }
-            Request::Scroll { id, lines } => {
-                let agent = self.with_terminal_mut(id)?;
-                if let Some(t) = agent.terminal.as_ref() {
-                    t.scroll(lines);
-                }
-                agent.dirty = true;
-                Ok(Response::Ok)
-            }
+            Request::Resize { id, cols, rows } => self
+                .resize(id, PaneSize::new(cols, rows))
+                .map(|()| Response::Ok),
+            Request::Scroll { id, lines } => self.scroll(id, lines).map(|()| Response::Ok),
             Request::Hook {
                 id,
                 kind,
@@ -424,7 +431,37 @@ impl Daemon {
                 self.stop_all();
                 Ok(Response::Ok)
             }
+        };
+        Reply::Now(Box::new(result))
+    }
+
+    fn subscribe(&mut self, client: ClientId, id: AgentId) -> Result<(), String> {
+        self.agent(id)?;
+        if let Some(c) = self.clients.get_mut(&client) {
+            c.subscription = Some(Subscription {
+                agent: id,
+                last: None,
+            });
         }
+        Ok(())
+    }
+
+    fn resize(&mut self, id: AgentId, size: PaneSize) -> Result<(), String> {
+        let agent = self.with_terminal_mut(id)?;
+        if let Some(t) = agent.terminal.as_mut() {
+            t.resize(size);
+        }
+        agent.dirty = true;
+        Ok(())
+    }
+
+    fn scroll(&mut self, id: AgentId, lines: i32) -> Result<(), String> {
+        let agent = self.with_terminal_mut(id)?;
+        if let Some(t) = agent.terminal.as_ref() {
+            t.scroll(lines);
+        }
+        agent.dirty = true;
+        Ok(())
     }
 
     fn agent(&self, id: AgentId) -> Result<&Agent, String> {
@@ -582,16 +619,22 @@ impl Daemon {
         if create.kind == AgentKind::Generic && create.command.is_empty() {
             return Err("a generic agent needs a command".into());
         }
+        let worktree = match create.worktree {
+            Some(request) => Some(self.add_worktree(&project, &create.name, request)?),
+            None => None,
+        };
         let record = AgentRecord {
             id: AgentId::random(),
             project: project.id,
             name: create.name,
             kind: create.kind,
             command: create.command,
-            cwd: project.path.clone(),
+            cwd: worktree
+                .as_ref()
+                .map_or_else(|| project.path.clone(), |w| w.path.clone()),
             session_id: None,
             resumable: false,
-            worktree: None,
+            worktree,
         };
         let id = record.id;
         self.agents.insert(id, Agent::new(record));
@@ -600,6 +643,32 @@ impl Daemon {
         self.announce(id);
         started?;
         self.info_of(id)
+    }
+
+    fn add_worktree(
+        &self,
+        project: &Project,
+        name: &str,
+        request: WorktreeRequest,
+    ) -> Result<WorktreeInfo, String> {
+        let branch = format!("lazyagents/{name}");
+        git::check_branch(&branch).map_err(|e| format!("{e:#}"))?;
+        let base = match request.base.filter(|b| !b.trim().is_empty()) {
+            Some(base) => base.trim().to_string(),
+            None => git::current_branch(&project.path).map_err(|e| format!("{e:#}"))?,
+        };
+        let state = self
+            .paths
+            .dir()
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", self.paths.dir().display()))?;
+        let id = project.id.to_string();
+        let path = state
+            .join("worktrees")
+            .join(format!("{}-{}", project.name.replace('/', "-"), &id[..8]))
+            .join(name);
+        git::add_worktree(&project.path, &path, &branch, &base).map_err(|e| format!("{e:#}"))?;
+        Ok(WorktreeInfo { path, branch, base })
     }
 
     fn start(&mut self, id: AgentId, launch: Launch, size: PaneSize) -> Result<(), String> {
@@ -729,9 +798,47 @@ impl Daemon {
         self.info_of(id)
     }
 
-    fn remove_agent(&mut self, id: AgentId) -> Result<(), String> {
-        self.agent(id)?;
+    fn remove_agent(
+        &mut self,
+        id: AgentId,
+        remove_worktree: bool,
+        force: bool,
+    ) -> Result<(), String> {
+        let agent = self.agent(id)?;
+        let removal = match agent.record.worktree.as_ref().filter(|_| remove_worktree) {
+            Some(worktree) => {
+                let project = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == agent.record.project)
+                    .map(|p| p.path.clone())
+                    .ok_or_else(|| format!("unknown project {}", agent.record.project))?;
+                Some((project, worktree.path.clone()))
+            }
+            None => None,
+        };
+        if let Some((_, path)) = &removal
+            && !force
+        {
+            let dirty = git::dirty_files(path).map_err(|e| format!("{e:#}"))?;
+            if !dirty.is_empty() {
+                return Err(format!(
+                    "worktree has uncommitted changes:\n{}",
+                    dirty.join("\n")
+                ));
+            }
+        }
         self.stop(&[id], STOP_GRACE);
+        if let Some((project, path)) = &removal
+            && let Err(e) = git::remove_worktree(project, path, force)
+        {
+            if let Some(agent) = self.agents.get_mut(&id) {
+                agent.set_status(Status::Stopped);
+                agent.dirty = true;
+            }
+            self.announce(id);
+            return Err(format!("{e:#}"));
+        }
         self.agents
             .remove(&id)
             .ok_or_else(|| format!("unknown agent {id}"))?;
@@ -744,6 +851,33 @@ impl Daemon {
         self.persist();
         self.broadcast(&ServerMessage::AgentRemoved(id));
         Ok(())
+    }
+
+    /// Runs the query on its own thread and answers the client from there; an answer
+    /// that arrives after the client left or the daemon stopped is dropped.
+    fn git_query(&self, client: ClientId, request_id: u64, id: AgentId, query: GitQuery) -> Reply {
+        let agent = match self.agent(id) {
+            Ok(agent) => agent,
+            Err(e) => return Reply::Now(Box::new(Err(e))),
+        };
+        let Some(tx) = self.clients.get(&client).map(|c| c.tx.clone()) else {
+            return Reply::Deferred;
+        };
+        let dir = agent.record.cwd.clone();
+        let base = agent.record.worktree.as_ref().map(|w| w.base.clone());
+        let spawned = std::thread::Builder::new()
+            .name("git".into())
+            .spawn(move || {
+                let result = run_git_query(&dir, base.as_deref(), query);
+                let _ = tx.send(ServerMessage::Response {
+                    id: request_id,
+                    result,
+                });
+            });
+        match spawned {
+            Ok(_) => Reply::Deferred,
+            Err(e) => Reply::Now(Box::new(Err(format!("spawning a git thread: {e}")))),
+        }
     }
 
     fn rename_agent(&mut self, id: AgentId, name: String) -> Result<AgentInfo, String> {
@@ -999,6 +1133,30 @@ impl Daemon {
     }
 }
 
+/// Room left in a frame for everything in a diff response but the text.
+const RESPONSE_OVERHEAD: usize = 1024;
+
+fn run_git_query(dir: &Path, base: Option<&str>, query: GitQuery) -> Result<Response, String> {
+    match query {
+        GitQuery::Stat => git::stat(dir, base).map(Response::GitStat),
+        GitQuery::Diff => git::diff(dir, base).map(Response::Diff),
+    }
+    .map_err(|e| format!("{e:#}"))
+    .and_then(fit_in_a_message)
+}
+
+/// A response too large to frame would close the client's connection instead of
+/// reaching it, so it becomes an error the client can show.
+fn fit_in_a_message(response: Response) -> Result<Response, String> {
+    match &response {
+        Response::Diff(text) if text.len() + RESPONSE_OVERHEAD > MAX_MESSAGE_LEN => Err(format!(
+            "diff too large to send ({} MiB)",
+            text.len() / (1024 * 1024)
+        )),
+        _ => Ok(response),
+    }
+}
+
 fn take_snapshot(requests: Vec<(AgentId, u64, u32, Vec<Tracked>)>) -> Snapshot {
     let table = ProcessTable::read();
     requests
@@ -1024,6 +1182,15 @@ mod tests {
             resumable: false,
             worktree: None,
         })
+    }
+
+    #[test]
+    fn a_diff_too_large_for_one_message_is_an_error() {
+        let fits = "x".repeat(MAX_MESSAGE_LEN - RESPONSE_OVERHEAD);
+        assert!(fit_in_a_message(Response::Diff(fits)).is_ok());
+        let huge = "x".repeat(MAX_MESSAGE_LEN);
+        let err = fit_in_a_message(Response::Diff(huge)).expect_err("too large");
+        assert!(err.contains("too large"), "{err}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Architecture
 
-Status: daemon, protocol, client, CLI and TUI implemented. Planned (plan 4): git worktrees
-and the `D` diff view, the config file with configurable keybindings and presets, text
+Status: daemon, protocol, client, CLI and TUI implemented, including daemon-side git
+worktrees and git stat and diff queries. Planned (plan 4): the worktree UI and the `D` diff view, the config file with configurable keybindings and presets, text
 selection and copy, and keyboard scroll mode.
 
 ## Purpose
@@ -19,7 +19,7 @@ One binary, `lazyagents`, in a Cargo workspace:
 | Crate | Responsibility | Depends on |
 |---|---|---|
 | `crates/protocol` | Message types, framing, protocol version | serde, postcard |
-| `crates/daemon` | Agent registry, PTYs, terminal emulation, input encoding, persistence, hook ingestion, status (git worktrees: planned) | protocol, alacritty_terminal, rustix, tokio |
+| `crates/daemon` | Agent registry, PTYs, terminal emulation, input encoding, persistence, hook ingestion, status, git worktrees | protocol, alacritty_terminal, rustix, tokio |
 | `crates/client` | Connects to the daemon, starting it on demand; used by the CLI and the TUI | protocol, rustix, tokio |
 | `crates/tui` | ratatui client: layout, panels, popups, rendering of remote grids, input capture | client, protocol, ratatui, crossterm, tokio |
 | `crates/lazyagents` | Binary: CLI parsing and subcommand dispatch | daemon, client, tui, protocol, clap |
@@ -115,15 +115,30 @@ function is not used; the binary on `PATH` is.
 
 ### Worktrees
 
-Planned (plan 4); the daemon does not create worktrees yet.
+The daemon runs every git command through the git CLI (`crates/daemon/src/git.rs`), so
+the user's git config applies; it only sets `GIT_TERMINAL_PROMPT=0`.
 
-Creating an agent with "worktree" enabled runs
-`git -C <project> worktree add -b lazyagents/<agent-name> <state>/worktrees/<project>/<agent-name> <base>`
-via the git CLI (so the user's git config applies). The agent's cwd is the worktree.
-The Info panel shows branch and `git diff --shortstat <base>...HEAD` plus uncommitted
-changes. `D` shows the full diff (read-only, scrollable) in the main pane. Removing the
-agent offers to remove the worktree; if it has uncommitted changes they are listed and an
-explicit confirmation is required. The branch is never deleted automatically.
+Creating an agent with a `WorktreeRequest` runs
+`git -C <project> worktree add -b lazyagents/<agent-name> <path> <base>`, where `<path>`
+is `<state>/worktrees/<project-name>-<first 8 of project id>/<agent-name>` (a `/` in the
+project name becomes `-`) and `<base>` is the requested base or the project's current
+branch. The branch name is checked with `git check-ref-format --branch` first. Any
+failure (project not a git repo, invalid branch name, branch exists, base missing)
+answers `Err` and creates no agent, branch or directory. The agent's cwd is the
+worktree, and `AgentInfo.worktree` holds its path, branch and base. Renaming the agent
+keeps its branch and worktree path.
+
+`GitStat` and `GitDiff` run on their own thread and answer when git finishes, so the
+event loop keeps serving. For a worktree agent they compare the working tree with
+`git merge-base <base> HEAD` (committed and uncommitted work); for any other agent with
+`HEAD` (uncommitted changes only). Untracked files appear only in `uncommitted`, the
+count of `git status --porcelain` entries. A diff too large for one message is an error.
+
+`RemoveAgent { remove_worktree: true }` refuses while `git status --porcelain` lists
+anything, answering `worktree has uncommitted changes:` and the paths, one per line,
+and leaves the agent running; `force: true` skips the check and runs
+`git worktree remove --force`. Without `remove_worktree` the worktree stays on disk.
+The branch is never deleted.
 
 ### The TUI
 
