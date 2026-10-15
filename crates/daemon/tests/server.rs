@@ -214,11 +214,91 @@ fn key(code: KeyCode) -> InputEvent {
     InputEvent::Key(Key::new(code, Modifiers::NONE))
 }
 
-fn alive(marker: &str) -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-f", marker])
-        .status()
-        .is_ok_and(|s| s.success())
+fn pid_alive(pid: u32) -> bool {
+    rustix::process::Pid::from_raw(pid as i32)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+}
+
+/// Pids an agent reported; SIGKILLed on drop if the test panicked, so a failure leaks nothing.
+struct Leaves(Vec<u32>);
+
+impl Leaves {
+    async fn read(path: &Path, count: usize) -> Self {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let pids: Vec<u32> = std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.trim().parse().ok())
+                .collect();
+            if pids.len() >= count {
+                return Self(pids);
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{} never listed {count} pids",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn alive(&self) -> Vec<u32> {
+        self.0
+            .iter()
+            .copied()
+            .filter(|&pid| pid_alive(pid))
+            .collect()
+    }
+}
+
+impl Drop for Leaves {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            for &pid in &self.0 {
+                if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+            }
+        }
+    }
+}
+
+fn ignores_sighup(pidfile: &Path) -> Vec<String> {
+    sh(&format!(
+        "trap '' HUP; echo $$ >> '{}'; sleep 301",
+        pidfile.display()
+    ))
+}
+
+fn job_control_child(pidfile: &Path) -> Vec<String> {
+    sh(&format!(
+        "set -m; sleep 302 & echo $! >> '{}'; wait",
+        pidfile.display()
+    ))
+}
+
+fn own_session_child(pidfile: &Path) -> Vec<String> {
+    sh(&format!(
+        "perl -MPOSIX -e 'POSIX::setsid(); exec \"sleep\", \"303\"' & echo $! >> '{}'; wait",
+        pidfile.display()
+    ))
+}
+
+fn sh(script: &str) -> Vec<String> {
+    vec!["sh".into(), "-c".into(), script.into()]
+}
+
+async fn create_owned(
+    conn: &mut Conn,
+    project: &Project,
+    name: &str,
+    command: &[String],
+) -> AgentInfo {
+    let command: Vec<&str> = command.iter().map(String::as_str).collect();
+    create(conn, project, name, AgentKind::Generic, &command)
+        .await
+        .expect("create")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -575,26 +655,96 @@ async fn hook_for_unknown_agent_is_an_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn shutdown_stops_agents_and_removes_socket() {
+async fn kill_stops_an_agent_that_ignores_sighup() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let agent = create_owned(&mut conn, &project, "nohup", &ignores_sighup(&pidfile)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_stops_a_job_control_background_child() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let agent = create_owned(&mut conn, &project, "jobs", &job_control_child(&pidfile)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_stops_a_descendant_in_its_own_session() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let agent = create_owned(&mut conn, &project, "setsid", &own_session_child(&pidfile)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_stops_the_agent_tree() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let agent = create_owned(&mut conn, &project, "rm", &job_control_child(&pidfile)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    conn.request(Request::RemoveAgent { id: agent.id })
+        .await
+        .expect("remove");
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived remove");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_leaves_exactly_one_live_copy() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let agent = create_owned(&mut conn, &project, "again", &ignores_sighup(&pidfile)).await;
+    Leaves::read(&pidfile, 1).await;
+    conn.request(Request::RestartAgent {
+        id: agent.id,
+        cols: 80,
+        rows: 24,
+    })
+    .await
+    .expect("restart");
+    let leaves = Leaves::read(&pidfile, 2).await;
+    assert_eq!(leaves.alive(), vec![leaves.0[1]], "pids {:?}", leaves.0);
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_stops_agent_trees_and_removes_socket() {
     let mut daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;
-    let (project, _dir) = add_project(&mut conn).await;
-    let marker = format!("lazyagents-shutdown-{}", std::process::id());
-    create(
-        &mut conn,
-        &project,
-        "sleeper",
-        AgentKind::Generic,
-        &["sh", "-c", &format!("sleep 30; : {marker}")],
-    )
-    .await
-    .expect("create");
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !alive(&marker) {
-        assert!(std::time::Instant::now() < deadline, "agent never started");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    create_owned(&mut conn, &project, "nohup", &ignores_sighup(&pidfile)).await;
+    create_owned(&mut conn, &project, "jobs", &job_control_child(&pidfile)).await;
+    create_owned(&mut conn, &project, "setsid", &own_session_child(&pidfile)).await;
+    let leaves = Leaves::read(&pidfile, 3).await;
     assert_eq!(conn.request(Request::Shutdown).await, Ok(Response::Ok));
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived shutdown");
     daemon
         .task
         .take()
@@ -603,11 +753,6 @@ async fn shutdown_stops_agents_and_removes_socket() {
         .expect("join")
         .expect("clean exit");
     assert!(!StatePaths::new(daemon.path()).socket().exists());
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while alive(&marker) && std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(!alive(&marker), "agent survived shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread")]

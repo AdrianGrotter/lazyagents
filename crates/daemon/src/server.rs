@@ -16,6 +16,7 @@ use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::encode::encode;
+use crate::reap::terminate_tree;
 use crate::spawn::{Launch, SpawnContext, find_in_path, hook_settings, spawn_spec};
 use crate::status::{generic_status, on_hook};
 use crate::store::{self, AgentRecord, StoredState};
@@ -46,6 +47,8 @@ enum Flow {
 }
 
 const TICK: Duration = Duration::from_millis(33);
+const STOP_GRACE: Duration = Duration::from_secs(1);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const WHEEL_LINES: i32 = 3;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
@@ -100,6 +103,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     }
 
     accept.abort();
+    daemon.stop_all();
     drop(daemon);
     let _ = tokio::time::timeout(Duration::from_secs(1), async {
         while writers.join_next().await.is_some() {}
@@ -181,6 +185,12 @@ struct Daemon {
     agents: HashMap<AgentId, Agent>,
     clients: HashMap<ClientId, Client>,
     events: UnboundedSender<TerminalEvent>,
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        self.stop_all();
+    }
 }
 
 impl Daemon {
@@ -304,7 +314,10 @@ impl Daemon {
                 kind,
                 session_id,
             } => self.hook(id, kind, session_id).map(|()| Response::Ok),
-            Request::Shutdown => Ok(Response::Ok),
+            Request::Shutdown => {
+                self.stop_all();
+                Ok(Response::Ok)
+            }
         }
     }
 
@@ -488,12 +501,11 @@ impl Daemon {
                 .map(|p| p.path.clone())
                 .unwrap_or_else(|| agent.record.cwd.clone())
         };
+        self.stop(&[id], STOP_GRACE);
         let agent = self
             .agents
             .get_mut(&id)
             .ok_or_else(|| format!("unknown agent {id}"))?;
-        agent.terminal = None;
-        agent.generation += 1;
         let resume = launch == Launch::Resume && agent.record.resumable;
         if agent.record.kind == AgentKind::Claude {
             if !resume {
@@ -541,13 +553,37 @@ impl Daemon {
         }
     }
 
+    /// Terminates the process trees of the given running agents, then drops their
+    /// terminals; returns once every process is gone.
+    fn stop(&mut self, ids: &[AgentId], grace: Duration) {
+        let roots: Vec<u32> = ids
+            .iter()
+            .filter_map(|id| self.agents.get(id))
+            .filter(|agent| agent.status.is_running())
+            .filter_map(|agent| agent.terminal.as_ref().map(Terminal::pid))
+            .collect();
+        terminate_tree(&roots, grace);
+        for id in ids {
+            if let Some(agent) = self.agents.get_mut(id)
+                && agent.terminal.take().is_some()
+            {
+                agent.generation += 1;
+            }
+        }
+    }
+
+    fn stop_all(&mut self) {
+        let ids: Vec<AgentId> = self.agents.keys().copied().collect();
+        self.stop(&ids, SHUTDOWN_GRACE);
+    }
+
     fn kill_agent(&mut self, id: AgentId) -> Result<AgentInfo, String> {
+        self.agent(id)?;
+        self.stop(&[id], STOP_GRACE);
         let agent = self
             .agents
             .get_mut(&id)
             .ok_or_else(|| format!("unknown agent {id}"))?;
-        agent.terminal = None;
-        agent.generation += 1;
         agent.status = Status::Stopped;
         agent.dirty = true;
         self.announce(id);
@@ -563,6 +599,8 @@ impl Daemon {
     }
 
     fn remove_agent(&mut self, id: AgentId) -> Result<(), String> {
+        self.agent(id)?;
+        self.stop(&[id], STOP_GRACE);
         self.agents
             .remove(&id)
             .ok_or_else(|| format!("unknown agent {id}"))?;

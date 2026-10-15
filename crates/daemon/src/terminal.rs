@@ -98,6 +98,7 @@ pub struct Terminal {
     term: Arc<FairMutex<Term<Proxy>>>,
     sender: EventLoopSender,
     size: PaneSize,
+    pid: u32,
 }
 
 impl Terminal {
@@ -116,6 +117,7 @@ impl Terminal {
         };
         let pty = tty::new(&options, size.window_size(), 0)
             .map_err(|e| anyhow::anyhow!("failed to start `{program}`: {e}"))?;
+        let pid = pty.child().id();
 
         let term = Arc::new(FairMutex::new(Term::new(
             Config::default(),
@@ -126,7 +128,12 @@ impl Terminal {
         let sender = event_loop.channel();
         event_loop.spawn();
 
-        Ok(Self { term, sender, size })
+        Ok(Self {
+            term,
+            sender,
+            size,
+            pid,
+        })
     }
 
     pub fn handle(&mut self, event: Event) -> Outcome {
@@ -157,6 +164,11 @@ impl Terminal {
         self.size = size;
         self.term.lock().resize(size);
         let _ = self.sender.send(Msg::Resize(size.window_size()));
+    }
+
+    /// The agent's process, which leads its own session and process group.
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 
     pub fn size(&self) -> PaneSize {

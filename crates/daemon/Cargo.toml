@@ -8,6 +8,7 @@ publish = false
 alacritty_terminal.workspace = true
 anyhow.workspace = true
 protocol = { path = "../protocol" }
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

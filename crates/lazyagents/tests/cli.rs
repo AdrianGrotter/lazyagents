@@ -48,11 +48,80 @@ impl Drop for TestEnv {
     }
 }
 
-fn alive(marker: &str) -> bool {
-    Command::new("pgrep")
-        .args(["-f", marker])
-        .status()
-        .is_ok_and(|s| s.success())
+fn pid_alive(pid: u32) -> bool {
+    rustix::process::Pid::from_raw(pid as i32)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+}
+
+/// Pids an agent reported; SIGKILLed on drop if the test panicked, so a failure leaks nothing.
+struct Leaves(Vec<u32>);
+
+impl Leaves {
+    fn read(path: &Path, count: usize) -> Self {
+        let mut pids = Vec::new();
+        let listed = wait_until(Duration::from_secs(10), || {
+            pids = std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.trim().parse().ok())
+                .collect();
+            pids.len() >= count
+        });
+        let leaves = Self(pids);
+        assert!(listed, "{} never listed {count} pids", path.display());
+        leaves
+    }
+
+    fn alive(&self) -> Vec<u32> {
+        self.0
+            .iter()
+            .copied()
+            .filter(|&pid| pid_alive(pid))
+            .collect()
+    }
+}
+
+impl Drop for Leaves {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            for &pid in &self.0 {
+                if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+            }
+        }
+    }
+}
+
+fn start_tree_agents(env: &TestEnv, pidfile: &Path) -> Leaves {
+    let pidfile = pidfile.display();
+    env.ok(&[
+        "new",
+        "nohup",
+        "--",
+        "sh",
+        "-c",
+        &format!("trap '' HUP; echo $$ >> '{pidfile}'; sleep 301"),
+    ]);
+    env.ok(&[
+        "new",
+        "jobs",
+        "--",
+        "sh",
+        "-c",
+        &format!("set -m; sleep 302 & echo $! >> '{pidfile}'; wait"),
+    ]);
+    env.ok(&[
+        "new",
+        "setsid",
+        "--",
+        "sh",
+        "-c",
+        &format!(
+            "perl -MPOSIX -e 'POSIX::setsid(); exec \"sleep\", \"303\"' & echo $! >> '{pidfile}'; wait"
+        ),
+    ]);
+    Leaves::read(Path::new(&pidfile.to_string()), 3)
 }
 
 fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
@@ -142,24 +211,9 @@ fn errors_go_to_stderr_with_exit_code_one() {
 #[test]
 fn shutdown_leaves_no_agent_processes() {
     let env = TestEnv::new();
-    let marker = format!("lazyagents-cli-marker-{}", std::process::id());
-    env.ok(&[
-        "new",
-        "sleeper",
-        "--",
-        "sh",
-        "-c",
-        &format!("sleep 30; : {marker}"),
-    ]);
-    assert!(
-        wait_until(Duration::from_secs(5), || alive(&marker)),
-        "agent never started"
-    );
-    env.ok(&["shutdown"]);
-    assert!(
-        wait_until(Duration::from_secs(3), || !alive(&marker)),
-        "agent survived shutdown"
-    );
+    let leaves = start_tree_agents(&env, &env.project.path().join("pids"));
+    assert!(env.ok(&["shutdown"]).contains("daemon stopped"));
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived shutdown");
 }
 
 #[test]
