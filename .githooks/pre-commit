@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Formatting and clippy gate for commits that touch Rust or Cargo files.
+set -euo pipefail
+
+git diff --cached --name-only --diff-filter=ACMR | grep -qE '(\.rs|Cargo\.(toml|lock))$' || exit 0
+if ! command -v cargo >/dev/null; then
+  echo "pre-commit: cargo not on PATH; commit from the nix dev shell (direnv or nix develop)." >&2
+  exit 1
+fi
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings

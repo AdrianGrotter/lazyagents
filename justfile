@@ -12,4 +12,7 @@ lint:
 test:
     cargo nextest run --workspace --locked --no-tests=pass
 
-check: fmt-check lint test
+test-hooks:
+    scripts/test-hooks.sh
+
+check: fmt-check lint test test-hooks
