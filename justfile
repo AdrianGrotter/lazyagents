@@ -1,3 +1,5 @@
+set positional-arguments
+
 default: check
 
 fmt:
@@ -23,5 +25,6 @@ smoke-spike:
 
 check: fmt-check lint test test-hooks test-harness smoke-spike
 
+[no-cd]
 spike *args:
-    cargo run -p spike -- {{args}}
+    cargo run --locked --manifest-path {{justfile_directory()}}/Cargo.toml -p spike -- "$@"
