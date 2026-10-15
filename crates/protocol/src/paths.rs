@@ -49,6 +49,16 @@ impl StatePaths {
         &self.dir
     }
 
+    /// Creates the state dir, and any missing parents, readable only by the user.
+    pub fn create_dir(&self) -> io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.dir)
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.dir.join("daemon.sock")
     }

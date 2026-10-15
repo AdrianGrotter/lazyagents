@@ -850,6 +850,23 @@ async fn idle_exit_waits_for_running_agents() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn state_dir_is_created_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = tempfile::tempdir().expect("tempdir");
+    let dir = parent.path().join("state");
+    let task = spawn_daemon(&dir).await;
+    let mode = std::fs::metadata(&dir)
+        .expect("state dir")
+        .permissions()
+        .mode();
+    let mut conn = Conn::open(&dir).await;
+    assert_eq!(conn.request(Request::Shutdown).await, Ok(Response::Ok));
+    task.await.expect("join").expect("clean exit");
+    assert_eq!(mode & 0o777, 0o700, "mode {mode:o}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn stale_socket_file_is_replaced() {
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = StatePaths::new(dir.path()).socket();

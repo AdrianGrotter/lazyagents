@@ -420,3 +420,25 @@ fn idle_exit_is_configured_from_the_environment() {
         "idle daemon kept running"
     );
 }
+
+#[test]
+fn auto_started_daemon_creates_a_private_state_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = tempfile::tempdir().expect("parent");
+    let state = parent.path().join("state");
+    let run = |args: &[&str]| {
+        Command::new(BIN)
+            .args(args)
+            .env("LAZYAGENTS_STATE_DIR", &state)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run lazyagents")
+    };
+    let listed = run(&["ls"]);
+    let mode = std::fs::metadata(&state).map(|m| m.permissions().mode());
+    let stopped = run(&["shutdown"]);
+    assert!(listed.status.success(), "{listed:?}");
+    assert!(stopped.status.success(), "{stopped:?}");
+    assert_eq!(mode.expect("state dir") & 0o777, 0o700);
+}

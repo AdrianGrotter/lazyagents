@@ -144,7 +144,9 @@ impl Client {
             Err(e) if e.downcast_ref::<VersionMismatch>().is_some() => return Err(e),
             Err(_) => {}
         }
-        std::fs::create_dir_all(paths.dir())?;
+        paths
+            .create_dir()
+            .with_context(|| format!("creating {}", paths.dir().display()))?;
         spawn_daemon(paths, exe).context("starting the daemon")?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {

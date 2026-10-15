@@ -57,7 +57,8 @@ const WHEEL_LINES: i32 = 3;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let paths = config.paths;
-    std::fs::create_dir_all(paths.dir())
+    paths
+        .create_dir()
         .with_context(|| format!("creating {}", paths.dir().display()))?;
     let _lock = InstanceLock::acquire(&paths.lock_file())?;
     let socket = paths.socket();

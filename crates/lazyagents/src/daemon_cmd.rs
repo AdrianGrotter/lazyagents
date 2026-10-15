@@ -9,7 +9,8 @@ const DEFAULT_IDLE_EXIT_SECS: u64 = 600;
 
 pub fn run() -> anyhow::Result<()> {
     let paths = StatePaths::from_env()?;
-    std::fs::create_dir_all(paths.dir())
+    paths
+        .create_dir()
         .with_context(|| format!("creating {}", paths.dir().display()))?;
     let log = OpenOptions::new()
         .create(true)
