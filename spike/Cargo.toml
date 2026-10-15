@@ -1,0 +1,14 @@
+[package]
+name = "spike"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+alacritty_terminal.workspace = true
+anyhow.workspace = true
+ratatui.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
