@@ -69,7 +69,9 @@ is rejected.
 
 `KillAgent`, `RemoveAgent` and `RestartAgent` stop the agent's whole process tree (see
 [architecture.md](architecture.md#daemon-lifecycle)) before they are answered.
-`Input`, `Resize` and `Scroll` are rejected with an error for agents that are not running.
+`Input` is rejected with an error for agents that are not running. `Subscribe`, `Resize`
+and `Scroll` work for any agent that still has a terminal, including an exited one, and
+are rejected for a stopped agent, which has none.
 A `Hook` for an agent that is not running, or is not a Claude agent, is ignored.
 
 ## Frames

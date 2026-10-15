@@ -20,7 +20,7 @@ use crate::encode::encode;
 use crate::lock::InstanceLock;
 use crate::reap::{self, ProcessTable, Tracked};
 use crate::spawn::{Launch, SpawnContext, find_in_path, hook_settings, spawn_spec};
-use crate::status::{generic_status, on_hook};
+use crate::status::{on_hook, settle};
 use crate::store::{self, AgentRecord, StoredState};
 use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent};
 
@@ -208,6 +208,7 @@ struct Agent {
     status: Status,
     terminal: Option<Terminal>,
     generation: u64,
+    started: Instant,
     last_output: Option<Instant>,
     dirty: bool,
     /// The agent's descendants seen by snapshots and still running, so processes that
@@ -264,6 +265,7 @@ impl Daemon {
                     status: Status::Stopped,
                     terminal: None,
                     generation: 0,
+                    started: Instant::now(),
                     last_output: None,
                     dirty: false,
                     tracked: Vec::new(),
@@ -344,7 +346,7 @@ impl Daemon {
             Request::RemoveAgent { id } => self.remove_agent(id).map(|()| Response::Ok),
             Request::RenameAgent { id, name } => self.rename_agent(id, name).map(Response::Agent),
             Request::Subscribe { id } => {
-                self.agent(id)?;
+                self.with_terminal_mut(id)?;
                 if let Some(c) = self.clients.get_mut(&client) {
                     c.subscription = Some(Subscription {
                         agent: id,
@@ -361,7 +363,7 @@ impl Daemon {
             }
             Request::Input { id, event } => self.input(id, &event).map(|()| Response::Ok),
             Request::Resize { id, cols, rows } => {
-                let agent = self.running_mut(id)?;
+                let agent = self.with_terminal_mut(id)?;
                 if let Some(t) = agent.terminal.as_mut() {
                     t.resize(PaneSize::new(cols, rows));
                 }
@@ -369,7 +371,7 @@ impl Daemon {
                 Ok(Response::Ok)
             }
             Request::Scroll { id, lines } => {
-                let agent = self.running_mut(id)?;
+                let agent = self.with_terminal_mut(id)?;
                 if let Some(t) = agent.terminal.as_ref() {
                     t.scroll(lines);
                 }
@@ -404,6 +406,17 @@ impl Daemon {
             .ok_or_else(|| format!("unknown agent {id}"))?;
         if agent.terminal.is_none() || !agent.status.is_running() {
             return Err(format!("{} is not running", agent.record.name));
+        }
+        Ok(agent)
+    }
+
+    fn with_terminal_mut(&mut self, id: AgentId) -> Result<&mut Agent, String> {
+        let agent = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| format!("unknown agent {id}"))?;
+        if agent.terminal.is_none() {
+            return Err(format!("{} has no terminal", agent.record.name));
         }
         Ok(agent)
     }
@@ -551,6 +564,7 @@ impl Daemon {
                 status: Status::Stopped,
                 terminal: None,
                 generation: 0,
+                started: Instant::now(),
                 last_output: None,
                 dirty: false,
                 tracked: Vec::new(),
@@ -615,6 +629,7 @@ impl Daemon {
                 agent.group = Some(terminal.pid());
                 agent.terminal = Some(terminal);
                 agent.status = Status::Starting;
+                agent.started = Instant::now();
                 agent.last_output = None;
                 agent.dirty = true;
                 Ok(())
@@ -870,16 +885,18 @@ impl Daemon {
         self.refresh_tracked(now);
         let mut changed = Vec::new();
         for (id, agent) in &mut self.agents {
-            if agent.record.kind == AgentKind::Generic
-                && agent.terminal.is_some()
-                && agent.status.is_running()
-                && agent.last_output.is_some()
-            {
-                let status = generic_status(agent.last_output, now);
-                if status != agent.status {
-                    agent.status = status;
-                    changed.push(*id);
-                }
+            if agent.terminal.is_none() {
+                continue;
+            }
+            if let Some(status) = settle(
+                agent.record.kind,
+                agent.status,
+                agent.started,
+                agent.last_output,
+                now,
+            ) {
+                agent.status = status;
+                changed.push(*id);
             }
         }
         for id in changed {

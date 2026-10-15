@@ -43,6 +43,15 @@ fn forward(event: &str) {
                     .as_ref()
                     .and_then(|value| value.get(name)?.as_str().map(str::to_owned))
             };
+            let idle_prompt = field("notification_type").as_deref() == Some("idle_prompt")
+                || field("message").is_some_and(|message| {
+                    message.to_lowercase().contains("waiting for your input")
+                });
+            let kind = if kind == HookKind::Notification && idle_prompt {
+                HookKind::Stop
+            } else {
+                kind
+            };
             let request = Request::Hook {
                 id: AgentId(agent),
                 kind,

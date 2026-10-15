@@ -229,50 +229,61 @@ fn shutdown_leaves_no_agent_processes() {
     assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived shutdown");
 }
 
-#[test]
-fn claude_agent_hooks_drive_status_and_restart_resumes() {
-    let env = TestEnv::new();
-    let args_file = env.project.path().join("args");
-    let fake = env.project.path().join("claude");
-    std::fs::write(
-        &fake,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec sleep 30\n",
-            args_file.display()
-        ),
-    )
-    .expect("fake claude");
-    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .expect("chmod");
+struct FakeClaude {
+    args_file: PathBuf,
+    agent_id: String,
+    session: String,
+}
 
-    env.ok(&[
-        "new",
-        "c",
-        "--kind",
-        "claude",
-        "--",
-        fake.to_str().expect("utf8"),
-    ]);
-    let args = wait_for_file(&args_file);
-    let lines: Vec<&str> = args.lines().collect();
-    assert_eq!(lines[0], "--session-id");
-    let session = lines[1].to_string();
-    let settings = PathBuf::from(lines[3]);
-    let agent_id = settings
-        .file_stem()
-        .expect("stem")
-        .to_string_lossy()
-        .into_owned();
-    let settings_json = std::fs::read_to_string(&settings).expect("settings");
-    assert!(
-        settings_json.contains(&format!("'{BIN}' hook UserPromptSubmit")),
-        "{settings_json}"
-    );
+impl FakeClaude {
+    fn start(env: &TestEnv) -> Self {
+        let args_file = env.project.path().join("args");
+        let fake = env.project.path().join("claude");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec sleep 30\n",
+                args_file.display()
+            ),
+        )
+        .expect("fake claude");
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
 
-    let hook = |event: &str, payload: &str| {
+        env.ok(&[
+            "new",
+            "c",
+            "--kind",
+            "claude",
+            "--",
+            fake.to_str().expect("utf8"),
+        ]);
+        let args = wait_for_file(&args_file);
+        let lines: Vec<&str> = args.lines().collect();
+        assert_eq!(lines[0], "--session-id");
+        let session = lines[1].to_string();
+        let settings = PathBuf::from(lines[3]);
+        let agent_id = settings
+            .file_stem()
+            .expect("stem")
+            .to_string_lossy()
+            .into_owned();
+        let settings_json = std::fs::read_to_string(&settings).expect("settings");
+        assert!(
+            settings_json.contains(&format!("'{BIN}' hook UserPromptSubmit")),
+            "{settings_json}"
+        );
+        Self {
+            args_file,
+            agent_id,
+            session,
+        }
+    }
+
+    fn hook(&self, env: &TestEnv, event: &str, payload: &str) {
         let mut child = Command::new(BIN)
             .args(["hook", event])
-            .env("LAZYAGENTS_AGENT_ID", &agent_id)
+            .env("LAZYAGENTS_AGENT_ID", &self.agent_id)
             .env("LAZYAGENTS_SOCKET", env.socket())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -291,7 +302,16 @@ fn claude_agent_hooks_drive_status_and_restart_resumes() {
             out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
             "{out:?}"
         );
-    };
+    }
+}
+
+#[test]
+fn claude_agent_hooks_drive_status_and_restart_resumes() {
+    let env = TestEnv::new();
+    let claude = FakeClaude::start(&env);
+    let args_file = &claude.args_file;
+    let session = claude.session.clone();
+    let hook = |event: &str, payload: &str| claude.hook(&env, event, payload);
     let payload = format!("{{\"session_id\":\"{session}\"}}");
     hook("UserPromptSubmit", &payload);
     assert!(wait_until(Duration::from_secs(5), || env
@@ -302,9 +322,9 @@ fn claude_agent_hooks_drive_status_and_restart_resumes() {
         .ok(&["ls"])
         .contains("needs input")));
 
-    std::fs::remove_file(&args_file).expect("reset");
+    std::fs::remove_file(args_file).expect("reset");
     env.ok(&["restart", "c"]);
-    let resumed = wait_for_file(&args_file);
+    let resumed = wait_for_file(args_file);
     assert_eq!(
         resumed.lines().take(2).collect::<Vec<_>>(),
         ["--resume", session.as_str()]
@@ -315,13 +335,39 @@ fn claude_agent_hooks_drive_status_and_restart_resumes() {
         "SessionStart",
         &format!("{{\"session_id\":\"{other}\",\"source\":\"resume\"}}"),
     );
-    std::fs::remove_file(&args_file).expect("reset");
+    std::fs::remove_file(args_file).expect("reset");
     env.ok(&["restart", "c"]);
-    let resumed = wait_for_file(&args_file);
+    let resumed = wait_for_file(args_file);
     assert_eq!(
         resumed.lines().take(2).collect::<Vec<_>>(),
         ["--resume", other]
     );
+}
+
+#[test]
+fn idle_notification_marks_a_claude_agent_idle() {
+    let env = TestEnv::new();
+    let claude = FakeClaude::start(&env);
+    let session = &claude.session;
+    claude.hook(
+        &env,
+        "UserPromptSubmit",
+        &format!("{{\"session_id\":\"{session}\"}}"),
+    );
+    assert!(wait_until(Duration::from_secs(5), || env
+        .ok(&["ls"])
+        .contains("working")));
+    claude.hook(
+        &env,
+        "Notification",
+        &format!(
+            "{{\"session_id\":\"{session}\",\"notification_type\":\"idle_prompt\",\"message\":\"Claude is waiting for your input\"}}"
+        ),
+    );
+    assert!(wait_until(Duration::from_secs(5), || env
+        .ok(&["ls"])
+        .contains("idle")));
+    assert!(!env.ok(&["ls"]).contains("needs input"));
 }
 
 #[test]

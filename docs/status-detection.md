@@ -15,8 +15,13 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   - `SessionStart` → `Idle`
   - `UserPromptSubmit`, `PreToolUse`, `PostToolUse` → `Working` (`PostToolUse` moves an
     agent out of `NeedsInput` once an approved tool finishes)
-  - `Notification` → `NeedsInput`
+  - `Notification` → `NeedsInput`, except an idle-prompt notification
+    (`notification_type` `idle_prompt`, or a `message` containing
+    "waiting for your input", case-insensitive), which the hook forwards as `Stop`
   - `Stop` → `Idle`
+- **Claude silence**: a `Working` Claude agent with no output for 10 s, counted from its
+  start or its last output, whichever is later, becomes `Idle`. This covers an Esc
+  interrupt, which fires no `Stop` hook. Other Claude statuses are left to the hooks.
 - **Session rules**: every start uses a fresh `--session-id` until a prompt has been
   submitted. `UserPromptSubmit` marks the agent resumable, and from then on restarts use
   `--resume`. A `SessionStart` carrying a different session id replaces the stored id.
@@ -25,10 +30,13 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   next prompt. See
   `docs/decisions/0006-resume-only-prompted-sessions.md`.
 - **Generic agents**: `Starting` until their first output, then `Working`; `Idle` after
-  2 s without output, `Working` again on new output.
-- **Not running**: for exited or stopped agents, input, resize and scroll requests are
-  rejected with an error and hook events are ignored. Hook events for generic agents are
-  ignored too.
+  2 s without output, `Working` again on new output. A generic agent that prints nothing
+  becomes `Idle` 2 s after it starts.
+- **Not running**: an exited agent keeps its terminal, so subscribe, resize and scroll
+  requests still work and its last screen can be viewed and scrolled. Input requests are
+  rejected with an error and hook events are ignored. A stopped agent has no terminal,
+  so subscribe, resize and scroll are rejected too. Hook events for generic agents are
+  ignored.
 - **Both**: process exit → `Exited(code)`; agents loaded from disk at daemon start →
   `Stopped`.
 - The merge behaviour of `--settings` with user hooks was verified in the spike (see `docs/decisions/0003-status-via-claude-hooks.md`).

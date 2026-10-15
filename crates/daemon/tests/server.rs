@@ -1150,3 +1150,74 @@ async fn late_hook_does_not_revive_an_exited_agent() {
     };
     assert_eq!(agents[0].status, Status::Exited(0));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn silent_generic_agent_becomes_idle() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "quiet",
+        AgentKind::Generic,
+        &["sleep", "30"],
+    )
+    .await
+    .expect("create");
+    let idle = tokio::time::timeout(
+        Duration::from_secs(5),
+        conn.wait_status(agent.id, Status::Idle),
+    )
+    .await;
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    idle.expect("silent agent never became idle");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exited_agent_can_be_scrolled_and_resized() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "done",
+        AgentKind::Generic,
+        &["sh", "-c", "seq 1 200; exit 0"],
+    )
+    .await
+    .expect("create");
+    conn.wait_status(agent.id, Status::Exited(0)).await;
+    assert_eq!(
+        conn.request(Request::Subscribe { id: agent.id }).await,
+        Ok(Response::Ok)
+    );
+    assert_eq!(
+        conn.request(Request::Scroll {
+            id: agent.id,
+            lines: 20
+        })
+        .await,
+        Ok(Response::Ok)
+    );
+    assert_eq!(
+        conn.request(Request::Resize {
+            id: agent.id,
+            cols: 60,
+            rows: 10
+        })
+        .await,
+        Ok(Response::Ok)
+    );
+    let err = conn
+        .request(Request::Input {
+            id: agent.id,
+            event: key(KeyCode::Enter),
+        })
+        .await
+        .expect_err("input to exited agent");
+    assert!(err.contains("not running"), "{err}");
+}
