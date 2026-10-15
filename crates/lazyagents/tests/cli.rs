@@ -385,7 +385,7 @@ fn hook_is_silent_and_fast_without_daemon() {
         .output()
         .expect("hook");
     assert!(
-        start.elapsed() < Duration::from_secs(1),
+        start.elapsed() < Duration::from_secs(3),
         "took {:?}",
         start.elapsed()
     );

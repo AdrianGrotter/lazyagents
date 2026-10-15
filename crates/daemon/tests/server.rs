@@ -906,6 +906,19 @@ async fn kill_stops_a_descendant_in_its_own_session() {
     assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived kill");
 }
 
+/// How long an agent's parent shell stays alive after it reported its pids: several
+/// snapshot intervals, so its detached children are tracked before the parent exits.
+const RELEASE_AFTER: Duration = Duration::from_secs(3);
+
+fn wait_for_release(release: &Path) -> String {
+    format!("until [ -e '{}' ]; do sleep 0.05; done", release.display())
+}
+
+async fn release(release: &Path) {
+    tokio::time::sleep(RELEASE_AFTER).await;
+    std::fs::write(release, "").expect("release");
+}
+
 async fn gone_within(leaves: &Leaves, limit: Duration) -> Vec<u32> {
     let deadline = tokio::time::Instant::now() + limit;
     loop {
@@ -946,12 +959,15 @@ async fn exited_agent_leaves_no_detached_descendants() {
     let mut conn = Conn::open(daemon.path()).await;
     let (project, dir) = add_project(&mut conn).await;
     let pidfile = dir.path().join("pids");
+    let released = dir.path().join("release");
     let script = format!(
-        "perl -e 'use POSIX; setsid(); exec q(sleep), 307' & echo $! > '{}'; sleep 2; exit 0",
-        pidfile.display()
+        "perl -e 'use POSIX; setsid(); exec q(sleep), 307' & echo $! > '{}'; {}; exit 0",
+        pidfile.display(),
+        wait_for_release(&released)
     );
     let agent = create_owned(&mut conn, &project, "detach", &sh(&script)).await;
     let leaves = Leaves::read(&pidfile, 1).await;
+    release(&released).await;
     conn.wait_status(agent.id, Status::Exited(0)).await;
     assert_eq!(
         gone_within(&leaves, Duration::from_secs(5)).await,
@@ -1019,10 +1035,11 @@ async fn exit_reaping_does_not_block_requests() {
     );
 }
 
-fn exits_leaving_a_stubborn_session(pidfile: &Path, marker: u32) -> Vec<String> {
+fn exits_leaving_a_stubborn_session(pidfile: &Path, released: &Path, marker: u32) -> Vec<String> {
     sh(&format!(
-        "perl -e 'use POSIX; setsid(); $SIG{{TERM}}=q(IGNORE); $SIG{{HUP}}=q(IGNORE); exec q(sleep), {marker}' & echo $! > '{}'; sleep 2; exit 0",
-        pidfile.display()
+        "perl -e 'use POSIX; setsid(); $SIG{{TERM}}=q(IGNORE); $SIG{{HUP}}=q(IGNORE); exec q(sleep), {marker}' & echo $! > '{}'; {}; exit 0",
+        pidfile.display(),
+        wait_for_release(released)
     ))
 }
 
@@ -1032,14 +1049,16 @@ async fn shutdown_during_an_exit_reap_leaves_nothing() {
     let mut conn = Conn::open(daemon.path()).await;
     let (project, dir) = add_project(&mut conn).await;
     let pidfile = dir.path().join("pids");
+    let released = dir.path().join("release");
     let agent = create_owned(
         &mut conn,
         &project,
         "stubborn",
-        &exits_leaving_a_stubborn_session(&pidfile, 316),
+        &exits_leaving_a_stubborn_session(&pidfile, &released, 316),
     )
     .await;
     let leaves = Leaves::read(&pidfile, 1).await;
+    release(&released).await;
     conn.wait_status(agent.id, Status::Exited(0)).await;
     assert_eq!(leaves.alive(), leaves.0, "descendant never ran");
     conn.request(Request::Shutdown).await.expect("shutdown");
@@ -1057,14 +1076,16 @@ async fn kill_during_an_exit_reap_covers_its_descendants() {
     let mut conn = Conn::open(daemon.path()).await;
     let (project, dir) = add_project(&mut conn).await;
     let pidfile = dir.path().join("pids");
+    let released = dir.path().join("release");
     let agent = create_owned(
         &mut conn,
         &project,
         "stubborn",
-        &exits_leaving_a_stubborn_session(&pidfile, 317),
+        &exits_leaving_a_stubborn_session(&pidfile, &released, 317),
     )
     .await;
     let leaves = Leaves::read(&pidfile, 1).await;
+    release(&released).await;
     conn.wait_status(agent.id, Status::Exited(0)).await;
     assert_eq!(leaves.alive(), leaves.0, "descendant never ran");
     conn.request(Request::KillAgent { id: agent.id })
@@ -1083,14 +1104,16 @@ async fn kill_stops_a_detached_descendant_whose_parent_exited() {
     let mut conn = Conn::open(daemon.path()).await;
     let (project, dir) = add_project(&mut conn).await;
     let pidfile = dir.path().join("pids");
+    let released = dir.path().join("release");
     let script = format!(
-        "(perl -e 'use POSIX; setsid(); exec q(sleep), 312' & echo $! > '{}'; sleep 2); exec sleep 313",
-        pidfile.display()
+        "(perl -e 'use POSIX; setsid(); exec q(sleep), 312' & echo $! > '{}'; {}); exec sleep 313",
+        pidfile.display(),
+        wait_for_release(&released)
     );
-    let started = tokio::time::Instant::now();
     let agent = create_owned(&mut conn, &project, "reparent", &sh(&script)).await;
     let leaves = Leaves::read(&pidfile, 1).await;
-    tokio::time::sleep_until(started + Duration::from_millis(4500)).await;
+    release(&released).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
     assert_eq!(leaves.alive(), leaves.0, "descendant never ran");
     conn.request(Request::KillAgent { id: agent.id })
         .await
