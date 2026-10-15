@@ -20,14 +20,14 @@ test-hooks:
 test-harness:
     scripts/test-harness.sh
 
-test-spike-hangup:
-    scripts/test-spike-hangup.sh
+smoke-tui:
+    scripts/smoke-tui.sh
 
-smoke-spike:
-    scripts/smoke-spike.sh
+test-tui-hangup:
+    scripts/test-tui-hangup.sh
 
-check: fmt-check lint test test-hooks test-harness smoke-spike test-spike-hangup
+check: fmt-check lint test test-hooks test-harness smoke-tui test-tui-hangup
 
 [no-cd]
-spike *args:
-    cargo run --locked --manifest-path {{justfile_directory()}}/Cargo.toml -p spike -- "$@"
+dev *args:
+    cargo run --locked --manifest-path {{justfile_directory()}}/Cargo.toml -p lazyagents -- "$@"

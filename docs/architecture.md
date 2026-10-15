@@ -1,6 +1,8 @@
 # Architecture
 
-Status: daemon, protocol, client and CLI implemented; the TUI lands in plan 3 (the spike is the interim UI).
+Status: daemon, protocol, client, CLI and TUI implemented. Planned (plan 4): git worktrees
+and the `D` diff view, the config file with configurable keybindings and presets, text
+selection and copy, and keyboard scroll mode.
 
 ## Purpose
 
@@ -86,7 +88,7 @@ function is not used; the binary on `PATH` is.
 
 ### Worktrees
 
-Planned (plan 3); the daemon does not create worktrees yet.
+Planned (plan 4); the daemon does not create worktrees yet.
 
 Creating an agent with "worktree" enabled runs
 `git -C <project> worktree add -b lazyagents/<agent-name> <state>/worktrees/<project>/<agent-name> <base>`
@@ -95,6 +97,34 @@ The Info panel shows branch and `git diff --shortstat <base>...HEAD` plus uncomm
 changes. `D` shows the full diff (read-only, scrollable) in the main pane. Removing the
 agent offers to remove the worktree; if it has uncommitted changes they are listed and an
 explicit confirmation is required. The branch is never deleted automatically.
+
+### The TUI
+
+`crates/tui` is a client like the CLI; it holds no agent state of its own beyond what the
+daemon last told it.
+
+- **Model** (`app.rs`): `App` holds projects, agents, selection, focus (projects, agents
+  or pane), the open popup and the subscribed agent's screen. Key, paste and wheel events
+  and daemon messages go in; `Effect`s come out (`Send(Request)`, `Quit`,
+  `StopDaemonAndQuit`). It does no I/O, so behaviour is tested without a terminal or a
+  daemon. Selection follows an agent's id across list changes. The TUI is subscribed to
+  at most one agent's screen, the selected one, and sizes a running agent's PTY to the
+  pane.
+- **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane,
+  the status line and popups from `App`; the pane copies the daemon's cell grid into the
+  ratatui buffer. Status glyphs animate from a frame counter the runtime ticks every
+  100 ms while an agent is starting or working.
+- **Connection actor** (`connection.rs`): a task owning the `Client`. It sends requests
+  in order and forwards responses, errors and server events (agent list changes, screen
+  frames) on one channel. When the daemon closes the connection it reports `Closed`, and
+  the TUI exits with "the daemon stopped".
+- **Runtime and terminal guard** (`run.rs`): refuses to start without an interactive
+  terminal, connects (starting the daemon if needed), then enters raw mode, the alternate
+  screen, mouse capture, bracketed paste and, where supported, keyboard enhancement. A
+  blocking thread reads terminal events; a read error means the terminal is gone and the
+  TUI exits, even with SIGHUP and SIGTERM ignored ([ADR 0005](decisions/0005-vendor-crossterm-dead-tty-fix.md)).
+  SIGHUP, SIGTERM and SIGINT also exit. The guard and a panic hook restore every terminal
+  mode on any exit path, ignoring errors from a vanished terminal.
 
 ### Persistence and config
 
@@ -112,7 +142,7 @@ explicit confirmation is required. The branch is never deleted automatically.
 - Protocol version mismatch → the client fails with `VersionMismatch`, which suggests
   `lazyagents shutdown`. A mismatched daemon cannot be asked to stop, so `shutdown`
   prints the mismatch and `stop it with: kill <pid>` (pid from `daemon.lock`) and exits
-  1. The TUI will show a popup offering to restart the daemon.
+  with status 1. The TUI exits with the same error.
 - Socket exists but connect fails → spawn a daemon, which removes the stale socket once
   it holds the lock.
 - A daemon that exits while the client waits for it to start → the client fails at

@@ -8,30 +8,48 @@ Your own Claude Code setup (`~/.claude`, project `.claude/`, plugins, skills, MC
 
 ## Status
 
-Early development. The daemon, protocol, client and a headless CLI exist; the TUI is next, and the embedded-terminal spike (`just spike`) is the interim interactive UI. See `docs/architecture.md` and `docs/superpowers/specs/2026-10-15-lazyagents-design.md`.
+Early development. The daemon, the CLI and the TUI exist. Git worktrees per agent, the diff view, the config file (keybindings, presets) and text selection come next. See `docs/architecture.md` and `docs/superpowers/specs/2026-10-15-lazyagents-design.md`.
 
-## Usage (headless, until the TUI lands)
+## Usage
 
 ```sh
 nix develop -c cargo build -p lazyagents
 cd ~/some-project
-~/git/lazyagents/target/debug/lazyagents new api    # start a Claude agent named api
-~/git/lazyagents/target/debug/lazyagents ls         # projects and agents with status
-~/git/lazyagents/target/debug/lazyagents kill api   # stop it
-~/git/lazyagents/target/debug/lazyagents shutdown   # stop the daemon and every agent
+~/git/lazyagents/target/debug/lazyagents    # open the TUI
+```
+
+The TUI starts the daemon if none is running. Quitting it leaves the agents running; run `lazyagents` again to reattach.
+
+| Key | Action |
+|---|---|
+| `a` | add a project (defaults to the current directory) |
+| `n` | new agent: name and preset (claude, shell, custom command) |
+| `enter` | open the selected agent's terminal; all keys go to the agent |
+| `ctrl-]` | back to the sidebar |
+| `x` / `d` | stop / remove the selected agent |
+| `?` | all keys |
+| `q` | quit the TUI; agents keep running |
+
+The full key map is in [docs/keybindings.md](docs/keybindings.md).
+
+The same daemon is scriptable without the TUI:
+
+```sh
+lazyagents new api        # start a Claude agent named api in the current project
+lazyagents ls             # projects and agents with status
+lazyagents kill api       # stop it
+lazyagents shutdown       # stop the daemon and every agent
 ```
 
 ## Development
 
 ```sh
 direnv allow        # or: nix develop
-just check          # fmt, clippy, tests, hook tests, harness and spike smoke runs
-just spike          # run the spike with claude in the main pane
-just spike sh       # ... or any other command
-
-# or run the built binary from a project directory, outside the dev shell
-nix develop -c cargo build -p spike
-cd ~/some-project && ~/git/lazyagents/target/debug/spike
+just check          # fmt, clippy, tests, hook tests, harness self-test, TUI smoke and hangup runs
+just dev            # run the TUI from any directory
+just dev ls         # ... or any CLI subcommand
 ```
+
+Experiment with a throwaway state dir so your real agents stay untouched: `LAZYAGENTS_STATE_DIR=$(mktemp -d) just dev`.
 
 Contributor and agent guide: [AGENTS.md](AGENTS.md).

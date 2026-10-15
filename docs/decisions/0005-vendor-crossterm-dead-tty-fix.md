@@ -9,7 +9,7 @@ When the terminal running a lazyagents UI disappears without the process receivi
 
 ## Decision
 
-`vendor/crossterm` holds crossterm 0.29.0 from crates.io, wired in with `[patch.crates-io]`. It differs from upstream in two places: the mio event source returns `UnexpectedEof` on a zero-byte read and propagates read errors other than `WouldBlock`/`Interrupted`, and one closure drops redundant parentheses that newer rustc warns about. `scripts/test-spike-hangup.sh` (part of `just check`) kills a spike's terminal while it ignores SIGHUP and SIGTERM and requires the process to exit.
+`vendor/crossterm` holds crossterm 0.29.0 from crates.io, wired in with `[patch.crates-io]`. It differs from upstream in two places: the mio event source returns `UnexpectedEof` on a zero-byte read and propagates read errors other than `WouldBlock`/`Interrupted`, and one closure drops redundant parentheses that newer rustc warns about. `scripts/test-tui-hangup.sh` (part of `just check`) kills the TUI's terminal while it blocks SIGHUP, SIGTERM and SIGINT and requires the process to exit with status 0.
 
 ## Alternatives
 

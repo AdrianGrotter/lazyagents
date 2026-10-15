@@ -10,10 +10,10 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 
 ## Commands
 
-- `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, tmux harness self-test, spike smoke run, spike hangup test. The done gate.
-- `just fmt`, `just lint`, `just test`, `just test-hooks`
-- `lazyagents ls|new|kill|restart|rm|shutdown`: manage agents through the daemon (`cargo run -p lazyagents -- ...`). Tests set `LAZYAGENTS_STATE_DIR` to a temp dir and shut the daemon down.
-- `just spike [cmd...]`: the milestone-1 embedded-terminal spike (default command `claude`); runs from any directory.
+- `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, tmux harness self-test, TUI smoke run (`scripts/smoke-tui.sh`), TUI hangup test (`scripts/test-tui-hangup.sh`). The done gate.
+- `just fmt`, `just lint`, `just test`, `just test-hooks`, `just smoke-tui`, `just test-tui-hangup`
+- `just dev [args]`: run the TUI (no args) or a CLI subcommand (`just dev ls`) from any directory. For experiments, point `LAZYAGENTS_STATE_DIR` at a temp dir so your real agents stay untouched.
+- `lazyagents ls|new|kill|restart|rm|shutdown`: manage agents through the daemon without the TUI. Tests set `LAZYAGENTS_STATE_DIR` to a temp dir and shut the daemon down.
 
 ## Layout
 
@@ -22,11 +22,10 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 | `crates/protocol` | client↔daemon messages and framing |
 | `crates/daemon` | agents, PTYs, terminal emulation, persistence (git worktrees: planned) |
 | `crates/client` | connects to the daemon, starting it on demand; used by the CLI and the TUI |
-| `crates/tui` | ratatui client |
+| `crates/tui` | ratatui client: model (app.rs), rendering (ui.rs), connection, runtime |
 | `crates/lazyagents` | the binary and CLI |
-| `spike/` | throwaway embedded-terminal spike; removed once the TUI replaces it |
 | `vendor/crossterm` | crossterm 0.29.0 with a dead-terminal fix (ADR 0005); drop when upstream releases it |
-| `scripts/` | tmux harness, hook tests, spike smoke and hangup scripts |
+| `scripts/` | tmux harness, hook tests, TUI smoke and hangup scripts |
 | `docs/` | architecture, protocol, keybindings, status detection, ADRs (`decisions/`) |
 
 ## Working rules
