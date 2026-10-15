@@ -208,6 +208,7 @@ async fn write_loop(mut write: OwnedWriteHalf, mut outgoing: UnboundedReceiver<S
 struct Agent {
     record: AgentRecord,
     status: Status,
+    last_error: Option<String>,
     terminal: Option<Terminal>,
     generation: u64,
     started: Instant,
@@ -226,6 +227,7 @@ impl Agent {
         Self {
             record,
             status: Status::Stopped,
+            last_error: None,
             terminal: None,
             generation: 0,
             started: Instant::now(),
@@ -374,7 +376,8 @@ impl Daemon {
             Request::RestartAgent { id, cols, rows } => self
                 .restart_agent(id, PaneSize::new(cols, rows))
                 .map(Response::Agent),
-            Request::RemoveAgent { id } => self.remove_agent(id).map(|()| Response::Ok),
+            Request::RemoveAgent { id, .. } => self.remove_agent(id).map(|()| Response::Ok),
+            Request::GitStat { .. } | Request::GitDiff { .. } => Err("not implemented".into()),
             Request::RenameAgent { id, name } => self.rename_agent(id, name).map(Response::Agent),
             Request::Subscribe { id } => {
                 self.agent(id)?;
@@ -461,6 +464,8 @@ impl Daemon {
             command: agent.record.command.clone(),
             cwd: agent.record.cwd.clone(),
             status: agent.status,
+            worktree: agent.record.worktree.clone(),
+            last_error: agent.last_error.clone(),
         }
     }
 
@@ -586,6 +591,7 @@ impl Daemon {
             cwd: project.path.clone(),
             session_id: None,
             resumable: false,
+            worktree: None,
         };
         let id = record.id;
         self.agents.insert(id, Agent::new(record));
@@ -621,7 +627,9 @@ impl Daemon {
                 .and_then(|()| std::fs::write(&settings, hook_settings(&self.exe).to_string()));
             if let Err(e) = written {
                 agent.set_status(Status::Exited(127));
-                return Err(format!("writing {}: {e}", settings.display()));
+                let message = format!("writing {}: {e}", settings.display());
+                agent.last_error = Some(message.clone());
+                return Err(message);
             }
         }
         let ctx = SpawnContext {
@@ -647,6 +655,7 @@ impl Daemon {
                 agent.group = Some(terminal.pid());
                 agent.terminal = Some(terminal);
                 agent.set_status(Status::Starting);
+                agent.last_error = None;
                 agent.started = Instant::now();
                 agent.status_since = agent.started;
                 agent.last_output = None;
@@ -655,7 +664,9 @@ impl Daemon {
             }
             Err(e) => {
                 agent.set_status(Status::Exited(127));
-                Err(format!("{e:#}"))
+                let message = format!("{e:#}");
+                agent.last_error = Some(message.clone());
+                Err(message)
             }
         }
     }
@@ -1011,6 +1022,7 @@ mod tests {
             cwd: PathBuf::from("/p"),
             session_id: None,
             resumable: false,
+            worktree: None,
         })
     }
 

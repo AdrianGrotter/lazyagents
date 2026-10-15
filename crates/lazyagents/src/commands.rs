@@ -70,6 +70,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
                 command,
                 cols: DEFAULT_COLS,
                 rows: DEFAULT_ROWS,
+                worktree: None,
             });
             let info = expect_agent(client.request(request).await?)?;
             println!("started {}", info.name);
@@ -91,7 +92,13 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
         }
         Command::Rm { agent } => {
             let info = find_agent(&mut client, &agent).await?;
-            client.request(Request::RemoveAgent { id: info.id }).await?;
+            client
+                .request(Request::RemoveAgent {
+                    id: info.id,
+                    remove_worktree: false,
+                    force: false,
+                })
+                .await?;
             println!("removed {}", info.name);
         }
         Command::Rename { agent, name } => {
@@ -279,6 +286,8 @@ mod tests {
             command: vec!["sh".into()],
             cwd: project.path.clone(),
             status: Status::Idle,
+            worktree: None,
+            last_error: None,
         }
     }
 

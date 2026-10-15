@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentId, AgentInfo, CreateAgent, Frame, HookKind, InputEvent, Project, ProjectId};
+use crate::{
+    AgentId, AgentInfo, CreateAgent, Frame, GitStat, HookKind, InputEvent, Project, ProjectId,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -31,6 +33,14 @@ pub enum Request {
         rows: u16,
     },
     RemoveAgent {
+        id: AgentId,
+        remove_worktree: bool,
+        force: bool,
+    },
+    GitStat {
+        id: AgentId,
+    },
+    GitDiff {
         id: AgentId,
     },
     RenameAgent {
@@ -71,6 +81,8 @@ pub enum Response {
     Project(Project),
     Agents(Vec<AgentInfo>),
     Agent(AgentInfo),
+    GitStat(GitStat),
+    Diff(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,7 +104,10 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentKind, Cell, Key, KeyCode, Modifiers, ProjectId, Row, Status};
+    use crate::{
+        AgentKind, Cell, Key, KeyCode, Modifiers, PROTOCOL_VERSION, ProjectId, Row, Status,
+        WorktreeInfo, WorktreeRequest,
+    };
 
     fn round_trip<T>(value: &T)
     where
@@ -112,6 +127,12 @@ mod tests {
             command: vec!["claude".into()],
             cwd: "/tmp/p".into(),
             status: Status::Exited(2),
+            worktree: Some(WorktreeInfo {
+                path: "/tmp/p/.worktrees/api".into(),
+                branch: "agent/api".into(),
+                base: "main".into(),
+            }),
+            last_error: Some("no such file".into()),
         }
     }
 
@@ -135,6 +156,27 @@ mod tests {
                 command: vec!["sh".into()],
                 cols: 80,
                 rows: 24,
+                worktree: None,
+            }),
+            Request::CreateAgent(CreateAgent {
+                project: ProjectId::random(),
+                name: "w".into(),
+                kind: AgentKind::Claude,
+                command: Vec::new(),
+                cols: 80,
+                rows: 24,
+                worktree: Some(WorktreeRequest {
+                    base: Some("main".into()),
+                }),
+            }),
+            Request::CreateAgent(CreateAgent {
+                project: ProjectId::random(),
+                name: "w".into(),
+                kind: AgentKind::Claude,
+                command: Vec::new(),
+                cols: 80,
+                rows: 24,
+                worktree: Some(WorktreeRequest { base: None }),
             }),
             Request::KillAgent { id },
             Request::RestartAgent {
@@ -142,7 +184,18 @@ mod tests {
                 cols: 80,
                 rows: 24,
             },
-            Request::RemoveAgent { id },
+            Request::RemoveAgent {
+                id,
+                remove_worktree: true,
+                force: false,
+            },
+            Request::RemoveAgent {
+                id,
+                remove_worktree: false,
+                force: true,
+            },
+            Request::GitStat { id },
+            Request::GitDiff { id },
             Request::RenameAgent {
                 id,
                 name: "b".into(),
@@ -183,7 +236,7 @@ mod tests {
             round_trip(&ClientMessage::Request { id: 7, request });
         }
         round_trip(&ClientMessage::Hello {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
         });
     }
 
@@ -192,7 +245,7 @@ mod tests {
         let info = info();
         let messages = vec![
             ServerMessage::Welcome {
-                protocol_version: 1,
+                protocol_version: PROTOCOL_VERSION,
                 daemon_version: "0.1.0".into(),
             },
             ServerMessage::Response {
@@ -206,6 +259,19 @@ mod tests {
             ServerMessage::Response {
                 id: 3,
                 result: Ok(Response::Agents(vec![info.clone()])),
+            },
+            ServerMessage::Response {
+                id: 4,
+                result: Ok(Response::GitStat(GitStat {
+                    insertions: 3,
+                    deletions: 2,
+                    files: 1,
+                    uncommitted: 4,
+                })),
+            },
+            ServerMessage::Response {
+                id: 5,
+                result: Ok(Response::Diff("diff --git a b\n".into())),
             },
             ServerMessage::AgentUpdated(info.clone()),
             ServerMessage::AgentRemoved(info.id),

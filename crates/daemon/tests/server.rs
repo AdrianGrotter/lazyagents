@@ -233,6 +233,7 @@ async fn create(
         command: command.iter().map(|s| s.to_string()).collect(),
         cols: 80,
         rows: 24,
+        worktree: None,
     });
     match conn.request(request).await {
         Ok(Response::Agent(info)) => Ok(info),
@@ -505,6 +506,37 @@ async fn spawn_failure_keeps_the_record_as_exited() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn spawn_failure_reports_last_error() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let err = create(
+        &mut conn,
+        &project,
+        "ghost",
+        AgentKind::Generic,
+        &["/nonexistent/lazyagents-cmd"],
+    )
+    .await
+    .expect_err("spawn fails");
+    let Ok(Response::Agents(agents)) = conn.request(Request::ListAgents).await else {
+        panic!("list")
+    };
+    assert_eq!(agents[0].last_error.as_deref(), Some(err.as_str()));
+    let healthy = create(
+        &mut conn,
+        &project,
+        "fine",
+        AgentKind::Generic,
+        &["sleep", "30"],
+    )
+    .await
+    .expect("create");
+    assert_eq!(healthy.last_error, None);
+    assert_eq!(healthy.worktree, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn kill_restart_remove_and_rename() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;
@@ -550,9 +582,13 @@ async fn kill_restart_remove_and_rename() {
             .is_err(),
         "project still has agents"
     );
-    conn.request(Request::RemoveAgent { id: agent.id })
-        .await
-        .expect("remove");
+    conn.request(Request::RemoveAgent {
+        id: agent.id,
+        remove_worktree: false,
+        force: false,
+    })
+    .await
+    .expect("remove");
     conn.wait_for(|m| matches!(m, ServerMessage::AgentRemoved(id) if *id == agent.id))
         .await;
     assert_eq!(
@@ -1021,9 +1057,13 @@ async fn remove_stops_the_agent_tree() {
     let pidfile = dir.path().join("pids");
     let agent = create_owned(&mut conn, &project, "rm", &job_control_child(&pidfile)).await;
     let leaves = Leaves::read(&pidfile, 1).await;
-    conn.request(Request::RemoveAgent { id: agent.id })
-        .await
-        .expect("remove");
+    conn.request(Request::RemoveAgent {
+        id: agent.id,
+        remove_worktree: false,
+        force: false,
+    })
+    .await
+    .expect("remove");
     assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived remove");
 }
 

@@ -85,6 +85,28 @@ pub struct AgentInfo {
     pub command: Vec<String>,
     pub cwd: PathBuf,
     pub status: Status,
+    pub worktree: Option<WorktreeInfo>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeInfo {
+    pub path: PathBuf,
+    pub branch: String,
+    pub base: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeRequest {
+    pub base: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStat {
+    pub insertions: u32,
+    pub deletions: u32,
+    pub files: u32,
+    pub uncommitted: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +117,7 @@ pub struct CreateAgent {
     pub command: Vec<String>,
     pub cols: u16,
     pub rows: u16,
+    pub worktree: Option<WorktreeRequest>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

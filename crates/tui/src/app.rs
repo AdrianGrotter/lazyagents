@@ -269,7 +269,7 @@ impl App {
                 }
                 self.upsert_agent(info);
             }
-            Response::Ok => {}
+            Response::Ok | Response::GitStat(_) | Response::Diff(_) => {}
         }
         self.sync_after_server(before, created)
     }
@@ -735,7 +735,11 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Enter => match action {
                     Confirmed::Kill(id) => vec![Effect::Send(Request::KillAgent { id })],
                     Confirmed::Restart(id) => vec![self.restart(id)],
-                    Confirmed::Remove(id) => vec![Effect::Send(Request::RemoveAgent { id })],
+                    Confirmed::Remove(id) => vec![Effect::Send(Request::RemoveAgent {
+                        id,
+                        remove_worktree: false,
+                        force: false,
+                    })],
                     Confirmed::StopDaemon => vec![Effect::StopDaemonAndQuit],
                 },
                 KeyCode::Char('n') | KeyCode::Esc => Vec::new(),
@@ -840,6 +844,7 @@ impl App {
             command,
             cols,
             rows,
+            worktree: None,
         }))]
     }
 }
@@ -888,6 +893,8 @@ pub(crate) mod tests {
             command: vec!["sh".into()],
             cwd: project.path.clone(),
             status,
+            worktree: None,
+            last_error: None,
         }
     }
 
@@ -1304,7 +1311,11 @@ pub(crate) mod tests {
         let _ = app.on_key(key('d'));
         assert_eq!(
             app.on_key(code(KeyCode::Enter)),
-            vec![Effect::Send(Request::RemoveAgent { id: a.id })]
+            vec![Effect::Send(Request::RemoveAgent {
+                id: a.id,
+                remove_worktree: false,
+                force: false,
+            })]
         );
     }
 
@@ -1520,6 +1531,8 @@ pub(crate) mod tests {
             command: vec!["/bin/sh".into()],
             cwd: "/p/p".into(),
             status: Status::Starting,
+            worktree: None,
+            last_error: None,
         }
     }
 
