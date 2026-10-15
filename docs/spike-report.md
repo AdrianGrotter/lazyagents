@@ -27,11 +27,11 @@ Build once from the repo with `nix develop -c cargo build -p spike`. Then, from 
 - [ ] multi-line paste lands as one prompt
 - [ ] mouse wheel scrolls back through output
 - [ ] resizing the terminal reflows the pane
-- [ ] sidebar status moves through idle → working → needs input (trigger a permission prompt) → idle
+- [x] sidebar status moves through idle → working → needs input (trigger a permission prompt) → idle
   - The spike has no PostToolUse hook, so after you approve a permission prompt the status stays "needs input" until the next tool call or Stop. Claude's idle notification also shows as "needs input". Do not record either alone as a bug.
-- [ ] your own setup still applies: statusline, plugins/skills, your hooks (e.g. your Stop hooks still fire)
+- [x] your own setup still applies: statusline, plugins/skills, your hooks (e.g. your Stop hooks still fire)
 - [ ] `/exit` shows `process: exited (0)`
-- [ ] overall verdict: good enough to build the daemon on
+- [x] overall verdict: good enough to build the daemon on
 
 ## Known gaps (deliberately out of the spike)
 
@@ -50,3 +50,4 @@ Executor notes, known spike limitations from code review:
 
 User findings from the checklist:
 
+- Verdict (2026-10-15): it works. The embedded pane is good enough to build the daemon on; hook status followed Claude, and the user's own Claude Code setup kept working. Items left unticked were not reported individually.
