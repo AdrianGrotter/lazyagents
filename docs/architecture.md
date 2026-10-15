@@ -50,15 +50,35 @@ The auto-started daemon runs in its own session without a controlling terminal, 
   (and writes its pid into it) before it touches the socket, and holds it until it exits.
   A second daemon fails with "a daemon is already running (pid N)". A leftover socket
   nobody answers on is removed only while the lock is held.
-- **Stopping an agent stops its process tree.** Kill, remove, restart and shutdown
-  snapshot the agent's descendants (`ps -A -o pid=,ppid=`) first, then send SIGHUP to
-  the agent's process group and SIGTERM to every process in the tree, so background
-  jobs and descendants that started their own session (Claude's Bash-tool shells) go
-  too. Survivors get SIGKILL after a grace period: 1 s for one agent, 2 s shared by all
-  agents on shutdown. The request is answered only once the tree is gone, and a
-  restart spawns the new process only after the old tree has exited.
+- **Tracking agent processes.** Each agent leads its own session and process group.
+  About once a second the daemon reads the process table (`ps -A -o pid=,ppid=,lstart=`)
+  on a separate thread, so `ps` never blocks the event loop, and records every
+  descendant of each running agent with its start time. Each reading is merged with the
+  agent's earlier list: entries still running with the same start time stay, even after
+  they left the agent's tree (reparented to init or moved to a new session, as Claude's
+  Bash-tool shells do); entries that exited, or whose pid now belongs to a process with
+  another start time, are pruned. A recycled pid is therefore never signalled.
+- **Stopping an agent.** Kill, remove, restart and shutdown stop, in one pass, the
+  agent's current process tree (read just before signalling, because a dying parent
+  hands its children to init), its process group and its tracked descendants: SIGHUP
+  and SIGTERM to the group, SIGTERM to every process, then one wait of up to the grace
+  period until all of it is gone. Survivors, including descendants forked meanwhile,
+  and the group get SIGKILL, followed by a short wait (500 ms). The grace period is 1 s
+  for one agent and 2 s shared by all agents on shutdown, which stops every agent in
+  that single pass. The request is answered only once this is done, and a restart
+  spawns the new process only afterwards.
+- **An agent that exits on its own.** When the agent's process exits, the daemon runs
+  the same pass over its process group and tracked descendants, so background jobs it
+  left behind go too. Descendants that a snapshot already running at that moment
+  reports are stopped as soon as it finishes.
+- **The remembered group.** If members of an agent's process group outlive a stop or
+  the agent's own exit, the daemon remembers the group and signals it again on the
+  next kill, remove, restart or shutdown; it forgets the group once it is empty.
+- **Known limit.** A process that double-forks and calls `setsid` within one snapshot
+  interval leaves the agent's tree and group before any snapshot records it, and
+  escapes.
 - **Shutdown.** A `Shutdown` request, SIGTERM and SIGINT all take the same path:
-  terminate every agent tree, then remove the socket and release the lock.
+  stop every agent as above, then remove the socket and release the lock.
 - **Unreachable daemon.** About once a second the daemon checks that `daemon.sock` is
   still the socket it bound; if it was deleted or replaced, it shuts down.
 - **Idle exit.** With no client connected and no agent running for
