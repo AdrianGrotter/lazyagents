@@ -1,0 +1,17 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+protocol = { path = "../protocol" }
+tokio.workspace = true
+
+[dev-dependencies]
+daemon = { path = "../daemon" }
+tempfile.workspace = true
+
+[lints]
+workspace = true
