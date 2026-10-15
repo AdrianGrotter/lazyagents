@@ -9,8 +9,8 @@ Two input modes:
 
 | Key | Action |
 |---|---|
-| `j`/`k`, arrows | move within panel |
-| `h`/`l`, `tab`/`shift-tab` | switch panel |
+| `j`/`k`, `↑`/`↓` | move within the focused box |
+| `h`/`l`, `←`/`→`, `tab`/`shift-tab` | switch between Projects and Agents |
 | `enter` | focus main pane (pane mode) |
 | `n` | new agent popup: name, preset (`claude`, `shell`, custom command); worktree toggle and base branch come with plan 4 |
 | `x` | stop agent (confirm) |

@@ -1280,6 +1280,43 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn arrows_switch_boxes_and_move_within_the_list() {
+        let p = project("p");
+        let q = project("q");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Idle);
+        let (mut app, _) = loaded(vec![p.clone(), q.clone()], vec![a.clone(), b.clone()]);
+
+        let _ = app.on_key(code(KeyCode::Left));
+        assert_eq!(app.focus, Focus::Projects);
+        let _ = app.on_key(code(KeyCode::Down));
+        assert_eq!(
+            (app.focus, app.selected_project().map(|x| x.id)),
+            (Focus::Projects, Some(q.id))
+        );
+        let _ = app.on_key(code(KeyCode::Up));
+        assert_eq!(
+            (app.focus, app.selected_project().map(|x| x.id)),
+            (Focus::Projects, Some(p.id))
+        );
+
+        let _ = app.on_key(code(KeyCode::Right));
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        let _ = app.on_key(code(KeyCode::Down));
+        assert_eq!(
+            (app.focus, app.selected_agent().map(|x| x.id)),
+            (Focus::Agents, Some(b.id))
+        );
+        let _ = app.on_key(code(KeyCode::Up));
+        assert_eq!(
+            (app.focus, app.selected_agent().map(|x| x.id)),
+            (Focus::Agents, Some(a.id))
+        );
+        assert_eq!(app.selected_project().map(|x| x.id), Some(p.id));
+    }
+
+    #[test]
     fn enter_focuses_the_pane_and_detach_returns() {
         let (mut app, _, _) = two_agents();
         let _ = app.on_key(code(KeyCode::Enter));
