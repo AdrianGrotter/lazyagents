@@ -10,8 +10,8 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 
 ## Commands
 
-- `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, tmux harness self-test, TUI smoke run (`scripts/smoke-tui.sh`), TUI hangup test (`scripts/test-tui-hangup.sh`). The done gate.
-- `just fmt`, `just lint`, `just test`, `just test-hooks`, `just smoke-tui`, `just test-tui-hangup`
+- `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, tmux harness self-test, TUI smoke run (`scripts/smoke-tui.sh`), TUI hangup test (`scripts/test-tui-hangup.sh`), worktree smoke run (`scripts/smoke-worktree.sh`). The done gate.
+- `just fmt`, `just lint`, `just test`, `just test-hooks`, `just smoke-tui`, `just test-tui-hangup`, `just smoke-worktree`
 - `just dev [args]`: run the TUI (no args) or a CLI subcommand (`just dev ls`) from any directory. For experiments, point `LAZYAGENTS_STATE_DIR` at a temp dir so your real agents stay untouched.
 - `lazyagents ls|new|kill|restart|rm|shutdown`: manage agents through the daemon without the TUI. Tests set `LAZYAGENTS_STATE_DIR` to a temp dir and shut the daemon down.
 
@@ -22,11 +22,11 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 | `crates/protocol` | client↔daemon messages and framing |
 | `crates/daemon` | agents, PTYs, terminal emulation, persistence, git worktrees |
 | `crates/client` | connects to the daemon, starting it on demand; used by the CLI and the TUI |
-| `crates/tui` | ratatui client: model (app.rs), rendering (ui.rs), connection, runtime |
+| `crates/tui` | ratatui client: model (app.rs), rendering (ui.rs), keymap and config, connection, runtime |
 | `crates/lazyagents` | the binary and CLI |
 | `vendor/crossterm` | crossterm 0.29.0 with a dead-terminal fix (ADR 0005); drop when upstream releases it |
-| `scripts/` | tmux harness, hook tests, TUI smoke and hangup scripts |
-| `docs/` | architecture, protocol, keybindings, status detection, ADRs (`decisions/`) |
+| `scripts/` | tmux harness, hook tests, TUI smoke, hangup and worktree scripts |
+| `docs/` | architecture, protocol, keybindings, configuration, status detection, ADRs (`decisions/`) |
 
 ## Working rules
 

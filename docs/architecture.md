@@ -1,9 +1,8 @@
 # Architecture
 
-Status: daemon, protocol, client, CLI and TUI implemented, including daemon-side git
-worktrees and git stat and diff queries. Planned (plan 4): the worktree UI and the `D`
-diff view, the config file with configurable keybindings and presets, text selection and
-copy, and keyboard scroll mode.
+Status: implemented: the daemon, protocol, client, CLI and TUI, including daemon-side git
+worktrees with git stat and diff queries, the configurable keymap, presets and theme, the
+diff view, keyboard scroll mode, and mouse focus and text copy.
 
 ## Purpose
 
@@ -36,14 +35,15 @@ Subcommands:
 - `lazyagents ls` — list projects and agents.
 - `lazyagents project add [path] [--name n]` / `project rm <project>` — register or
   unregister a project.
-- `lazyagents new <name> [--project p] [--kind claude|generic] [-- cmd...]` — start an agent.
+- `lazyagents new <name> [--project p] [--kind claude|generic] [-- cmd...]` — start an
+  agent.
 - `lazyagents kill|restart|rm <agent>`, `lazyagents rename <agent> <name>`.
 - `lazyagents shutdown` — stop the daemon and every agent.
 
-Commands that talk to the daemon start it if its socket is missing or dead, except `shutdown`, which only connects to a running one.
-The auto-started daemon runs in its own session without a controlling terminal, from
-`/`, with null stdio and without the caller's terminal variables or Claude Code's
-`CLAUDECODE` and `CLAUDE_CODE_*` variables.
+Commands that talk to the daemon start it if its socket is missing or dead, except
+`shutdown`, which only connects to a running one. The auto-started daemon runs in its own
+session without a controlling terminal, from `/`, with null stdio and without the caller's
+terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
 
 ### Daemon lifecycle
 
@@ -116,73 +116,87 @@ function is not used; the binary on `PATH` is.
 
 ### Worktrees
 
-The daemon runs every git command through the git CLI (`crates/daemon/src/git.rs`), so
-the user's git config applies; it only sets `GIT_TERMINAL_PROMPT=0`, plus
+The daemon runs every git command through the git CLI (`crates/daemon/src/git.rs`), so the
+user's git config applies; it only sets `GIT_TERMINAL_PROMPT=0`, plus
 `GIT_OPTIONAL_LOCKS=0` on the read-only queries so they never hold `index.lock` while an
 agent commits.
 
-Creating an agent with a `WorktreeRequest` runs
-`git -C <project> worktree add -b lazyagents/<agent-name> <path> <base>`, where `<path>`
-is `<state>/worktrees/<project-name>-<first 8 of project id>/<agent-name>` (a `/` in the
+Creating an agent with a `WorktreeRequest` runs `git -C <project> worktree add -b
+lazyagents/<agent-name> <path> <base>`, where `<path>` is
+`<state>/worktrees/<project-name>-<first 8 of project id>/<agent-name>` (a `/` in the
 project name becomes `-`) and `<base>` is the requested base, else the project's current
-branch, else (detached HEAD) its commit sha. A base starting with `-` is rejected. The
-branch name is checked with `git check-ref-format --branch` first, and an existing
-`<path>` is refused. A failure before or during the add (project not a git repo, invalid
-branch name, branch exists, base missing, a failing checkout hook) answers `Err` and
-leaves no agent, no new branch and no directory: an add that fails after git created the
-branch or the checkout has both removed again, while a branch that existed before is
-kept. A spawn failure after a successful add keeps the agent as `Exited` with its error
-and its worktree, so it can be restarted. The agent's cwd is the worktree, and
+branch, else (detached HEAD) its commit sha, which is then stored as the base. A base
+starting with `-` is rejected. The branch name is checked with `git check-ref-format
+--branch` first, and an existing `<path>` is refused.
+
+A failure before or during the add (project not a git repo, invalid branch name, branch
+exists, base missing, a failing checkout hook) answers `Err` and leaves no agent, no new
+branch and no directory: an add that fails after git created the branch or the checkout
+has both removed again, while a branch that existed before is kept. A spawn failure after
+a successful add keeps the agent as `Exited` with its error in `AgentInfo.last_error`, and
+its worktree, so it can be restarted. The agent's cwd is the worktree, and
 `AgentInfo.worktree` holds its path, branch and base. Renaming the agent keeps its branch
 and worktree path.
 
-`GitStat` and `GitDiff` run on their own thread and answer when git finishes, so the
-event loop keeps serving. For a worktree agent they compare the working tree with
-`git merge-base <base> HEAD` (committed and uncommitted work); for any other agent with
-`HEAD` (uncommitted changes only). Untracked files appear only in `uncommitted`, the
-count of `git status --porcelain` entries. A diff too large for one message is an error.
+`GitStat` and `GitDiff` run on their own thread and answer when git finishes, so the event
+loop keeps serving. For a worktree agent they compare the working tree with `git
+merge-base <base> HEAD` (committed and uncommitted work); for any other agent with `HEAD`
+(uncommitted changes only). Untracked files appear only in `uncommitted`, the count of
+`git status --porcelain` entries, and not in the diff. A diff too large for one message is
+an error.
 
 `RemoveAgent { remove_worktree: true }` refuses while `git status --porcelain` lists
-anything, answering `worktree has uncommitted changes:` and the exact paths (the new
-path of a rename), one per line,
-and leaves the agent running; `force: true` skips the check and runs
-`git worktree remove --force`. Without `remove_worktree` the worktree stays on disk.
-An agent's branch is never deleted.
+anything, answering `worktree has uncommitted changes:` and the changed paths, one per
+line (the new path of a rename), and leaves the agent running. `force: true` skips the
+check and runs `git worktree remove --force`. Without `remove_worktree` the worktree stays
+on disk. An agent's branch is never deleted.
 
 ### The TUI
 
 `crates/tui` is a client like the CLI; it holds no agent state of its own beyond what the
 daemon last told it.
 
-- **Model** (`app.rs`): `App` holds projects, agents, selection, focus (projects, agents
-  or pane), the open popup, the subscribed agent's screen and the pane's text selection.
-  Key, paste and mouse events and daemon messages go in; `Effect`s come out
-  (`Send(Request)`, `Copy(String)`, `Quit`, `StopDaemonAndQuit`). It does no I/O, so behaviour is tested without a terminal or a
-  daemon. Selection follows an agent's id across list changes. The TUI is subscribed to
-  at most one agent's screen, the selected one, and sizes a running agent's PTY to the
-  pane.
+- **Model** (`app.rs`): `App` holds projects, agents, selection, focus (projects, agents,
+  pane, diff or scroll), the open popup, the subscribed agent's screen, the git stats and
+  diff the daemon sent, and the pane's text selection. Key, paste and mouse events and
+  daemon messages go in; `Effect`s come out (`Send(Request)`, `Copy(String)`, `Quit`,
+  `StopDaemonAndQuit`). It does no I/O, so behaviour is tested without a terminal or a
+  daemon. Selection follows an agent's id across list changes. The TUI is subscribed to at
+  most one agent's screen, the selected one, and sizes a running agent's PTY to the pane.
+  It asks for the selected agent's `GitStat` when the selection changes and then every
+  five seconds, with at most one request per agent in flight.
 - **Focus rule**: keys reach an agent only while the pane has focus, and focus moves into
   the pane only on an explicit user action: `enter` on a running agent, a click in the
-  pane on a running agent (a click on an Agents row only selects), or a successful
-  create from the new agent form, provided no key was pressed and no popup opened
-  between submitting and the daemon's answer. `ctrl-q j`/`k` switch agents from inside
-  the pane and keep focus there only when the new agent is running. A failed request clears the pending
-  create. Focus returns to the sidebar when the selected agent stops running or when the
-  selection changes for any reason other than a key (the agent was removed by another
-  client, the agent list was replaced).
-- **Keys** (`keymap.rs`): a `Keymap` maps key events to `Action`s in three scopes: the
-  sidebar, the keys after the pane prefix (`ctrl-q`), and the direct leave keys
-  (`ctrl-]`). Key strings such as `ctrl-q`, `shift-tab` or `A` parse into `KeySpec`s, and
-  `describe` renders an action's keys for the help popup and the hints. The pane prefix
-  state lives in `App` and is cleared whenever focus leaves the pane.
-- **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane,
-  the status line and popups from `App`; the pane copies the daemon's cell grid into the
-  ratatui buffer, with the text selection drawn reversed on top. The Info box grows to fit its lines (status, worktree branch, git stat,
-  command, cwd, kind) as long as the Agents box keeps 8 rows, and keeps 6 rows while
-  they fit. The status line shows a transient message in red, then `│` and the key hint,
-  cut off on the right. Below a 20×5 pane only "terminal too small" is drawn,
-  and keys do nothing except quitting from the sidebar and leaving the pane. Status glyphs animate from a frame counter the runtime ticks every
-  100 ms while an agent is starting or working.
+  pane on a running agent (a click on an Agents row only selects), or a successful create
+  from the new agent form, provided no key was pressed and no popup opened between
+  submitting and the daemon's answer. `ctrl-q j`/`k` switch agents from inside the pane
+  and keep focus there only when the new agent is running. A failed request clears the
+  pending create. Focus returns to the sidebar when the selected agent stops running or
+  when the selection changes for any reason other than a key (the agent was removed by
+  another client, the agent list was replaced).
+- **Keys and config** (`keymap.rs`, `config.rs`): a `Keymap` maps key events to `Action`s
+  in three scopes: the sidebar, the keys after the pane prefix (`ctrl-q`), and the direct
+  leave keys (`ctrl-]`, `ctrl-5`). Key strings such as `ctrl-q`, `shift-tab` or `A` parse
+  into `KeySpec`s, and `describe` renders an action's keys for the help popup and the
+  hints. The pane prefix state lives in `App` and is cleared whenever focus leaves the
+  pane. `config::load` reads the config file once at startup into a `Config` (keymap,
+  presets, theme, warnings) that never fails: unusable entries keep their defaults and
+  become warnings shown in the status bar ([configuration.md](configuration.md)).
+- **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane or
+  the diff view, the status line and popups from `App`; the pane copies the daemon's cell
+  grid into the ratatui buffer, with the text selection drawn reversed on top. Colours
+  come from the theme. The Info box is sized to its content (status, worktree branch, git
+  stat, command, cwd, kind): it grows as long as the Agents box keeps 8 rows, and keeps 6
+  rows while the content fits. The status line shows a transient message in red, then `│`
+  and the key hint, cut off on the right. Below a 20×5 pane only "terminal too small" is
+  drawn, and keys do nothing except quitting from the sidebar and leaving the pane. Status
+  glyphs animate from a frame counter the runtime ticks every 100 ms while an agent is
+  starting or working.
+- **Mouse** (`app.rs`): the TUI captures the mouse. A click selects a row or focuses a box
+  or the pane, a drag selects pane cells and copies them on release, a click outside a
+  popup closes it, and the wheel scrolls the diff, the scroll-mode history or the pane's
+  scrollback, or goes to the agent when it enabled mouse reporting. Clicks and drags never
+  reach the agent. See [keybindings.md](keybindings.md#mouse).
 - **Connection actor** (`connection.rs`): a task owning the `Client`. It forwards
   responses, errors and server events (agent list changes, screen frames) on one channel.
   `GitStat` and `GitDiff` go out without waiting for their replies, which the daemon may
@@ -192,12 +206,13 @@ daemon last told it.
   those replies and errors arrive in request order. When the daemon closes the connection
   it reports `Closed`, and the TUI exits with "the daemon stopped".
 - **Runtime and terminal guard** (`run.rs`): refuses to start without an interactive
-  terminal, connects (starting the daemon if needed), then enters raw mode, the alternate
-  screen, mouse capture, bracketed paste and, where supported, keyboard enhancement. A
-  blocking thread reads terminal events; a read error means the terminal is gone and the
-  TUI exits, even with SIGHUP and SIGTERM ignored ([ADR 0005](decisions/0005-vendor-crossterm-dead-tty-fix.md)).
-  SIGHUP, SIGTERM and SIGINT also exit. The guard and a panic hook restore every terminal
-  mode on any exit path, ignoring errors from a vanished terminal.
+  terminal, connects (starting the daemon if needed; on a protocol mismatch it opens the
+  restart prompt), then enters raw mode, the alternate screen, mouse capture, bracketed
+  paste and, where supported, keyboard enhancement. A blocking thread reads terminal
+  events; a read error means the terminal is gone and the TUI exits, even with SIGHUP and
+  SIGTERM ignored ([ADR 0005](decisions/0005-vendor-crossterm-dead-tty-fix.md)). SIGHUP,
+  SIGTERM and SIGINT also exit. The guard and a panic hook restore every terminal mode on
+  any exit path, ignoring errors from a vanished terminal.
 - **Clipboard** (`clipboard.rs`): the runtime handles `Copy` between draws, writing OSC 52
   to the terminal and flushing it, and piping the text to `pbcopy` or `wl-copy` when one
   is on `PATH`. The copier runs on a short-lived thread that writes its stdin, closes it
@@ -206,12 +221,13 @@ daemon last told it.
 ### Persistence and config
 
 - State dir: `$LAZYAGENTS_STATE_DIR` (a relative path is taken from the current
-  directory), default `~/.local/state/lazyagents/`, created with mode 0700:
-  `state.toml` (projects, agents, session ids, worktree info), `daemon.sock`,
-  `daemon.lock`, `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`.
-- Config: `~/.config/lazyagents/config.toml` (overridable with `LAZYAGENTS_CONFIG`):
-  keybindings, agent presets (`claude`, `shell`, custom commands), theme colors.
-  Missing file → built-in defaults. Unknown keys → warning in the TUI status line.
+  directory), default `~/.local/state/lazyagents/`, created with mode 0700: `state.toml`
+  (projects, agents, session ids, worktree info), `daemon.sock`, `daemon.lock`,
+  `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`.
+- Config: `$LAZYAGENTS_CONFIG`, else `$XDG_CONFIG_HOME/lazyagents/config.toml`, else
+  `~/.config/lazyagents/config.toml`: keybindings, agent presets, theme colours. A missing
+  file gives the built-in defaults; anything unusable becomes a warning in the TUI status
+  line ([configuration.md](configuration.md)).
 - `state.toml` is written atomically (write temp + rename) on every metadata change.
 
 ## Error handling
@@ -240,7 +256,8 @@ daemon last told it.
 - A corrupt `state.toml` → the daemon refuses to start and leaves the file untouched.
 - Spawn failure (command not found, cwd missing) → agent `Exited`, error rendered in the
   pane and the status line.
-- Worktree errors (branch exists, base missing) → shown in the popup; nothing is created.
+- Worktree errors (branch exists, base missing) → shown in the status bar; nothing is
+  created.
 - `lazyagents hook` never blocks or fails Claude: it checks its environment, reads stdin and
   talks to the daemon within one 200 ms budget, prints nothing and always exits 0.
 - Fatal errors while the daemon starts are written to `daemon.log`.
@@ -253,5 +270,7 @@ daemon last told it.
 
 - [protocol.md](protocol.md): wire format between the daemon, the TUI and the CLI.
 - [keybindings.md](keybindings.md): the TUI key map.
-- [status-detection.md](status-detection.md): how agent status is derived from hooks and the pane.
+- [configuration.md](configuration.md): the config file.
+- [status-detection.md](status-detection.md): how agent status is derived from hooks and the
+  pane.
 - [decisions/](decisions/): ADRs recording the design choices behind this system.

@@ -5,7 +5,7 @@ Status: implemented in crates/tui (app.rs, keymap.rs, keys.rs, config.rs).
 The keys below are the defaults. Every sidebar key, the pane prefix, the keys after it and
 the direct-leave keys can be changed in `config.toml` (`[keys.sidebar]` and `[keys.pane]`);
 the help popup, the status bar hints and the messages name the configured keys. Popup keys
-are fixed.
+are fixed. The format is in [configuration.md](configuration.md).
 
 Two input modes:
 
@@ -139,8 +139,12 @@ history on screen and keeps scroll mode; in the diff view it does nothing.
 Copying writes the text to the terminal as OSC 52, which Ghostty, kitty and WezTerm put on
 the system clipboard, and also pipes it to `pbcopy` (macOS) or `wl-copy` (Wayland) when one
 is on `PATH`. Inside tmux, OSC 52 reaches the outer terminal only with
-`set -g set-clipboard on` in `tmux.conf`. In most terminals, holding shift while dragging
-bypasses lazyagents and uses the terminal's own selection.
+`set -g set-clipboard on` in `tmux.conf`, and some terminals cap the size of an OSC 52
+payload and drop longer copies. A selection covers screen cells, not text: if the agent's
+output scrolls while the selection stays, a copy gets whatever those cells hold on release.
+Holding the modifier that bypasses mouse capture while dragging uses the terminal's own
+selection instead: shift in Ghostty, kitty and WezTerm, Option in iTerm2, Fn in
+Terminal.app. See [configuration.md](configuration.md#clipboard).
 
 The wheel over the pane scrolls the emulator's scrollback when the agent hasn't enabled
 mouse reporting; otherwise it is forwarded to the agent. An exited or stopped agent's pane

@@ -8,7 +8,7 @@ Your own Claude Code setup (`~/.claude`, project `.claude/`, plugins, skills, MC
 
 ## Status
 
-Early development. The daemon, the CLI and the TUI exist. Git worktrees per agent, the diff view, the config file (keybindings, presets) and text selection come next. See `docs/architecture.md` and `docs/superpowers/specs/2026-10-15-lazyagents-design.md`.
+Early development. The daemon, the CLI and the TUI exist, with git worktrees per agent, a diff view, a config file (keybindings, presets, theme) and mouse selection with copy. See `docs/architecture.md` and `docs/superpowers/specs/2026-10-15-lazyagents-design.md`.
 
 ## Usage
 
@@ -23,14 +23,19 @@ The TUI starts the daemon if none is running. Quitting it leaves the agents runn
 | Key | Action |
 |---|---|
 | `a` | add a project (defaults to the current directory) |
-| `n` | new agent: name and preset (claude, shell, custom command) |
+| `n` | new agent: name, preset (claude, shell, custom, your own), and an optional git worktree |
 | `enter` | open the selected agent's terminal; all keys go to the agent |
-| `ctrl-]` | back to the sidebar |
+| `ctrl-q q` or `ctrl-]` | back to the sidebar |
+| `ctrl-q j` / `ctrl-q k` | next / previous agent without leaving the terminal |
+| `D` | diff of the agent's changes |
+| `s` | scroll the agent's terminal history |
 | `x` / `d` | stop / remove the selected agent |
 | `?` | all keys |
 | `q` | quit the TUI; agents keep running |
 
-The full key map is in [docs/keybindings.md](docs/keybindings.md).
+The mouse works too: click to focus, drag in the terminal to copy. Keys, presets and colours are configurable in `~/.config/lazyagents/config.toml` ([docs/configuration.md](docs/configuration.md)). The full key map is in [docs/keybindings.md](docs/keybindings.md).
+
+An agent created with the worktree option runs in its own git worktree on the branch `lazyagents/<name>`, under the state directory. Removing the agent can remove the worktree; the branch always stays.
 
 The same daemon is scriptable without the TUI:
 
@@ -45,7 +50,7 @@ lazyagents shutdown       # stop the daemon and every agent
 
 ```sh
 direnv allow        # or: nix develop
-just check          # fmt, clippy, tests, hook tests, harness self-test, TUI smoke and hangup runs
+just check          # fmt, clippy, tests, hook tests, harness self-test, TUI smoke, hangup and worktree runs
 just dev            # run the TUI from any directory
 just dev ls         # ... or any CLI subcommand
 ```
