@@ -13,9 +13,9 @@ is rejected.
 1. The daemon sends `Welcome { protocol_version, daemon_version }` as soon as a client
    connects.
 2. The client compares the Welcome's `protocol_version` with its own. On a mismatch it
-   fails with `client::VersionMismatch` without sending Hello; the fix is
-   `lazyagents shutdown`, so the next command starts a matching daemon. On a match it
-   sends `Hello { protocol_version }`.
+   fails with `client::VersionMismatch` without sending Hello. The fix is to stop that
+   daemon: `lazyagents shutdown` prints its pid and the `kill` command, and the next
+   command starts a matching daemon. On a match it sends `Hello { protocol_version }`.
 3. The client then sends `Request { id, request }`. The daemon answers each request with
    exactly one `Response { id, result }`, where `result` is `Ok(Response)` or
    `Err(message)`.
@@ -48,7 +48,7 @@ is rejected.
 - `Hook { id, kind, session_id, source }`: `session_id` and `source` come from the
   Claude Code hook payload; `source` is `SessionStart`'s `startup`, `resume`, `clear`
   or `compact`
-- `Shutdown`
+- `Shutdown`: answered after every agent's process tree has exited
 
 `Response`:
 
@@ -67,6 +67,8 @@ is rejected.
 - `ProjectsChanged(Vec<Project>)`
 - `Frame(Frame)`
 
+`KillAgent`, `RemoveAgent` and `RestartAgent` stop the agent's whole process tree (see
+[architecture.md](architecture.md#daemon-lifecycle)) before they are answered.
 `Input`, `Resize` and `Scroll` are rejected with an error for agents that are not running.
 A `Hook` for an agent that is not running, or is not a Claude agent, is ignored.
 

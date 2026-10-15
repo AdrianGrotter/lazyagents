@@ -17,8 +17,8 @@ One binary, `lazyagents`, in a Cargo workspace:
 | Crate | Responsibility | Depends on |
 |---|---|---|
 | `crates/protocol` | Message types, framing, protocol version | serde, postcard |
-| `crates/daemon` | Agent registry, PTYs, terminal emulation, input encoding, persistence, hook ingestion, status (git worktrees: planned) | protocol, portable-pty, alacritty_terminal, tokio |
-| `crates/client` | Connects to the daemon, starting it on demand; used by the CLI and the TUI | protocol, tokio |
+| `crates/daemon` | Agent registry, PTYs, terminal emulation, input encoding, persistence, hook ingestion, status (git worktrees: planned) | protocol, alacritty_terminal, rustix, tokio |
+| `crates/client` | Connects to the daemon, starting it on demand; used by the CLI and the TUI | protocol, rustix, tokio |
 | `crates/tui` | ratatui client: layout, panels, popups, rendering of remote grids, input capture | protocol, ratatui, crossterm, tokio |
 | `crates/lazyagents` | Binary: CLI parsing and subcommand dispatch | daemon, client, protocol, clap |
 
@@ -36,12 +36,35 @@ Subcommands:
 - `lazyagents shutdown` — stop the daemon and every agent.
 
 Commands that talk to the daemon start it if its socket is missing or dead, except `shutdown`, which only connects to a running one.
+The auto-started daemon runs detached in its own process group, from `/`, without the
+caller's terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
+
+### Daemon lifecycle
+
+- **One daemon per state dir.** The daemon takes an exclusive lock on `daemon.lock`
+  (and writes its pid into it) before it touches the socket, and holds it until it exits.
+  A second daemon fails with "a daemon is already running (pid N)". A leftover socket
+  nobody answers on is removed only while the lock is held.
+- **Stopping an agent stops its process tree.** Kill, remove, restart and shutdown
+  snapshot the agent's descendants (`ps -A -o pid=,ppid=`) first, then send SIGHUP to
+  the agent's process group and SIGTERM to every process in the tree, so background
+  jobs and descendants that started their own session (Claude's Bash-tool shells) go
+  too. Survivors get SIGKILL after a grace period: 1 s for one agent, 2 s shared by all
+  agents on shutdown. The request is answered only once the tree is gone, and a
+  restart spawns the new process only after the old tree has exited.
+- **Shutdown.** A `Shutdown` request, SIGTERM and SIGINT all take the same path:
+  terminate every agent tree, then remove the socket and release the lock.
+- **Unreachable daemon.** About once a second the daemon checks that `daemon.sock` is
+  still the socket it bound; if it was deleted or replaced, it shuts down.
+- **Idle exit.** With no client connected and no agent running for
+  `LAZYAGENTS_IDLE_EXIT_SECS` seconds (default 600; 0 disables it), it shuts down.
 
 ### The daemon is the terminal
 
 For each running agent the daemon owns:
 
-- a PTY + child process (`portable-pty`),
+- a PTY + child process (`alacritty_terminal::tty`); the child leads its own session
+  and process group,
 - an `alacritty_terminal::Term` fed by the PTY output (screen, scrollback, modes),
 - an input encoder that turns abstract key/mouse/paste events into bytes according to the
   modes the child has enabled (application cursor keys, bracketed paste, mouse reporting
@@ -75,9 +98,10 @@ explicit confirmation is required. The branch is never deleted automatically.
 
 ### Persistence and config
 
-- State dir: `$LAZYAGENTS_STATE_DIR`, default `~/.local/state/lazyagents/`:
+- State dir: `$LAZYAGENTS_STATE_DIR` (a relative path is taken from the current
+  directory), default `~/.local/state/lazyagents/`, created with mode 0700:
   `state.toml` (projects, agents, session ids, worktree info), `daemon.sock`,
-  `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`.
+  `daemon.lock`, `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`.
 - Config: `~/.config/lazyagents/config.toml` (overridable with `LAZYAGENTS_CONFIG`):
   keybindings, agent presets (`claude`, `shell`, custom commands), theme colors.
   Missing file → built-in defaults. Unknown keys → warning in the TUI status line.
@@ -86,9 +110,18 @@ explicit confirmation is required. The branch is never deleted automatically.
 ## Error handling
 
 - Protocol version mismatch → the client fails with `VersionMismatch`, which suggests
-  `lazyagents shutdown`; the TUI will show a popup offering to restart the daemon.
-- Socket exists but connect fails → remove stale socket, spawn daemon.
-- Daemon crash → agents die; on next start they load as `Stopped` and can be restarted.
+  `lazyagents shutdown`. A mismatched daemon cannot be asked to stop, so `shutdown`
+  prints the mismatch and `stop it with: kill <pid>` (pid from `daemon.lock`) and exits
+  1. The TUI will show a popup offering to restart the daemon.
+- Socket exists but connect fails → spawn a daemon, which removes the stale socket once
+  it holds the lock.
+- A daemon that exits while the client waits for it to start → the client fails at
+  once with "daemon exited during startup; see <log>", unless another daemon holds the
+  lock (a concurrent start), in which case it keeps waiting for that one. The client
+  reaps the daemon process it started.
+- Daemon crash (SIGKILL) → its PTYs close and agents receive SIGHUP; processes that
+  ignore it or left the agent's session can outlive the daemon. On the next start agents
+  load as `Stopped` and can be restarted.
   Claude resumes only sessions that received a prompt
   (see [ADR 0006](decisions/0006-resume-only-prompted-sessions.md)).
 - A corrupt `state.toml` → the daemon refuses to start and leaves the file untouched.
@@ -98,8 +131,8 @@ explicit confirmation is required. The branch is never deleted automatically.
 - `lazyagents hook` never blocks or fails Claude: it checks its environment, reads stdin and
   talks to the daemon within one 200 ms budget, prints nothing and always exits 0.
 - Fatal errors while the daemon starts are written to `daemon.log`.
-- `lazyagents shutdown` waits up to 5 s for the daemon's reply and up to 3 s for the socket
-  to disappear.
+- `lazyagents shutdown` waits up to 5 s for the daemon's reply, which comes after every
+  agent tree is gone, and up to 3 s for the socket to disappear.
 - All daemon errors logged with `tracing` to `daemon.log`; TUI shows the last error in
   the status line.
 
