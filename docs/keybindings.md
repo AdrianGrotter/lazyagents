@@ -1,7 +1,12 @@
 # Keybindings
 
-Status: implemented in crates/tui (app.rs, keymap.rs, keys.rs), except `D` (plan 4),
-keyboard scroll mode (plan 4) and configurable bindings (plan 4).
+Status: implemented in crates/tui (app.rs, keymap.rs, keys.rs, config.rs), except `D`
+(plan 4) and keyboard scroll mode (plan 4).
+
+The keys below are the defaults. Every sidebar key, the pane prefix, the keys after it and
+the direct-leave keys can be changed in `config.toml` (`[keys.sidebar]` and `[keys.pane]`);
+the help popup, the status bar hints and the messages name the configured keys. Popup keys
+are fixed.
 
 Two input modes:
 
@@ -55,10 +60,17 @@ wheel too. Planned (plan 4): mouse drag selects text inside the pane and copies 
 OSC 52 (fallback `pbcopy`/`wl-copy`), and a keyboard scroll mode.
 
 **Terminal too small**: while the pane would be smaller than 20×5 cells the TUI shows only
-"terminal too small", and keys and pastes do nothing except `q`/`ctrl-c` (quit, from the
-sidebar) and `ctrl-q` then `q` or `esc` (leave the pane). Nothing reaches an agent.
+"terminal too small", and keys and pastes do nothing except the quit keys (`q`/`ctrl-c`,
+from the sidebar) and the prefix then a leave key (`ctrl-q` then `q` or `esc`, leaving the
+pane). Nothing reaches an agent.
 
-Status icons in the Agents panel:
+Bindings match exactly. A bare character matches whether or not the terminal adds SHIFT.
+With `ctrl` or `alt`, SHIFT counts: `ctrl-Q` (or `ctrl-shift-q`) is a different key from
+`ctrl-q`, so in kitty-protocol terminals ctrl-shift-q reaches the agent instead of acting as
+the prefix. Legacy terminals cannot send ctrl with SHIFT, so there `ctrl-Q` never fires.
+
+Status icons in the Agents panel, in the default colours (`[theme]` in `config.toml`
+changes them):
 
 | Icon | Status |
 |---|---|

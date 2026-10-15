@@ -7,12 +7,12 @@ use protocol::{
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::config::{Config, PresetDef, Theme};
 use crate::keymap::{Action, Keymap};
 use crate::keys;
 
 pub const MESSAGE_TTL: Duration = Duration::from_secs(5);
 pub const MIN_PANE: (u16, u16) = (20, 5);
-const PREFIX_HELP: &str = "ctrl-q: j/k switch · q sidebar · s scroll · ctrl-q send";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -21,36 +21,46 @@ pub enum Focus {
     Pane,
 }
 
+/// `Configured(i)` is the i-th preset from the config file; they follow the built-ins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
     Claude,
     Shell,
     Custom,
+    Configured(usize),
 }
 
+const BUILTIN_PRESETS: [Preset; 3] = [Preset::Claude, Preset::Shell, Preset::Custom];
+
 impl Preset {
-    pub fn label(self) -> &'static str {
+    pub fn all(configured: usize) -> Vec<Preset> {
+        BUILTIN_PRESETS
+            .into_iter()
+            .chain((0..configured).map(Preset::Configured))
+            .collect()
+    }
+
+    pub fn label(self, presets: &[PresetDef]) -> &str {
         match self {
             Preset::Claude => "claude",
             Preset::Shell => "shell",
             Preset::Custom => "custom",
+            Preset::Configured(index) => presets.get(index).map_or("?", |p| p.name.as_str()),
         }
     }
 
-    pub fn next(self) -> Self {
-        match self {
-            Preset::Claude => Preset::Shell,
-            Preset::Shell => Preset::Custom,
-            Preset::Custom => Preset::Claude,
-        }
+    pub fn next(self, configured: usize) -> Self {
+        self.step(1, configured)
     }
 
-    pub fn previous(self) -> Self {
-        match self {
-            Preset::Claude => Preset::Custom,
-            Preset::Shell => Preset::Claude,
-            Preset::Custom => Preset::Shell,
-        }
+    pub fn previous(self, configured: usize) -> Self {
+        self.step(-1, configured)
+    }
+
+    fn step(self, step: i32, configured: usize) -> Self {
+        let all = Preset::all(configured);
+        let index = all.iter().position(|p| *p == self).unwrap_or(0);
+        all[wrap(index, step, all.len())]
     }
 }
 
@@ -123,13 +133,17 @@ pub struct App {
     too_small: bool,
     pub prefix_pending: bool,
     pub keymap: Keymap,
+    pub presets: Vec<PresetDef>,
+    pub theme: Theme,
     cwd: PathBuf,
     home: Option<PathBuf>,
     shell: String,
 }
 
 impl App {
-    pub fn new(cwd: PathBuf, shell: String, home: Option<PathBuf>, keymap: Keymap) -> Self {
+    pub fn new(cwd: PathBuf, shell: String, home: Option<PathBuf>, config: Config) -> Self {
+        let message =
+            (!config.warnings.is_empty()).then(|| (config.warnings.join("; "), Instant::now()));
         Self {
             projects: Vec::new(),
             agents: Vec::new(),
@@ -141,13 +155,15 @@ impl App {
             subscribed: None,
             screen: Screen::blank(0, 0),
             pane_size: None,
-            message: None,
+            message,
             pending_select: None,
             interactions: 0,
             subscribed_running: false,
             too_small: false,
             prefix_pending: false,
-            keymap,
+            keymap: config.keymap,
+            presets: config.presets,
+            theme: config.theme,
             cwd,
             home,
             shell,
@@ -488,7 +504,7 @@ impl App {
         }
     }
 
-    /// Nothing is visible, so only `q`/`ctrl-c` (quit from the sidebar) and the prefix
+    /// Nothing is visible, so only the quit keys (from the sidebar) and the prefix
     /// followed by a leave key (leave the pane) act; no key reaches an agent.
     fn on_too_small_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         if self.focus == Focus::Pane {
@@ -501,10 +517,8 @@ impl App {
             }
             return Vec::new();
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Char('q') if !ctrl => vec![Effect::Quit],
-            KeyCode::Char('c') if ctrl => vec![Effect::Quit],
+        match self.keymap.sidebar(&key) {
+            Some(Action::Quit) => vec![Effect::Quit],
             _ => Vec::new(),
         }
     }
@@ -581,7 +595,7 @@ impl App {
                 Some(Action::PaneSendPrefix) => self.input(id, &self.keymap.prefix().event()),
                 Some(_) => Vec::new(),
                 None => {
-                    self.fail(PREFIX_HELP);
+                    self.fail(prefix_help(&self.keymap));
                     Vec::new()
                 }
             };
@@ -645,7 +659,11 @@ impl App {
                 (Focus::Projects, _) => self.focus = Focus::Agents,
                 (_, Some(agent)) if agent.status.is_running() => self.focus = Focus::Pane,
                 (_, Some(agent)) => {
-                    let message = format!("{} is not running — r restarts", agent.name);
+                    let message = format!(
+                        "{} is not running — {} restarts",
+                        agent.name,
+                        self.keymap.first_key(Action::Restart)
+                    );
                     self.fail(message);
                 }
                 (_, None) => {}
@@ -737,7 +755,8 @@ impl App {
 
     fn open_new_agent(&mut self) {
         if self.selected_project().is_none() {
-            self.fail("add a project first (a)");
+            let add = self.keymap.first_key(Action::AddProject);
+            self.fail(format!("add a project first ({add})"));
             return;
         }
         self.popup = Some(Popup::NewAgent(NewAgentForm {
@@ -830,9 +849,11 @@ impl App {
             KeyCode::Enter => return self.submit_form(form),
             KeyCode::Tab | KeyCode::Down => form.field = next_field(form.field, form.preset),
             KeyCode::BackTab | KeyCode::Up => form.field = previous_field(form.field, form.preset),
-            KeyCode::Left if form.field == Field::Preset => form.preset = form.preset.previous(),
+            KeyCode::Left if form.field == Field::Preset => {
+                form.preset = form.preset.previous(self.presets.len())
+            }
             KeyCode::Right | KeyCode::Char(' ') if form.field == Field::Preset => {
-                form.preset = form.preset.next()
+                form.preset = form.preset.next(self.presets.len())
             }
             _ => {
                 let target = match form.field {
@@ -871,6 +892,10 @@ impl App {
                 }
                 (AgentKind::Generic, vec!["sh".into(), "-c".into(), command])
             }
+            Preset::Configured(index) => match self.presets.get(index) {
+                Some(preset) => (preset.kind, preset.command.clone()),
+                None => return Vec::new(),
+            },
         };
         let (cols, rows) = self.pane_size.unwrap_or(DEFAULT_SIZE);
         self.pending_select = Some(PendingCreate {
@@ -888,6 +913,23 @@ impl App {
             worktree: None,
         }))]
     }
+}
+
+fn prefix_help(keymap: &Keymap) -> String {
+    let keys = |actions: &[Action]| {
+        let keys: Vec<_> = actions.iter().flat_map(|a| keymap.keys(*a)).collect();
+        crate::keymap::join(&keys)
+    };
+    let parts: Vec<String> = [
+        (keys(&[Action::PaneNext, Action::PanePrevious]), "switch"),
+        (keys(&[Action::PaneLeave]), "sidebar"),
+        (keys(&[Action::PaneSendPrefix]), "send"),
+    ]
+    .into_iter()
+    .filter(|(keys, _)| !keys.is_empty())
+    .map(|(keys, label)| format!("{keys} {label}"))
+    .collect();
+    format!("{}: {}", keymap.prefix(), parts.join(" · "))
 }
 
 fn wrap(index: usize, step: i32, count: usize) -> usize {
@@ -940,11 +982,19 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn loaded(projects: Vec<Project>, agents: Vec<AgentInfo>) -> (App, Vec<Effect>) {
+        loaded_with(Config::default(), projects, agents)
+    }
+
+    pub(crate) fn loaded_with(
+        config: Config,
+        projects: Vec<Project>,
+        agents: Vec<AgentInfo>,
+    ) -> (App, Vec<Effect>) {
         let mut app = App::new(
             "/work".into(),
             "/bin/sh".into(),
             Some("/home/u".into()),
-            Keymap::defaults(),
+            config,
         );
         let mut effects = app.apply_response(Response::Projects(projects));
         effects.extend(app.apply_response(Response::Agents(agents)));
@@ -1121,7 +1171,7 @@ pub(crate) mod tests {
             "/work".into(),
             "/bin/sh".into(),
             Some("/home/u".into()),
-            Keymap::defaults(),
+            Config::default(),
         );
         let _ = app.set_pane_size(70, 15);
         let _ = app.apply_response(Response::Projects(vec![p]));
@@ -1154,7 +1204,7 @@ pub(crate) mod tests {
             "/work".into(),
             "/bin/sh".into(),
             Some("/home/u".into()),
-            Keymap::defaults(),
+            Config::default(),
         );
         app.fail("boom");
         let now = Instant::now();
@@ -1452,7 +1502,7 @@ pub(crate) mod tests {
         assert_eq!(app.focus, Focus::Pane);
         assert_eq!(
             app.message.as_ref().map(|(m, _)| m.as_str()),
-            Some("ctrl-q: j/k switch · q sidebar · s scroll · ctrl-q send")
+            Some("ctrl-q: j/k switch · q/esc sidebar · ctrl-q send")
         );
         assert_eq!(
             app.on_key(key('x')),
@@ -1775,6 +1825,122 @@ pub(crate) mod tests {
                 AgentKind::Generic,
                 vec!["sh".to_string(), "-c".to_string(), "make test".to_string()]
             )
+        );
+    }
+
+    fn configured(text: &str) -> Config {
+        crate::config::parse(text).expect("config parses")
+    }
+
+    #[test]
+    fn custom_preset_creates_with_its_command() {
+        let config = configured(
+            r#"
+            [[presets]]
+            name = "codex"
+            command = ["codex", "--full-auto"]
+            "#,
+        );
+        let (mut app, _) = loaded_with(config, vec![project("p")], vec![]);
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "cx");
+        let _ = app.on_key(code(KeyCode::Tab));
+        let preset = |app: &App| match &app.popup {
+            Some(Popup::NewAgent(form)) => form.preset,
+            other => panic!("no form: {other:?}"),
+        };
+        let _ = app.on_key(code(KeyCode::Left));
+        assert_eq!(preset(&app), Preset::Configured(0));
+        let _ = app.on_key(code(KeyCode::Right));
+        assert_eq!(preset(&app), Preset::Claude);
+        for _ in 0..3 {
+            let _ = app.on_key(code(KeyCode::Right));
+        }
+        assert_eq!(preset(&app), Preset::Configured(0));
+        let c = created(app.on_key(code(KeyCode::Enter)));
+        assert_eq!(
+            (c.name.as_str(), c.kind, c.command),
+            (
+                "cx",
+                AgentKind::Generic,
+                vec!["codex".to_string(), "--full-auto".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn config_warnings_become_the_startup_message() {
+        let config = Config {
+            warnings: vec!["unknown table [x]".into(), "theme.accent: bad".into()],
+            ..Config::default()
+        };
+        let app = App::new("/w".into(), "/bin/sh".into(), None, config);
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("unknown table [x]; theme.accent: bad")
+        );
+        let app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
+        assert_eq!(app.message, None);
+    }
+
+    #[test]
+    fn prefix_help_reflects_configured_keys() {
+        let config = configured(
+            r#"
+            [keys.pane]
+            prefix = "ctrl-a"
+            next = "n"
+            previous = "p"
+            leave = ["x"]
+            "#,
+        );
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let (mut app, _) = loaded_with(config, vec![p], vec![a]);
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(ctrl('a'));
+        assert!(app.on_key(key('z')).is_empty());
+        assert_eq!(
+            app.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("ctrl-a: n/p switch · x sidebar · ctrl-a send")
+        );
+    }
+
+    #[test]
+    fn quit_while_too_small_follows_the_keymap() {
+        let config = configured("[keys.sidebar]\nquit = \"ctrl-x\"\n");
+        let (mut app, _) = loaded_with(config, vec![project("p")], vec![]);
+        let _ = app.set_pane_size(5, 2);
+        assert!(app.on_key(key('q')).is_empty());
+        assert_eq!(app.on_key(ctrl('x')), vec![Effect::Quit]);
+    }
+
+    #[test]
+    fn hints_in_messages_name_the_configured_keys() {
+        let config = configured(
+            r#"
+            [keys.sidebar]
+            restart = "ctrl-r"
+            add_project = "P"
+            "#,
+        );
+        let (mut app, _) = loaded_with(config, vec![], vec![]);
+        let _ = app.on_key(key('n'));
+        assert_eq!(
+            app.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("add a project first (P)")
+        );
+        let config = configured("[keys.sidebar]\nrestart = \"ctrl-r\"\n");
+        let p = project("p");
+        let (mut app, _) = loaded_with(
+            config,
+            vec![p.clone()],
+            vec![agent(&p, "a", Status::Stopped)],
+        );
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(
+            app.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("a is not running — ctrl-r restarts")
         );
     }
 

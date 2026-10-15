@@ -31,7 +31,7 @@ scenario() {
   local label=$1 wrapper=$2
   rm -f "$work/status"
   "$h" start "$name" 100 30 -- sh -c \
-    "trap '' HUP; cd '$project' && env LAZYAGENTS_STATE_DIR='$state' SHELL=/bin/sh $wrapper '$link'; echo \$? > '$work/status'"
+    "trap '' HUP; cd '$project' && env LAZYAGENTS_STATE_DIR='$state' LAZYAGENTS_CONFIG='$work/config.toml' SHELL=/bin/sh $wrapper '$link'; echo \$? > '$work/status'"
   "$h" wait-for "$name" "press a to add a project" 10
   tui_pid=$(pgrep -fx "$link")
   "$h" stop "$name"

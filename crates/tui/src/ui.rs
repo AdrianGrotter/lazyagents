@@ -9,30 +9,46 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{AgentView, App, Field, Focus, MIN_PANE, NewAgentForm, Popup, Preset};
+use crate::config::Theme;
 use crate::keymap::{Action, Keymap};
 
 pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-const SIDEBAR_HINT: &str = "? help · q quit · enter open · n new · x stop · r restart · d remove · R rename · a add project · A all · g next !";
 const FORM_HINT: &str = "tab field · ←/→ preset · enter start · esc cancel";
 const CONFIRM_HINT: &str = "y/enter confirm · n/esc cancel";
 
-const SIDEBAR_KEYS: [(&str, &str); 15] = [
-    ("j/k ↑/↓", "move within the panel"),
-    ("h/l ←/→", "projects / agents panel"),
-    ("tab/shift-tab", "switch panel"),
-    ("enter", "open the agent's pane"),
-    ("n", "new agent"),
-    ("x", "stop agent"),
-    ("r", "restart agent"),
-    ("d", "remove agent"),
-    ("R", "rename agent"),
-    ("a", "add project"),
-    ("A", "all agents / this project"),
-    ("g", "next agent needing input"),
-    ("?", "help"),
-    ("q, ctrl-c", "quit (agents keep running)"),
-    ("Q", "stop the daemon and quit"),
+const SIDEBAR_HINT: [(Action, &str); 11] = [
+    (Action::Help, "help"),
+    (Action::Quit, "quit"),
+    (Action::Open, "open"),
+    (Action::NewAgent, "new"),
+    (Action::Stop, "stop"),
+    (Action::Restart, "restart"),
+    (Action::Remove, "remove"),
+    (Action::Rename, "rename"),
+    (Action::AddProject, "add project"),
+    (Action::ToggleAllAgents, "all"),
+    (Action::NextAttention, "next !"),
+];
+
+const SIDEBAR_HELP: [(Action, &str); 17] = [
+    (Action::Down, "move down in the focused box"),
+    (Action::Up, "move up in the focused box"),
+    (Action::FocusProjects, "focus Projects"),
+    (Action::FocusAgents, "focus Agents"),
+    (Action::ToggleFocus, "switch between Projects and Agents"),
+    (Action::Open, "open the agent's pane"),
+    (Action::NewAgent, "new agent"),
+    (Action::Stop, "stop agent"),
+    (Action::Restart, "restart agent"),
+    (Action::Remove, "remove agent"),
+    (Action::Rename, "rename agent"),
+    (Action::AddProject, "add project"),
+    (Action::ToggleAllAgents, "all agents / this project"),
+    (Action::NextAttention, "next agent needing input"),
+    (Action::Help, "help"),
+    (Action::Quit, "quit (agents keep running)"),
+    (Action::StopDaemon, "stop the daemon and quit"),
 ];
 const TOO_SMALL: &str = "terminal too small";
 
@@ -72,7 +88,7 @@ pub fn areas(area: Rect, project_count: usize) -> Areas {
     }
 }
 
-pub fn glyph(status: Status, tick: u64) -> (&'static str, Style) {
+pub fn glyph(status: Status, tick: u64, theme: &Theme) -> (&'static str, Style) {
     match status {
         Status::Starting => {
             let symbol = if (tick / 5).is_multiple_of(2) {
@@ -82,12 +98,15 @@ pub fn glyph(status: Status, tick: u64) -> (&'static str, Style) {
             };
             (symbol, Style::new().dim())
         }
-        Status::Working => (SPINNER[(tick % 10) as usize], Style::new().yellow()),
-        Status::NeedsInput => ("!", Style::new().red().bold()),
-        Status::Idle => ("✓", Style::new().green()),
+        Status::Working => (
+            SPINNER[(tick % 10) as usize],
+            Style::new().fg(theme.working),
+        ),
+        Status::NeedsInput => ("!", Style::new().fg(theme.attention).bold()),
+        Status::Idle => ("✓", Style::new().fg(theme.idle)),
         Status::Exited(0) => ("✗", Style::new().dim()),
-        Status::Exited(_) => ("✗", Style::new().red()),
-        Status::Stopped => ("■", Style::new().dark_gray()),
+        Status::Exited(_) => ("✗", Style::new().fg(theme.attention)),
+        Status::Stopped => ("■", Style::new().fg(theme.dim)),
     }
 }
 
@@ -137,12 +156,8 @@ pub fn render_screen(screen: &Screen, area: Rect, buf: &mut Buffer) -> Option<Po
     (x < area.width && y < area.height).then(|| Position::new(area.x + x, area.y + y))
 }
 
-fn block(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
-    let border = if focused {
-        Color::Green
-    } else {
-        Color::DarkGray
-    };
+fn block(title: impl Into<Line<'static>>, focused: bool, theme: &Theme) -> Block<'static> {
+    let border = if focused { theme.accent } else { theme.border };
     Block::bordered().title(title).border_style(border)
 }
 
@@ -157,7 +172,7 @@ pub fn draw(frame: &mut Frame, app: &App, areas: &Areas, now: Instant, tick: u64
     draw_pane(frame, app, areas);
     draw_status(frame, app, areas.status, now);
     if let Some(popup) = &app.popup {
-        draw_popup(frame, popup, &app.keymap, frame.area());
+        draw_popup(frame, popup, app, frame.area());
     }
 }
 
@@ -174,11 +189,12 @@ fn selectable_list(
 }
 
 fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
-    let block = block(" Projects ", app.focus == Focus::Projects);
+    let block = block(" Projects ", app.focus == Focus::Projects, &app.theme);
     if app.projects.is_empty() {
         let open_sides = block.borders(Borders::TOP | Borders::BOTTOM);
+        let add = app.keymap.first_key(Action::AddProject);
         frame.render_widget(
-            Paragraph::new("press a to add a project").block(open_sides),
+            Paragraph::new(format!("press {add} to add a project")).block(open_sides),
             area,
         );
         return;
@@ -188,11 +204,12 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|project| {
             let attention = app.attention(project.id);
-            let mut text = project.name.clone();
+            let mut spans = vec![Span::raw(project.name.clone())];
             if attention > 0 {
-                text.push_str(&format!(" {attention}!"));
+                spans.push(Span::raw(" "));
+                spans.push(Span::raw(format!("{attention}!")).fg(app.theme.attention));
             }
-            ListItem::new(text)
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let (list, mut state) = selectable_list(items, app.project_index, block);
@@ -200,7 +217,7 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
-    let (symbol, style) = glyph(agent.status, tick);
+    let (symbol, style) = glyph(agent.status, tick, &app.theme);
     let name = match app.view {
         AgentView::All => {
             let project = app.projects.iter().find(|p| p.id == agent.project);
@@ -215,7 +232,7 @@ fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
     let rest = format!(" {name}  {}", agent.status.label());
     let line = Line::from(vec![Span::styled(symbol, style), Span::raw(rest)]);
     ListItem::new(if agent.status == Status::NeedsInput {
-        line.red()
+        line.fg(app.theme.attention)
     } else {
         line
     })
@@ -226,10 +243,12 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect, tick: u64) {
         AgentView::Project => " Agents ",
         AgentView::All => " Agents · all ",
     };
-    let block = block(title, app.focus == Focus::Agents);
+    let block = block(title, app.focus == Focus::Agents, &app.theme);
     let agents = app.visible_agents();
     if agents.is_empty() {
-        frame.render_widget(Paragraph::new("no agents — press n").block(block), area);
+        let new = app.keymap.first_key(Action::NewAgent);
+        let text = format!("no agents — press {new}");
+        frame.render_widget(Paragraph::new(text).block(block), area);
         return;
     }
     let items = agents.iter().map(|a| agent_row(app, a, tick)).collect();
@@ -260,7 +279,8 @@ fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
         (None, None) => Vec::new(),
     };
     let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
-    frame.render_widget(Paragraph::new(text).block(block(" Info ", false)), area);
+    let block = block(" Info ", false, &app.theme);
+    frame.render_widget(Paragraph::new(text).block(block), area);
 }
 
 fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
@@ -276,10 +296,11 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
         }
         None => " lazyagents ".to_string(),
     };
-    frame.render_widget(block(title, focused), areas.pane);
+    frame.render_widget(block(title, focused, &app.theme), areas.pane);
     if agent.is_none() {
+        let new = app.keymap.first_key(Action::NewAgent);
         frame.render_widget(
-            Paragraph::new("press n to start an agent"),
+            Paragraph::new(format!("press {new} to start an agent")),
             areas.pane_inner,
         );
         return;
@@ -299,18 +320,30 @@ fn pane_hint(keymap: &Keymap) -> String {
     )
 }
 
+fn sidebar_hint(keymap: &Keymap) -> String {
+    SIDEBAR_HINT
+        .iter()
+        .filter_map(|(action, label)| {
+            let key = keymap.keys(*action).first()?.to_string();
+            Some(format!("{key} {label}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
+    let theme = &app.theme;
     let mut spans = Vec::new();
     if let Some(message) = app.current_message(now) {
-        spans.push(Span::raw(message.to_string()).red());
-        spans.push(Span::raw(" │ ").dark_gray());
+        spans.push(Span::raw(message.to_string()).fg(theme.attention));
+        spans.push(Span::raw(" │ ").fg(theme.dim));
     }
     spans.push(match app.focus {
         Focus::Pane if app.prefix_pending => {
-            Span::raw(format!("{} …", app.keymap.prefix())).yellow()
+            Span::raw(format!("{} …", app.keymap.prefix())).fg(theme.working)
         }
-        Focus::Pane => Span::raw(pane_hint(&app.keymap)).dark_gray(),
-        Focus::Projects | Focus::Agents => Span::raw(SIDEBAR_HINT).dark_gray(),
+        Focus::Pane => Span::raw(pane_hint(&app.keymap)).fg(theme.dim),
+        Focus::Projects | Focus::Agents => Span::raw(sidebar_hint(&app.keymap)).fg(theme.dim),
     });
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -341,15 +374,16 @@ fn draw_too_small(frame: &mut Frame) {
     );
 }
 
-fn draw_popup(frame: &mut Frame, popup: &Popup, keymap: &Keymap, screen: Rect) {
+fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
+    let theme = &app.theme;
     let (title, width, height, lines) = match popup {
         Popup::Help => {
-            let lines = help_lines(keymap);
+            let lines = help_lines(&app.keymap);
             let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
             let height = lines.len() as u16 + 2;
             (" Help ", width, height, lines)
         }
-        Popup::NewAgent(form) => (" New agent ", 56, 8, form_lines(form)),
+        Popup::NewAgent(form) => (" New agent ", 56, 8, form_lines(form, app)),
         Popup::Rename { input, .. } => (
             " Rename ",
             60,
@@ -368,39 +402,31 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, keymap: &Keymap, screen: Rect) {
             4,
             vec![
                 Line::from(prompt.clone()),
-                Line::from(CONFIRM_HINT).dark_gray(),
+                Line::from(CONFIRM_HINT).fg(theme.dim),
             ],
         ),
     };
     let area = centered(screen, width, height);
     frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).block(block(title, true)), area);
+    frame.render_widget(Paragraph::new(lines).block(block(title, true, theme)), area);
 }
 
 fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
-    let section = |title: &'static str, keys: Vec<(String, String)>| {
-        let heading = Line::from(title).bold();
-        let rows = keys
-            .into_iter()
-            .map(|(key, action)| Line::from(format!("  {key:<14}{action}")));
-        std::iter::once(heading).chain(rows).collect::<Vec<_>>()
-    };
-    let sidebar = SIDEBAR_KEYS
+    let sidebar: Vec<(String, String)> = SIDEBAR_HELP
         .iter()
-        .map(|(key, action)| (key.to_string(), action.to_string()))
+        .map(|(action, text)| (keymap.describe(*action), text.to_string()))
         .collect();
-    let direct_leave = keymap
-        .direct_leave()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("/");
-    let pane = vec![
-        (
-            keymap.describe(Action::PaneLeave),
+    let mut pane = vec![(
+        keymap.describe(Action::PaneLeave),
+        "back to the sidebar".to_string(),
+    )];
+    if !keymap.direct_leave().is_empty() {
+        pane.push((
+            crate::keymap::join(keymap.direct_leave()),
             "back to the sidebar".to_string(),
-        ),
-        (direct_leave, "back to the sidebar".to_string()),
+        ));
+    }
+    pane.extend([
         (keymap.describe(Action::PaneNext), "next agent".to_string()),
         (
             keymap.describe(Action::PanePrevious),
@@ -410,14 +436,27 @@ fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
             keymap.describe(Action::PaneSendPrefix),
             format!("send {} to the agent", keymap.prefix()),
         ),
-    ];
+    ]);
+    let width = sidebar
+        .iter()
+        .chain(&pane)
+        .map(|(key, _)| key.chars().count())
+        .max()
+        .unwrap_or(0);
+    let section = |title: &'static str, rows: Vec<(String, String)>| {
+        let heading = Line::from(title).bold();
+        let rows = rows
+            .into_iter()
+            .map(move |(key, action)| Line::from(format!("  {key:<width$}  {action}")));
+        std::iter::once(heading).chain(rows).collect::<Vec<_>>()
+    };
     let mut lines = section("Sidebar", sidebar);
     lines.push(Line::default());
     lines.extend(section("Agent pane", pane));
     lines
 }
 
-fn form_lines(form: &NewAgentForm) -> Vec<Line<'static>> {
+fn form_lines(form: &NewAgentForm, app: &App) -> Vec<Line<'static>> {
     let field = |focus: Field, text: String| {
         let line = Line::from(text);
         if form.field == focus {
@@ -430,23 +469,23 @@ fn form_lines(form: &NewAgentForm) -> Vec<Line<'static>> {
         field(Field::Name, format!("Name:    {}", form.name)),
         field(
             Field::Preset,
-            format!("Preset:  ‹ {} ›", form.preset.label()),
+            format!("Preset:  ‹ {} ›", form.preset.label(&app.presets)),
         ),
     ];
     if form.preset == Preset::Custom {
         lines.push(field(Field::Command, format!("Command: {}", form.command)));
     }
     lines.push(Line::default());
-    lines.push(Line::from(FORM_HINT).dark_gray());
+    lines.push(Line::from(FORM_HINT).fg(app.theme.dim));
     lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{agent, loaded, project};
+    use crate::app::tests::{agent, loaded, loaded_with, project};
     use crate::app::{App, Focus, Popup};
-    use crate::keymap::Keymap;
+    use crate::config::Config;
     use protocol::{Cell, Color as ScreenColor, Screen, Status, Style as ScreenStyle};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -478,7 +517,7 @@ mod tests {
 
     #[test]
     fn empty_state_shows_hints() {
-        let app = App::new("/w".into(), "/bin/sh".into(), None, Keymap::defaults());
+        let app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
         let (text, _) = render(&app);
         assert!(text.contains("press a to add a project"), "{text}");
         assert!(text.contains("press n to start an agent"), "{text}");
@@ -508,9 +547,9 @@ mod tests {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "busy", Status::Working)]);
         assert!(app.animating());
-        assert_eq!(glyph(Status::Working, 0).0, "⠋");
-        assert_eq!(glyph(Status::Working, 1).0, "⠙");
-        assert_eq!(glyph(Status::Working, 10).0, "⠋");
+        assert_eq!(glyph(Status::Working, 0, &Theme::default()).0, "⠋");
+        assert_eq!(glyph(Status::Working, 1, &Theme::default()).0, "⠙");
+        assert_eq!(glyph(Status::Working, 10, &Theme::default()).0, "⠋");
         let (text, _) = render(&app);
         assert!(
             text.contains("⠋ busy  working") && text.contains(" Agents "),
@@ -606,35 +645,217 @@ mod tests {
         assert!(text.contains(" Help ") && text.contains("ctrl-]"), "{text}");
     }
 
+    fn help_row(key: &str, action: &str) -> String {
+        format!("  {key:<16}{action}")
+    }
+
     #[test]
     fn help_lists_every_binding_at_100x30() {
-        let mut app = App::new("/w".into(), "/bin/sh".into(), None, Keymap::defaults());
+        let mut app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
         app.popup = Some(Popup::Help);
         let (text, _) = render(&app);
-        for expected in [
-            "j/k ↑/↓",
-            "h/l ←/→",
-            "tab/shift-tab",
-            "enter ",
-            "n             new agent",
-            "x             stop agent",
-            "r             restart agent",
-            "d             remove agent",
-            "R             rename agent",
-            "a             add project",
-            "A             all agents",
-            "g             next agent needing input",
-            "?             help",
-            "q, ctrl-c",
-            "Q             stop the daemon and quit",
-            "ctrl-q q/esc  back to the sidebar",
-            "ctrl-]/ctrl-5 back to the sidebar",
-            "ctrl-q j      next agent",
-            "ctrl-q k      previous agent",
-            "ctrl-q ctrl-q send ctrl-q to the agent",
+        for (key, action) in [
+            ("j/down", "move down in the focused box"),
+            ("k/up", "move up in the focused box"),
+            ("h/left/backtab", "focus Projects"),
+            ("l/right", "focus Agents"),
+            ("tab", "switch between Projects and Agents"),
+            ("enter", "open the agent's pane"),
+            ("n", "new agent"),
+            ("x", "stop agent"),
+            ("r", "restart agent"),
+            ("d", "remove agent"),
+            ("R", "rename agent"),
+            ("a", "add project"),
+            ("A", "all agents / this project"),
+            ("g", "next agent needing input"),
+            ("?", "help"),
+            ("q/ctrl-c", "quit (agents keep running)"),
+            ("Q", "stop the daemon and quit"),
+            ("ctrl-q q/esc", "back to the sidebar"),
+            ("ctrl-]/ctrl-5", "back to the sidebar"),
+            ("ctrl-q j", "next agent"),
+            ("ctrl-q k", "previous agent"),
+            ("ctrl-q ctrl-q", "send ctrl-q to the agent"),
         ] {
-            assert!(text.contains(expected), "missing {expected:?}\n{text}");
+            let expected = help_row(key, action);
+            assert!(text.contains(&expected), "missing {expected:?}\n{text}");
         }
+    }
+
+    fn configured(text: &str) -> Config {
+        crate::config::parse(text).expect("config parses")
+    }
+
+    fn line_with<'a>(text: &'a str, needle: &str) -> &'a str {
+        text.lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no line with {needle:?}\n{text}"))
+    }
+
+    fn column(line: &str, needle: &str) -> usize {
+        let byte = line.find(needle).expect("needle in line");
+        line[..byte].chars().count()
+    }
+
+    #[test]
+    fn help_reflects_configured_keys() {
+        let config = configured(
+            r#"
+            [keys.sidebar]
+            new_agent = ["N", "ctrl-n"]
+            quit = "ctrl-x"
+            add_project = "P"
+
+            [keys.pane]
+            prefix = "ctrl-a"
+            leave = ["x"]
+            "#,
+        );
+        let p = project("p");
+        let (mut app, _) = loaded_with(config, vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.popup = Some(Popup::Help);
+        let (text, _) = render(&app);
+        for (key, action) in [
+            ("N/ctrl-n", "new agent"),
+            ("ctrl-x", "quit (agents keep running)"),
+            ("ctrl-a x", "back to the sidebar"),
+            ("ctrl-a j", "next agent"),
+            ("ctrl-a ctrl-a", "send ctrl-a to the agent"),
+        ] {
+            assert!(
+                line_with(&text, &format!("{key} ")).contains(action),
+                "{key} {action}\n{text}"
+            );
+        }
+        assert!(!text.contains("ctrl-q"), "{text}");
+
+        app.popup = None;
+        let (text, _) = render(&app);
+        let status = text.lines().last().expect("status line");
+        assert!(
+            status.starts_with("? help · ctrl-x quit · enter open · N new · x stop"),
+            "{status}"
+        );
+        assert!(status.contains("P add project"), "{status}");
+        app.focus = Focus::Pane;
+        let (text, _) = render(&app);
+        let status = text.lines().last().expect("status line");
+        assert!(
+            status.starts_with("ctrl-a x sidebar · ctrl-a j next agent"),
+            "{status}"
+        );
+
+        let (app, _) = loaded_with(
+            configured("[keys.sidebar]\nadd_project = \"P\"\nnew_agent = \"N\"\n"),
+            vec![],
+            vec![],
+        );
+        let (text, _) = render(&app);
+        assert!(text.contains("press P to add a project"), "{text}");
+        assert!(text.contains("press N to start an agent"), "{text}");
+        let (app, _) = loaded_with(
+            configured("[keys.sidebar]\nnew_agent = \"N\"\n"),
+            vec![project("p")],
+            vec![],
+        );
+        let (text, _) = render(&app);
+        assert!(text.contains("no agents — press N"), "{text}");
+    }
+
+    #[test]
+    fn help_key_column_fits_the_widest_binding() {
+        let config = configured("[keys.pane]\nleave = [\"q\", \"esc\", \"ctrl-alt-backspace\"]\n");
+        let mut app = App::new("/w".into(), "/bin/sh".into(), None, config);
+        app.popup = Some(Popup::Help);
+        let (text, _) = render(&app);
+        let widest = line_with(&text, "ctrl-q q/esc/ctrl-alt-backspace");
+        let start = column(widest, "back to the sidebar");
+        assert_eq!(
+            start,
+            column(widest, "ctrl-q q/esc/ctrl-alt-backspace")
+                + "ctrl-q q/esc/ctrl-alt-backspace  ".len(),
+            "{text}"
+        );
+        for (key, action) in [
+            ("n ", "new agent"),
+            ("ctrl-q ctrl-q", "send ctrl-q to the agent"),
+            ("h/left/backtab", "focus Projects"),
+        ] {
+            assert_eq!(
+                column(line_with(&text, action), action),
+                start,
+                "{key}\n{text}"
+            );
+        }
+    }
+
+    fn find(buffer: &Buffer, area: Rect, symbol: &str) -> (u16, u16) {
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if buffer[(x, y)].symbol() == symbol {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("{symbol:?} not found in {area:?}");
+    }
+
+    #[test]
+    fn theme_colours_apply() {
+        let config = configured(
+            r#"
+            [theme]
+            accent = "blue"
+            attention = "magenta"
+            working = "cyan"
+            idle = "light-green"
+            dim = "white"
+            border = "gray"
+            "#,
+        );
+        let p = project("p");
+        let (mut app, _) = loaded_with(
+            config,
+            vec![p.clone()],
+            vec![
+                agent(&p, "a1", Status::NeedsInput),
+                agent(&p, "a2", Status::Working),
+                agent(&p, "a3", Status::Idle),
+                agent(&p, "a4", Status::Stopped),
+                agent(&p, "a5", Status::Exited(1)),
+            ],
+        );
+        let (_, buffer) = render(&app);
+        let layout = areas(Rect::new(0, 0, 100, 30), 1);
+        let fg = |(x, y): (u16, u16)| buffer[(x, y)].fg;
+        assert_eq!(fg((layout.agents.x, layout.agents.y)), Color::Blue);
+        assert_eq!(fg((layout.projects.x, layout.projects.y)), Color::Gray);
+        assert_eq!(fg((layout.pane.x, layout.pane.y)), Color::Gray);
+        assert_eq!(fg((layout.info.x, layout.info.y)), Color::Gray);
+
+        let attention = find(&buffer, layout.agents, "!");
+        assert_eq!(fg(attention), Color::Magenta);
+        assert_eq!(fg((attention.0 + 2, attention.1)), Color::Magenta);
+        assert_eq!(fg(find(&buffer, layout.agents, SPINNER[0])), Color::Cyan);
+        assert_eq!(fg(find(&buffer, layout.agents, "✓")), Color::LightGreen);
+        assert_eq!(fg(find(&buffer, layout.agents, "■")), Color::White);
+        assert_eq!(fg(find(&buffer, layout.agents, "✗")), Color::Magenta);
+        assert_eq!(fg(find(&buffer, layout.projects, "1")), Color::Magenta);
+        assert_eq!(fg((0, layout.status.y)), Color::White);
+
+        app.fail("boom");
+        let (_, buffer) = render(&app);
+        assert_eq!(buffer[(0, layout.status.y)].fg, Color::Magenta);
+        assert_eq!(buffer[(5, layout.status.y)].fg, Color::White);
+
+        app.message = None;
+        app.focus = Focus::Pane;
+        app.prefix_pending = true;
+        let (_, buffer) = render(&app);
+        assert_eq!(buffer[(layout.pane.x, layout.pane.y)].fg, Color::Blue);
+        assert_eq!(buffer[(layout.agents.x, layout.agents.y)].fg, Color::Gray);
+        assert_eq!(buffer[(0, layout.status.y)].fg, Color::Cyan);
     }
 
     #[test]

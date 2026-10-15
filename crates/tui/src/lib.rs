@@ -1,6 +1,7 @@
 //! The lazyagents terminal UI: a client of the daemon.
 
 pub mod app;
+pub mod config;
 pub mod connection;
 pub mod keymap;
 pub mod keys;

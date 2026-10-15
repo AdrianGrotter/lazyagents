@@ -18,8 +18,8 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::time::MissedTickBehavior;
 
 use crate::app::{App, Effect};
+use crate::config;
 use crate::connection::{self, Incoming};
-use crate::keymap::Keymap;
 use crate::ui::{self, Areas};
 
 enum Term {
@@ -100,7 +100,8 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let mut app = App::new(cwd, shell, home, Keymap::defaults());
+    let config = config::load(config::default_path().as_deref());
+    let mut app = App::new(cwd, shell, home, config);
 
     let mut guard = TerminalGuard::enter()?;
     let (input_tx, mut input) = mpsc::unbounded_channel();

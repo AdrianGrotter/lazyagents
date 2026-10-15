@@ -9,7 +9,8 @@ description: "Drive the lazyagents TUI in an isolated tmux session: start it, se
 
 1. Build first so startup is instant: `cargo build -p lazyagents`.
 2. Make a temp state dir and project with `mktemp -d` (the daemon's socket path must stay under ~104 bytes, so avoid long scratch paths), then start:
-   `scripts/tmux-harness.sh start <name> 120 32 -- sh -c "cd <project> && exec env LAZYAGENTS_STATE_DIR=<temp> SHELL=/bin/sh target/debug/lazyagents"`
+   `scripts/tmux-harness.sh start <name> 120 32 -- sh -c "cd <project> && exec env LAZYAGENTS_STATE_DIR=<temp> LAZYAGENTS_CONFIG=<temp>/config.toml SHELL=/bin/sh target/debug/lazyagents"`
+   `LAZYAGENTS_CONFIG` keeps the user's `~/.config/lazyagents/config.toml` out of the run; write a config to that path to test one.
    Use an absolute path to the binary, since the command runs from `<project>`.
 3. Drive: `type <name> '<text>'` sends literal text; `keys <name> Enter C-] M-Enter Escape` sends named keys.
 4. Assert: `wait-for <name> '<text>' [secs]` exits 1 and prints the screen on timeout; `capture <name>` prints the screen at any time; `alive <name>` exits 0 while the session exists.

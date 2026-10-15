@@ -2,7 +2,7 @@ use std::fmt;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     Quit,
@@ -29,6 +29,19 @@ pub enum Action {
     PaneLeave,
     PaneScroll,
     PaneSendPrefix,
+}
+
+impl Action {
+    pub fn is_pane(self) -> bool {
+        matches!(
+            self,
+            Action::PaneNext
+                | Action::PanePrevious
+                | Action::PaneLeave
+                | Action::PaneScroll
+                | Action::PaneSendPrefix
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -189,12 +202,18 @@ impl fmt::Display for KeySpec {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Keymap {
     sidebar: Vec<(KeySpec, Action)>,
     prefix: KeySpec,
     pane: Vec<(KeySpec, Action)>,
     leave: Vec<KeySpec>,
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Keymap::defaults()
+    }
 }
 
 fn key(text: &str) -> KeySpec {
@@ -276,21 +295,92 @@ impl Keymap {
         &self.leave
     }
 
-    /// All keys bound to `action`, joined with `/`; pane actions start with the prefix.
-    pub fn describe(&self, action: Action) -> String {
-        let pane = self.pane.iter().any(|(_, a)| *a == action);
-        let table = if pane { &self.pane } else { &self.sidebar };
-        let keys: Vec<String> = table
+    /// The keys bound to `action`, in binding order; for pane actions, the keys that
+    /// follow the prefix.
+    pub fn keys(&self, action: Action) -> Vec<KeySpec> {
+        let table = if action.is_pane() {
+            &self.pane
+        } else {
+            &self.sidebar
+        };
+        table
             .iter()
             .filter(|(_, a)| *a == action)
-            .map(|(spec, _)| spec.to_string())
-            .collect();
-        match (keys.is_empty(), pane) {
+            .map(|(spec, _)| *spec)
+            .collect()
+    }
+
+    /// All keys bound to `action`, joined with `/`; pane actions start with the prefix.
+    pub fn describe(&self, action: Action) -> String {
+        let keys = join(&self.keys(action));
+        match (keys.is_empty(), action.is_pane()) {
             (true, _) => "unbound".to_string(),
-            (false, true) => format!("{} {}", self.prefix, keys.join("/")),
-            (false, false) => keys.join("/"),
+            (false, true) => format!("{} {keys}", self.prefix),
+            (false, false) => keys,
         }
     }
+
+    /// The first key bound to `action`, or `unbound`, for hints that name one key.
+    pub fn first_key(&self, action: Action) -> String {
+        self.keys(action)
+            .first()
+            .map_or_else(|| "unbound".to_string(), ToString::to_string)
+    }
+
+    pub fn set_prefix(&mut self, key: KeySpec) {
+        self.prefix = key;
+    }
+
+    pub fn set_direct_leave(&mut self, keys: Vec<KeySpec>) {
+        self.leave = keys;
+    }
+
+    pub fn rebind_sidebar(&mut self, bindings: Vec<(Action, Vec<KeySpec>)>) -> Vec<Rebound> {
+        rebind(&mut self.sidebar, bindings)
+    }
+
+    pub fn rebind_pane(&mut self, bindings: Vec<(Action, Vec<KeySpec>)>) -> Vec<Rebound> {
+        rebind(&mut self.pane, bindings)
+    }
+}
+
+pub fn join(keys: &[KeySpec]) -> String {
+    keys.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// A key that `won` took over from `lost`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rebound {
+    pub key: KeySpec,
+    pub lost: Action,
+    pub won: Action,
+}
+
+/// Each action in `bindings` loses its old keys and gets the listed ones. A key already
+/// bound to another action moves to the later binding, and is reported.
+fn rebind(
+    table: &mut Vec<(KeySpec, Action)>,
+    bindings: Vec<(Action, Vec<KeySpec>)>,
+) -> Vec<Rebound> {
+    table.retain(|(_, action)| !bindings.iter().any(|(a, _)| a == action));
+    let mut rebound = Vec::new();
+    for (won, keys) in bindings {
+        for key in keys {
+            match table.iter().position(|(spec, _)| *spec == key) {
+                Some(index) if table[index].1 == won => continue,
+                Some(index) => {
+                    let (_, lost) = table.remove(index);
+                    rebound.push(Rebound { key, lost, won });
+                }
+                None => {}
+            }
+            table.push((key, won));
+        }
+    }
+    rebound
 }
 
 fn lookup(table: &[(KeySpec, Action)], key: &KeyEvent) -> Option<Action> {

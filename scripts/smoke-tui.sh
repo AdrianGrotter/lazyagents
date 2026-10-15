@@ -20,7 +20,7 @@ trap cleanup EXIT
 
 cargo build --locked -q -p lazyagents --manifest-path "$root/Cargo.toml"
 launch() {
-  "$h" start "$1" 120 32 -- sh -c "cd '$project' && exec env LAZYAGENTS_STATE_DIR='$state' SHELL=/bin/sh '$bin'"
+  "$h" start "$1" 120 32 -- sh -c "cd '$project' && exec env LAZYAGENTS_STATE_DIR='$state' LAZYAGENTS_CONFIG='$work/config.toml' SHELL=/bin/sh '$bin'"
 }
 
 launch "$name"
