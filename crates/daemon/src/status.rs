@@ -26,10 +26,12 @@ pub fn generic_status(last_output: Option<Instant>, now: Instant) -> Status {
 }
 
 /// The status a running agent moves to from output timing alone, or `None` to keep it.
+/// `status_since` is when the agent entered `status`.
 pub fn settle(
     kind: AgentKind,
     status: Status,
     started: Instant,
+    status_since: Instant,
     last_output: Option<Instant>,
     now: Instant,
 ) -> Option<Status> {
@@ -47,6 +49,7 @@ pub fn settle(
         }
         AgentKind::Claude => {
             let quiet_since = last_output.map_or(started, |at| at.max(started));
+            let quiet_since = quiet_since.max(status_since);
             if status == Status::Working && now.duration_since(quiet_since) >= CLAUDE_SILENCE {
                 Status::Idle
             } else {
@@ -93,11 +96,27 @@ mod tests {
         let started = Instant::now();
         let before = started + SETTLE_AFTER - Duration::from_millis(1);
         let after = started + SETTLE_AFTER;
-        let settle_at = |now| settle(AgentKind::Generic, Status::Starting, started, None, now);
+        let settle_at = |now| {
+            settle(
+                AgentKind::Generic,
+                Status::Starting,
+                started,
+                started,
+                None,
+                now,
+            )
+        };
         assert_eq!(settle_at(before), None);
         assert_eq!(settle_at(after), Some(Status::Idle));
         assert_eq!(
-            settle(AgentKind::Generic, Status::Idle, started, None, after),
+            settle(
+                AgentKind::Generic,
+                Status::Idle,
+                started,
+                started,
+                None,
+                after
+            ),
             None
         );
     }
@@ -108,7 +127,16 @@ mod tests {
         let output = started + Duration::from_millis(100);
         let soon = output + Duration::from_millis(500);
         let later = output + ACTIVITY_WINDOW;
-        let generic = |status, now| settle(AgentKind::Generic, status, started, Some(output), now);
+        let generic = |status, now| {
+            settle(
+                AgentKind::Generic,
+                status,
+                started,
+                started,
+                Some(output),
+                now,
+            )
+        };
         assert_eq!(generic(Status::Starting, soon), Some(Status::Working));
         assert_eq!(generic(Status::Working, soon), None);
         assert_eq!(generic(Status::Working, later), Some(Status::Idle));
@@ -123,6 +151,7 @@ mod tests {
             settle(
                 AgentKind::Claude,
                 Status::Working,
+                started,
                 started,
                 last_output,
                 now,
@@ -142,13 +171,46 @@ mod tests {
     }
 
     #[test]
+    fn claude_working_from_a_late_hook_is_not_cut_short() {
+        let started = Instant::now();
+        let output = started + Duration::from_secs(1);
+        let prompt = started + Duration::from_secs(60);
+        let claude = |now| {
+            settle(
+                AgentKind::Claude,
+                Status::Working,
+                started,
+                prompt,
+                Some(output),
+                now,
+            )
+        };
+        assert_eq!(claude(prompt + Duration::from_millis(33)), None);
+        assert_eq!(
+            claude(prompt + CLAUDE_SILENCE - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(claude(prompt + CLAUDE_SILENCE), Some(Status::Idle));
+    }
+
+    #[test]
     fn claude_needs_input_is_not_changed_by_silence() {
         let started = Instant::now();
         let late = started + CLAUDE_SILENCE * 3;
         for status in [Status::NeedsInput, Status::Starting, Status::Idle] {
-            assert_eq!(settle(AgentKind::Claude, status, started, None, late), None);
             assert_eq!(
-                settle(AgentKind::Claude, status, started, Some(started), late),
+                settle(AgentKind::Claude, status, started, started, None, late),
+                None
+            );
+            assert_eq!(
+                settle(
+                    AgentKind::Claude,
+                    status,
+                    started,
+                    started,
+                    Some(started),
+                    late
+                ),
                 None
             );
         }
@@ -160,8 +222,11 @@ mod tests {
         let late = started + CLAUDE_SILENCE * 3;
         for kind in [AgentKind::Generic, AgentKind::Claude] {
             for status in [Status::Stopped, Status::Exited(0), Status::Exited(137)] {
-                assert_eq!(settle(kind, status, started, None, late), None);
-                assert_eq!(settle(kind, status, started, Some(late), late), None);
+                assert_eq!(settle(kind, status, started, started, None, late), None);
+                assert_eq!(
+                    settle(kind, status, started, started, Some(late), late),
+                    None
+                );
             }
         }
     }

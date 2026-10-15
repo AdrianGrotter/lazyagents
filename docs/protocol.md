@@ -69,15 +69,17 @@ is rejected.
 
 `KillAgent`, `RemoveAgent` and `RestartAgent` stop the agent's whole process tree (see
 [architecture.md](architecture.md#daemon-lifecycle)) before they are answered.
-`Input` is rejected with an error for agents that are not running. `Subscribe`, `Resize`
-and `Scroll` work for any agent that still has a terminal, including an exited one, and
-are rejected for a stopped agent, which has none.
+`Input` is rejected with an error for agents that are not running. `Resize` and `Scroll`
+work for any agent that still has a terminal, including an exited one, and are rejected
+for a stopped agent, which has none. `Subscribe` succeeds for any known agent.
 A `Hook` for an agent that is not running, or is not a Claude agent, is ignored.
 
 ## Frames
 
 `Subscribe { id }` makes the daemon push `Frame`s for that agent; one subscription is
-active per connection. A frame is full (`full: true`, every row) on subscribe and after a size change. Other
+active per connection, and a new `Subscribe` replaces it. Frames flow whenever the
+agent has a terminal: an exited agent's last screen is sent, a stopped agent sends
+nothing until it is restarted. A frame is full (`full: true`, every row) on subscribe and after a size change. Other
 frames carry only the changed rows plus the cursor position. `Frame` has the fields
 `agent`, `cols`, `rows`, `full`, `lines` and `cursor`. A cell with an empty `text`
 is the spacer that follows a wide character.

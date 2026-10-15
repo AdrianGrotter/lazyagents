@@ -209,6 +209,7 @@ struct Agent {
     terminal: Option<Terminal>,
     generation: u64,
     started: Instant,
+    status_since: Instant,
     last_output: Option<Instant>,
     dirty: bool,
     /// The agent's descendants seen by snapshots and still running, so processes that
@@ -216,6 +217,15 @@ struct Agent {
     tracked: Vec<Tracked>,
     /// The process group the agent leads; kept after it exits while members remain.
     group: Option<u32>,
+}
+
+impl Agent {
+    fn set_status(&mut self, status: Status) {
+        if status != self.status {
+            self.status = status;
+            self.status_since = Instant::now();
+        }
+    }
 }
 
 /// Tracked descendants computed off the event loop for one agent generation.
@@ -266,6 +276,7 @@ impl Daemon {
                     terminal: None,
                     generation: 0,
                     started: Instant::now(),
+                    status_since: Instant::now(),
                     last_output: None,
                     dirty: false,
                     tracked: Vec::new(),
@@ -346,7 +357,7 @@ impl Daemon {
             Request::RemoveAgent { id } => self.remove_agent(id).map(|()| Response::Ok),
             Request::RenameAgent { id, name } => self.rename_agent(id, name).map(Response::Agent),
             Request::Subscribe { id } => {
-                self.with_terminal_mut(id)?;
+                self.agent(id)?;
                 if let Some(c) = self.clients.get_mut(&client) {
                     c.subscription = Some(Subscription {
                         agent: id,
@@ -565,6 +576,7 @@ impl Daemon {
                 terminal: None,
                 generation: 0,
                 started: Instant::now(),
+                status_since: Instant::now(),
                 last_output: None,
                 dirty: false,
                 tracked: Vec::new(),
@@ -602,7 +614,7 @@ impl Daemon {
             let written = std::fs::create_dir_all(self.paths.hooks_dir())
                 .and_then(|()| std::fs::write(&settings, hook_settings(&self.exe).to_string()));
             if let Err(e) = written {
-                agent.status = Status::Exited(127);
+                agent.set_status(Status::Exited(127));
                 return Err(format!("writing {}: {e}", settings.display()));
             }
         }
@@ -628,14 +640,15 @@ impl Daemon {
             Ok(terminal) => {
                 agent.group = Some(terminal.pid());
                 agent.terminal = Some(terminal);
-                agent.status = Status::Starting;
+                agent.set_status(Status::Starting);
                 agent.started = Instant::now();
+                agent.status_since = agent.started;
                 agent.last_output = None;
                 agent.dirty = true;
                 Ok(())
             }
             Err(e) => {
-                agent.status = Status::Exited(127);
+                agent.set_status(Status::Exited(127));
                 Err(format!("{e:#}"))
             }
         }
@@ -681,7 +694,7 @@ impl Daemon {
             .agents
             .get_mut(&id)
             .ok_or_else(|| format!("unknown agent {id}"))?;
-        agent.status = Status::Stopped;
+        agent.set_status(Status::Stopped);
         agent.dirty = true;
         self.announce(id);
         self.info_of(id)
@@ -773,7 +786,7 @@ impl Daemon {
             agent.record.resumable = matches!(source, Some("resume" | "compact"));
             changed_record = true;
         }
-        agent.status = on_hook(kind);
+        agent.set_status(on_hook(kind));
         if changed_record {
             self.persist();
         }
@@ -798,7 +811,7 @@ impl Daemon {
                 agent.last_output = Some(Instant::now());
             }
             Outcome::Exited(code) => {
-                agent.status = Status::Exited(code);
+                agent.set_status(Status::Exited(code));
                 agent.dirty = true;
                 let tracked = std::mem::take(&mut agent.tracked);
                 reap::terminate(&[], &[root], &tracked, STOP_GRACE);
@@ -892,10 +905,11 @@ impl Daemon {
                 agent.record.kind,
                 agent.status,
                 agent.started,
+                agent.status_since,
                 agent.last_output,
                 now,
             ) {
-                agent.status = status;
+                agent.set_status(status);
                 changed.push(*id);
             }
         }

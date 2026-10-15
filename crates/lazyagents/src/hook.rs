@@ -43,18 +43,9 @@ fn forward(event: &str) {
                     .as_ref()
                     .and_then(|value| value.get(name)?.as_str().map(str::to_owned))
             };
-            let idle_prompt = field("notification_type").as_deref() == Some("idle_prompt")
-                || field("message").is_some_and(|message| {
-                    message.to_lowercase().contains("waiting for your input")
-                });
-            let kind = if kind == HookKind::Notification && idle_prompt {
-                HookKind::Stop
-            } else {
-                kind
-            };
             let request = Request::Hook {
                 id: AgentId(agent),
-                kind,
+                kind: effective_kind(kind, payload.as_ref()),
                 session_id: field("session_id"),
                 source: field("source"),
             };
@@ -63,6 +54,20 @@ fn forward(event: &str) {
         .await
     });
     runtime.shutdown_background();
+}
+
+/// Claude's idle-prompt `Notification` means it is waiting at an empty prompt, not
+/// blocked on a question, so it is forwarded as `Stop`.
+fn effective_kind(kind: HookKind, payload: Option<&serde_json::Value>) -> HookKind {
+    let text = |name: &str| payload.and_then(|value| value.get(name)?.as_str());
+    let idle_prompt = text("notification_type") == Some("idle_prompt")
+        || text("message")
+            .is_some_and(|message| message.to_lowercase().contains("waiting for your input"));
+    if kind == HookKind::Notification && idle_prompt {
+        HookKind::Stop
+    } else {
+        kind
+    }
 }
 
 async fn send(socket: PathBuf, request: Request) -> std::io::Result<()> {
@@ -78,4 +83,62 @@ async fn send(socket: PathBuf, request: Request) -> std::io::Result<()> {
     write_message(&mut stream, &ClientMessage::Request { id: 1, request }).await?;
     let _reply: Option<ServerMessage> = read_message(&mut stream).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn notification(payload: serde_json::Value) -> HookKind {
+        effective_kind(HookKind::Notification, Some(&payload))
+    }
+
+    #[test]
+    fn idle_prompt_type_alone_is_stop() {
+        assert_eq!(
+            notification(json!({"notification_type": "idle_prompt"})),
+            HookKind::Stop
+        );
+    }
+
+    #[test]
+    fn waiting_message_alone_is_stop() {
+        assert_eq!(
+            notification(json!({"message": "Claude is waiting for your input"})),
+            HookKind::Stop
+        );
+    }
+
+    #[test]
+    fn waiting_message_is_matched_case_insensitively() {
+        assert_eq!(
+            notification(json!({"message": "CLAUDE IS WAITING FOR YOUR INPUT"})),
+            HookKind::Stop
+        );
+    }
+
+    #[test]
+    fn permission_notification_still_needs_input() {
+        assert_eq!(
+            notification(json!({
+                "notification_type": "permission_prompt",
+                "message": "Claude needs your permission to use Bash"
+            })),
+            HookKind::Notification
+        );
+        assert_eq!(
+            effective_kind(HookKind::Notification, None),
+            HookKind::Notification
+        );
+    }
+
+    #[test]
+    fn other_hooks_are_unchanged() {
+        let idle = json!({"notification_type": "idle_prompt"});
+        assert_eq!(
+            effective_kind(HookKind::PreToolUse, Some(&idle)),
+            HookKind::PreToolUse
+        );
+    }
 }

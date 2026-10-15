@@ -1195,6 +1195,16 @@ async fn exited_agent_can_be_scrolled_and_resized() {
         conn.request(Request::Subscribe { id: agent.id }).await,
         Ok(Response::Ok)
     );
+    let ServerMessage::Frame(frame) = conn
+        .wait_for(|m| matches!(m, ServerMessage::Frame(f) if f.agent == agent.id))
+        .await
+    else {
+        unreachable!()
+    };
+    assert!(frame.full, "first frame after subscribe is not full");
+    let mut screen = Screen::blank(0, 0);
+    screen.apply(&frame);
+    assert!(screen.text().contains("200"), "{}", screen.text());
     assert_eq!(
         conn.request(Request::Scroll {
             id: agent.id,
@@ -1220,4 +1230,79 @@ async fn exited_agent_can_be_scrolled_and_resized() {
         .await
         .expect_err("input to exited agent");
     assert!(err.contains("not running"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn subscribe_to_a_stopped_agent_then_restart_gets_frames() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "paused",
+        AgentKind::Generic,
+        &["sh", "-c", "echo back; exec sleep 30"],
+    )
+    .await
+    .expect("create");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    assert_eq!(
+        conn.request(Request::Subscribe { id: agent.id }).await,
+        Ok(Response::Ok)
+    );
+    conn.request(Request::RestartAgent {
+        id: agent.id,
+        cols: 80,
+        rows: 24,
+    })
+    .await
+    .expect("restart");
+    let frame = tokio::time::timeout(
+        Duration::from_secs(5),
+        conn.wait_for(|m| matches!(m, ServerMessage::Frame(f) if f.agent == agent.id)),
+    )
+    .await;
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    frame.expect("no frame after restart");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scroll_and_resize_need_a_terminal() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "halted",
+        AgentKind::Generic,
+        &["sleep", "30"],
+    )
+    .await
+    .expect("create");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    let scroll = conn
+        .request(Request::Scroll {
+            id: agent.id,
+            lines: 5,
+        })
+        .await
+        .expect_err("scroll without a terminal");
+    assert!(scroll.contains("has no terminal"), "{scroll}");
+    let resize = conn
+        .request(Request::Resize {
+            id: agent.id,
+            cols: 60,
+            rows: 10,
+        })
+        .await
+        .expect_err("resize without a terminal");
+    assert!(resize.contains("has no terminal"), "{resize}");
 }
