@@ -108,3 +108,28 @@ fn non_repo_errors_mention_git_repository() {
         );
     }
 }
+
+#[test]
+fn dirty_files_returns_exact_paths() {
+    let repo = repo();
+    git(repo.path(), &["mv", "README", "README.md"]);
+    std::fs::write(repo.path().join("my notes.txt"), "n\n").expect("spaced name");
+    assert_eq!(
+        dirty_files(repo.path()).expect("dirty"),
+        vec!["README.md".to_string(), "my notes.txt".to_string()]
+    );
+}
+
+#[test]
+fn bases_never_reach_git_as_options() {
+    let repo = repo();
+    let root = tempfile::tempdir().expect("worktree root");
+    let base = "--output=/dev/null";
+    for err in [
+        stat(repo.path(), Some(base)).map(|_| ()).expect_err("stat"),
+        diff(repo.path(), Some(base)).map(|_| ()).expect_err("diff"),
+        add_worktree(repo.path(), &root.path().join("wt"), "lazyagents/wt", base).expect_err("add"),
+    ] {
+        assert!(format!("{err:#}").contains("invalid base"), "{err:#}");
+    }
+}

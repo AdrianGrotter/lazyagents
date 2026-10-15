@@ -1812,3 +1812,92 @@ async fn git_stat_and_diff_for_plain_agents_show_uncommitted_changes() {
         .await
         .expect("kill");
 }
+
+fn failing_post_checkout(repo: &Path) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let hooks = tempfile::tempdir().expect("hooks dir");
+    let hook = hooks.path().join("post-checkout");
+    std::fs::write(&hook, "#!/bin/sh\necho post-checkout refused >&2\nexit 1\n").expect("hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    common::git(
+        repo,
+        &[
+            "config",
+            "core.hooksPath",
+            hooks.path().to_str().expect("utf8"),
+        ],
+    );
+    hooks
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_worktree_add_leaves_nothing_and_the_name_stays_usable() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let hooks = failing_post_checkout(repo.path());
+    let path = worktree_path(&daemon, &project, "hooked");
+
+    let err = create_in_worktree(&mut conn, &project, "hooked", &["sleep", "30"])
+        .await
+        .expect_err("post-checkout fails");
+    assert!(err.contains("post-checkout refused"), "{err}");
+    assert!(list_agents(&mut conn).await.is_empty());
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/*"]),
+        ""
+    );
+    assert!(!path.exists());
+    let worktrees = common::git(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert!(!worktrees.contains("hooked"), "{worktrees}");
+
+    std::fs::remove_file(hooks.path().join("post-checkout")).expect("drop hook");
+    let agent = create_in_worktree(&mut conn, &project, "hooked", &["sleep", "30"])
+        .await
+        .expect("same name after the hook is gone");
+    assert_eq!(agent.worktree.expect("worktree").path, path);
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_worktree_path_is_left_alone() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let path = worktree_path(&daemon, &project, "taken");
+    std::fs::create_dir_all(&path).expect("occupy path");
+    std::fs::write(path.join("mine.txt"), "keep me\n").expect("occupant");
+
+    let err = create_in_worktree(&mut conn, &project, "taken", &["sleep", "30"])
+        .await
+        .expect_err("path exists");
+    assert!(err.contains("already exists"), "{err}");
+    assert!(list_agents(&mut conn).await.is_empty());
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/*"]),
+        ""
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("mine.txt")).expect("untouched"),
+        "keep me\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_detached_project_bases_worktrees_on_its_commit() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    common::git(repo.path(), &["checkout", "-q", "--detach"]);
+    let head = common::git(repo.path(), &["rev-parse", "HEAD"]);
+
+    let agent = create_in_worktree(&mut conn, &project, "detached", &["sleep", "30"])
+        .await
+        .expect("create");
+    assert_eq!(agent.worktree.expect("worktree").base, head.trim());
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}

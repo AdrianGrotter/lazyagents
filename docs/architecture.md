@@ -1,8 +1,9 @@
 # Architecture
 
 Status: daemon, protocol, client, CLI and TUI implemented, including daemon-side git
-worktrees and git stat and diff queries. Planned (plan 4): the worktree UI and the `D` diff view, the config file with configurable keybindings and presets, text
-selection and copy, and keyboard scroll mode.
+worktrees and git stat and diff queries. Planned (plan 4): the worktree UI and the `D`
+diff view, the config file with configurable keybindings and presets, text selection and
+copy, and keyboard scroll mode.
 
 ## Purpose
 
@@ -116,17 +117,24 @@ function is not used; the binary on `PATH` is.
 ### Worktrees
 
 The daemon runs every git command through the git CLI (`crates/daemon/src/git.rs`), so
-the user's git config applies; it only sets `GIT_TERMINAL_PROMPT=0`.
+the user's git config applies; it only sets `GIT_TERMINAL_PROMPT=0`, plus
+`GIT_OPTIONAL_LOCKS=0` on the read-only queries so they never hold `index.lock` while an
+agent commits.
 
 Creating an agent with a `WorktreeRequest` runs
 `git -C <project> worktree add -b lazyagents/<agent-name> <path> <base>`, where `<path>`
 is `<state>/worktrees/<project-name>-<first 8 of project id>/<agent-name>` (a `/` in the
-project name becomes `-`) and `<base>` is the requested base or the project's current
-branch. The branch name is checked with `git check-ref-format --branch` first. Any
-failure (project not a git repo, invalid branch name, branch exists, base missing)
-answers `Err` and creates no agent, branch or directory. The agent's cwd is the
-worktree, and `AgentInfo.worktree` holds its path, branch and base. Renaming the agent
-keeps its branch and worktree path.
+project name becomes `-`) and `<base>` is the requested base, else the project's current
+branch, else (detached HEAD) its commit sha. A base starting with `-` is rejected. The
+branch name is checked with `git check-ref-format --branch` first, and an existing
+`<path>` is refused. A failure before or during the add (project not a git repo, invalid
+branch name, branch exists, base missing, a failing checkout hook) answers `Err` and
+leaves no agent, no new branch and no directory: an add that fails after git created the
+branch or the checkout has both removed again, while a branch that existed before is
+kept. A spawn failure after a successful add keeps the agent as `Exited` with its error
+and its worktree, so it can be restarted. The agent's cwd is the worktree, and
+`AgentInfo.worktree` holds its path, branch and base. Renaming the agent keeps its branch
+and worktree path.
 
 `GitStat` and `GitDiff` run on their own thread and answer when git finishes, so the
 event loop keeps serving. For a worktree agent they compare the working tree with
@@ -135,10 +143,11 @@ event loop keeps serving. For a worktree agent they compare the working tree wit
 count of `git status --porcelain` entries. A diff too large for one message is an error.
 
 `RemoveAgent { remove_worktree: true }` refuses while `git status --porcelain` lists
-anything, answering `worktree has uncommitted changes:` and the paths, one per line,
+anything, answering `worktree has uncommitted changes:` and the exact paths (the new
+path of a rename), one per line,
 and leaves the agent running; `force: true` skips the check and runs
 `git worktree remove --force`. Without `remove_worktree` the worktree stays on disk.
-The branch is never deleted.
+An agent's branch is never deleted.
 
 ### The TUI
 

@@ -655,7 +655,12 @@ impl Daemon {
         git::check_branch(&branch).map_err(|e| format!("{e:#}"))?;
         let base = match request.base.filter(|b| !b.trim().is_empty()) {
             Some(base) => base.trim().to_string(),
-            None => git::current_branch(&project.path).map_err(|e| format!("{e:#}"))?,
+            None => match git::current_branch(&project.path).map_err(|e| format!("{e:#}"))? {
+                detached if detached == "HEAD" => {
+                    git::head_commit(&project.path).map_err(|e| format!("{e:#}"))?
+                }
+                branch => branch,
+            },
         };
         let state = self
             .paths
