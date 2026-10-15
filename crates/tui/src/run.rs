@@ -98,7 +98,8 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-    let mut app = App::new(cwd, shell);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut app = App::new(cwd, shell, home);
 
     let mut guard = TerminalGuard::enter()?;
     let (input_tx, mut input) = mpsc::unbounded_channel();

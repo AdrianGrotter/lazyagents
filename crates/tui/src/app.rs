@@ -119,11 +119,12 @@ pub struct App {
     interactions: u64,
     subscribed_running: bool,
     cwd: PathBuf,
+    home: Option<PathBuf>,
     shell: String,
 }
 
 impl App {
-    pub fn new(cwd: PathBuf, shell: String) -> Self {
+    pub fn new(cwd: PathBuf, shell: String, home: Option<PathBuf>) -> Self {
         Self {
             projects: Vec::new(),
             agents: Vec::new(),
@@ -140,6 +141,7 @@ impl App {
             interactions: 0,
             subscribed_running: false,
             cwd,
+            home,
             shell,
         }
     }
@@ -474,7 +476,11 @@ impl App {
                 _ => Vec::new(),
             };
         }
-        let line = text.lines().next().unwrap_or_default().to_string();
+        let line = text
+            .split(['\r', '\n'])
+            .next()
+            .unwrap_or_default()
+            .to_string();
         match &mut self.popup {
             Some(Popup::Rename { input, .. } | Popup::AddProject { input }) => {
                 input.push_str(&line)
@@ -710,7 +716,7 @@ impl App {
             },
             Popup::AddProject { mut input } => match edit(&mut input, &key) {
                 Edit::Submit => vec![Effect::Send(Request::AddProject {
-                    path: self.cwd.join(input.trim()),
+                    path: self.project_path(input.trim()),
                     name: None,
                 })],
                 Edit::Cancel => Vec::new(),
@@ -720,6 +726,15 @@ impl App {
                 }
             },
             Popup::NewAgent(form) => self.on_form_key(form, key),
+        }
+    }
+
+    fn project_path(&self, input: &str) -> PathBuf {
+        let home = self.home.as_ref();
+        match (input, input.strip_prefix("~/"), home) {
+            ("~", _, Some(home)) => home.clone(),
+            (_, Some(rest), Some(home)) => home.join(rest),
+            _ => self.cwd.join(input),
         }
     }
 
@@ -836,7 +851,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn loaded(projects: Vec<Project>, agents: Vec<AgentInfo>) -> (App, Vec<Effect>) {
-        let mut app = App::new("/work".into(), "/bin/sh".into());
+        let mut app = App::new("/work".into(), "/bin/sh".into(), Some("/home/u".into()));
         let mut effects = app.apply_response(Response::Projects(projects));
         effects.extend(app.apply_response(Response::Agents(agents)));
         (app, effects)
@@ -1008,7 +1023,7 @@ pub(crate) mod tests {
     fn subscribing_sends_the_known_pane_size() {
         let p = project("p");
         let a = agent(&p, "alpha", Status::Idle);
-        let mut app = App::new("/work".into(), "/bin/sh".into());
+        let mut app = App::new("/work".into(), "/bin/sh".into(), Some("/home/u".into()));
         let _ = app.set_pane_size(70, 15);
         let _ = app.apply_response(Response::Projects(vec![p]));
         let effects = app.apply_response(Response::Agents(vec![a.clone()]));
@@ -1036,7 +1051,7 @@ pub(crate) mod tests {
 
     #[test]
     fn messages_expire() {
-        let mut app = App::new("/work".into(), "/bin/sh".into());
+        let mut app = App::new("/work".into(), "/bin/sh".into(), Some("/home/u".into()));
         app.fail("boom");
         let now = Instant::now();
         assert_eq!(app.current_message(now), Some("boom"));
@@ -1330,6 +1345,51 @@ pub(crate) mod tests {
                 path: "/work/repo".into(),
                 name: None
             })]
+        );
+    }
+
+    #[test]
+    fn add_project_expands_a_leading_tilde() {
+        for (typed, expected) in [
+            ("~", "/home/u"),
+            ("~/repo", "/home/u/repo"),
+            ("x~", "/work/x~"),
+            ("~other/repo", "/work/~other/repo"),
+        ] {
+            let (mut app, _, _) = two_agents();
+            let _ = app.on_key(key('a'));
+            let _ = app.on_key(ctrl('u'));
+            type_text(&mut app, typed);
+            assert_eq!(
+                app.on_key(code(KeyCode::Enter)),
+                vec![Effect::Send(Request::AddProject {
+                    path: expected.into(),
+                    name: None
+                })],
+                "{typed}"
+            );
+        }
+    }
+
+    #[test]
+    fn paste_into_a_field_takes_the_first_line_of_any_line_ending() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('R'));
+        let _ = app.on_key(ctrl('u'));
+        let _ = app.on_paste("one\rtwo".into());
+        assert!(
+            matches!(&app.popup, Some(Popup::Rename { input, .. }) if input == "one"),
+            "{:?}",
+            app.popup
+        );
+        let _ = app.on_key(code(KeyCode::Esc));
+        let _ = app.on_key(key('a'));
+        let _ = app.on_key(ctrl('u'));
+        let _ = app.on_paste("/tmp/x\r\n/tmp/y".into());
+        assert!(
+            matches!(&app.popup, Some(Popup::AddProject { input }) if input == "/tmp/x"),
+            "{:?}",
+            app.popup
         );
     }
 

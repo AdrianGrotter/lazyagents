@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn empty_state_shows_hints() {
-        let app = App::new("/w".into(), "/bin/sh".into());
+        let app = App::new("/w".into(), "/bin/sh".into(), None);
         let (text, _) = render(&app);
         assert!(text.contains("press a to add a project"), "{text}");
         assert!(text.contains("press n to start an agent"), "{text}");
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn help_lists_every_binding_at_100x30() {
-        let mut app = App::new("/w".into(), "/bin/sh".into());
+        let mut app = App::new("/w".into(), "/bin/sh".into(), None);
         app.popup = Some(Popup::Help);
         let (text, _) = render(&app);
         for expected in [

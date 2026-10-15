@@ -17,7 +17,7 @@ Two input modes:
 | `r` | restart agent (confirm while it is running; Claude: resume session) |
 | `d` | remove agent (confirm; worktree removal comes with plan 4) |
 | `R` | rename agent |
-| `a` | add project (path input, defaults to cwd) |
+| `a` | add project (path input, defaults to cwd; relative paths resolve against the cwd, a leading `~` is the home directory) |
 | `A` | toggle between the selected project's agents and all agents |
 | `g` | jump to next agent with `NeedsInput` |
 | `D` | toggle diff view in main pane (plan 4) |
