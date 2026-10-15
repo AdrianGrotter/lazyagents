@@ -247,8 +247,7 @@ impl App {
                     self.projects.push(project.clone());
                 }
                 if let Some(index) = self.projects.iter().position(|p| p.id == project.id) {
-                    self.project_index = index;
-                    self.agent_index = 0;
+                    self.highlight_project(index);
                 }
             }
             Response::Agent(info) => {
@@ -320,9 +319,40 @@ impl App {
         self.reselect(selected);
     }
 
+    /// Keeps `selected` selected. In the all-agents view the project highlight stays
+    /// where the user put it, which may be a project without agents.
     fn reselect(&mut self, selected: Option<AgentId>) {
-        if let Some(id) = selected {
-            self.select_agent(id);
+        let Some(id) = selected else {
+            return;
+        };
+        match self.view {
+            AgentView::Project => self.select_agent(id),
+            AgentView::All => {
+                if let Some(index) = self.visible_agents().iter().position(|a| a.id == id) {
+                    self.agent_index = index;
+                }
+            }
+        }
+    }
+
+    /// Highlights a project and selects its first agent; in the all-agents view a
+    /// project without agents keeps the current agent selected.
+    fn highlight_project(&mut self, index: usize) {
+        let selected = self.selected_agent().map(|a| a.id);
+        self.project_index = index;
+        match self.view {
+            AgentView::Project => self.agent_index = 0,
+            AgentView::All => {
+                let project = self.projects.get(index).map(|p| p.id);
+                let first = self
+                    .visible_agents()
+                    .iter()
+                    .position(|a| Some(a.project) == project);
+                match first {
+                    Some(first) => self.agent_index = first,
+                    None => self.reselect(selected),
+                }
+            }
         }
     }
 
@@ -587,8 +617,7 @@ impl App {
             Focus::Projects => {
                 let count = self.projects.len();
                 if count > 0 {
-                    self.project_index = wrap(self.project_index, step, count);
-                    self.agent_index = 0;
+                    self.highlight_project(wrap(self.project_index, step, count));
                 }
             }
             Focus::Agents | Focus::Pane => self.move_agent(step),
@@ -1528,6 +1557,52 @@ pub(crate) mod tests {
         assert_eq!(c.project, q.id);
         let _ = app.on_key(key('A'));
         assert_eq!(app.view, AgentView::Project);
+    }
+
+    fn all_view_with_three_projects() -> (App, Vec<Project>, AgentInfo, AgentInfo) {
+        let p = project("p");
+        let q = project("q");
+        let r = project("r");
+        let a = agent(&p, "a", Status::Idle);
+        let b = agent(&q, "b", Status::Idle);
+        let (mut app, _) = loaded(
+            vec![p.clone(), q.clone(), r.clone()],
+            vec![a.clone(), b.clone()],
+        );
+        let _ = app.on_key(key('A'));
+        (app, vec![p, q, r], a, b)
+    }
+
+    #[test]
+    fn all_view_project_highlight_selects_its_first_agent_or_keeps_the_current() {
+        let (mut app, projects, _, b) = all_view_with_three_projects();
+        let _ = app.on_key(key('h'));
+        let effects = app.on_key(key('j'));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[1].id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: b.id })]);
+        let effects = app.on_key(key('j'));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[2].id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert!(effects.is_empty(), "{effects:?}");
+        let _ = app.apply_server(ServerMessage::AgentUpdated(b.clone()));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[2].id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+    }
+
+    #[test]
+    fn all_view_added_project_keeps_the_current_agent_unless_it_has_agents() {
+        let (mut app, projects, a, b) = all_view_with_three_projects();
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        let s = project("s");
+        let effects = app.apply_response(Response::Project(s.clone()));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(s.id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert!(effects.is_empty(), "{effects:?}");
+        let _ = app.apply_response(Response::Project(projects[0].clone()));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[0].id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
     }
 
     #[test]
