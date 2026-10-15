@@ -169,9 +169,14 @@ async fn spawned_daemon_is_reaped_after_it_exits() {
     let client = Client::connect_or_spawn(&paths, &exe)
         .await
         .expect("connect");
-    let pid = std::fs::read_to_string(&pidfile).expect("pid");
-    let pid = pid.trim();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut pid = String::new();
+    while pid.is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        pid = std::fs::read_to_string(&pidfile).unwrap_or_default();
+    }
+    let pid = pid.trim();
+    assert!(!pid.is_empty(), "fake daemon never ran");
     while is_zombie_or_alive(pid) && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
