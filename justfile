@@ -23,10 +23,13 @@ test-harness:
 smoke-tui:
     scripts/smoke-tui.sh
 
+smoke-worktree:
+    scripts/smoke-worktree.sh
+
 test-tui-hangup:
     scripts/test-tui-hangup.sh
 
-check: fmt-check lint test test-hooks test-harness smoke-tui test-tui-hangup
+check: fmt-check lint test test-hooks test-harness smoke-tui test-tui-hangup smoke-worktree
 
 [no-cd]
 dev *args:

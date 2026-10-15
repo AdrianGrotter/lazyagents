@@ -44,6 +44,10 @@ launch "$name"
 "$h" keys "$name" Enter
 "$h" wait-for "$name" 'tui-42' 10
 
+"$h" keys "$name" C-q q
+"$h" wait-for "$name" 'n new · x stop' 5
+"$h" keys "$name" Enter
+"$h" wait-for "$name" ' demo · generic · ' 5
 "$h" keys "$name" C-]
 "$h" wait-for "$name" 'n new · x stop' 5
 "$h" keys "$name" x
