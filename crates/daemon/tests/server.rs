@@ -537,6 +537,44 @@ async fn spawn_failure_reports_last_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn successful_restart_clears_last_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let bin = tempfile::tempdir().expect("bin dir");
+    let script = bin.path().join("late-agent");
+    let command = script.to_str().expect("utf8 path");
+    let err = create(&mut conn, &project, "late", AgentKind::Generic, &[command])
+        .await
+        .expect_err("spawn fails");
+    let Ok(Response::Agents(agents)) = conn.request(Request::ListAgents).await else {
+        panic!("list")
+    };
+    assert_eq!(agents[0].last_error.as_deref(), Some(err.as_str()));
+    let id = agents[0].id;
+
+    std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").expect("write script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let Ok(Response::Agent(restarted)) = conn
+        .request(Request::RestartAgent {
+            id,
+            cols: 80,
+            rows: 24,
+        })
+        .await
+    else {
+        panic!("restart failed")
+    };
+    assert_eq!(restarted.last_error, None);
+    let Ok(Response::Agents(agents)) = conn.request(Request::ListAgents).await else {
+        panic!("list")
+    };
+    assert_eq!(agents[0].last_error, None);
+    conn.request(Request::KillAgent { id }).await.expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn kill_restart_remove_and_rename() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;
