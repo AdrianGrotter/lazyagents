@@ -27,6 +27,8 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
                 Some(path) => path,
                 None => std::env::current_dir()?,
             };
+            let path = std::path::absolute(&path)
+                .with_context(|| format!("resolving {}", path.display()))?;
             let project = add_project(&mut client, path, name).await?;
             println!("added {} ({})", project.name, project.path.display());
         }
@@ -111,7 +113,9 @@ async fn shutdown(paths: &StatePaths) -> anyhow::Result<()> {
         println!("daemon is not running");
         return Ok(());
     };
-    client.request(Request::Shutdown).await?;
+    tokio::time::timeout(Duration::from_secs(5), client.request(Request::Shutdown))
+        .await
+        .map_err(|_| anyhow!("daemon did not answer the shutdown request within 5s"))??;
     let socket = paths.socket();
     for _ in 0..60 {
         if !socket.exists() {

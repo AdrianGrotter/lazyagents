@@ -18,8 +18,12 @@ pub fn run() -> anyhow::Result<()> {
         .with_ansi(false)
         .init();
     let exe = std::env::current_exe().context("locating the lazyagents binary")?;
-    tokio::runtime::Builder::new_multi_thread()
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(daemon::run(daemon::Config { paths, exe }))
+        .block_on(daemon::run(daemon::Config { paths, exe }));
+    if let Err(e) = &result {
+        tracing::error!("{e:#}");
+    }
+    result
 }

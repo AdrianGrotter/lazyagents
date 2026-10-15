@@ -271,3 +271,82 @@ fn cli_recovers_from_a_stale_socket() {
     drop(std::os::unix::net::UnixListener::bind(env.socket()).expect("stale socket"));
     assert!(env.ok(&["ls"]).contains("no projects yet"));
 }
+
+#[test]
+fn project_add_relative_path_uses_the_callers_cwd() {
+    let env = TestEnv::new();
+    assert!(env.ok(&["ls"]).contains("no projects yet"));
+    let other = tempfile::tempdir().expect("other");
+    std::fs::create_dir(other.path().join("sub")).expect("sub");
+    let out = Command::new(BIN)
+        .args(["project", "add", "sub"])
+        .env("LAZYAGENTS_STATE_DIR", env.state.path())
+        .current_dir(other.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lazyagents");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected = other.path().canonicalize().expect("canonical").join("sub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&expected.display().to_string()), "{stdout}");
+}
+
+#[test]
+fn daemon_startup_errors_are_logged() {
+    let state = tempfile::tempdir().expect("state");
+    std::fs::write(state.path().join("state.toml"), "[[[ not toml").expect("corrupt");
+    let mut child = Command::new(BIN)
+        .arg("daemon")
+        .env("LAZYAGENTS_STATE_DIR", state.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("daemon");
+    let mut status = None;
+    let exited = wait_until(Duration::from_secs(10), || {
+        status = child.try_wait().expect("try_wait");
+        status.is_some()
+    });
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(exited, "daemon did not exit");
+    assert!(!status.expect("status").success());
+    let log = std::fs::read_to_string(state.path().join("daemon.log")).unwrap_or_default();
+    assert!(log.contains("state.toml"), "{log}");
+}
+
+#[test]
+fn hook_does_not_wait_on_an_open_stdin() {
+    let dir = tempfile::tempdir().expect("dir");
+    let mut child = Command::new(BIN)
+        .args(["hook", "Stop"])
+        .env(
+            "LAZYAGENTS_AGENT_ID",
+            "00000000-0000-4000-8000-000000000000",
+        )
+        .env("LAZYAGENTS_SOCKET", dir.path().join("missing.sock"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("hook");
+    let _stdin = child.stdin.take();
+    let mut status = None;
+    let exited = wait_until(Duration::from_secs(1), || {
+        status = child.try_wait().expect("try_wait");
+        status.is_some()
+    });
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(exited, "hook blocked on stdin");
+    assert!(status.expect("status").success());
+}
