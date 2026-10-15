@@ -463,3 +463,36 @@ fn sigterm_stops_the_daemon_and_its_agents() {
     );
     assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived SIGTERM");
 }
+
+fn serve_foreign_protocol(socket: PathBuf) {
+    let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind");
+    listener.set_nonblocking(true).expect("nonblocking");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let listener = tokio::net::UnixListener::from_std(listener).expect("listener");
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let welcome = protocol::ServerMessage::Welcome {
+                    protocol_version: 999,
+                    daemon_version: "9.9.9".into(),
+                };
+                let _ = protocol::write_message(&mut stream, &welcome).await;
+            }
+        });
+    });
+}
+
+#[test]
+fn shutdown_explains_how_to_stop_a_mismatched_daemon() {
+    let env = TestEnv::new();
+    serve_foreign_protocol(env.socket());
+    std::fs::write(env.state.path().join("daemon.lock"), "4242").expect("lock file");
+    let out = env.run(&["shutdown"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(stderr.contains("protocol 999"), "{stderr}");
+    assert!(stderr.contains("stop it with: kill 4242"), "{stderr}");
+}

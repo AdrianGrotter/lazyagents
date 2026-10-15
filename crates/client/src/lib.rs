@@ -186,6 +186,15 @@ impl Client {
     }
 }
 
+/// The pid the running daemon recorded in its lock file.
+pub fn daemon_pid(paths: &StatePaths) -> Option<u32> {
+    std::fs::read_to_string(paths.lock_file())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 pub fn spawn_daemon(paths: &StatePaths, exe: &Path) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
 
