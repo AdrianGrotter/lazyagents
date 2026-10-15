@@ -610,3 +610,17 @@ fn daemon_does_not_inherit_claude_code_variables() {
         .collect();
     assert!(leaked.is_empty(), "{leaked:?}");
 }
+
+#[test]
+fn no_subcommand_without_a_terminal_fails_cleanly() {
+    let env = TestEnv::new();
+    let started = Instant::now();
+    let out = env.run(&[]);
+    assert!(started.elapsed() < Duration::from_secs(5), "{out:?}");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("needs an interactive terminal"),
+        "{out:?}"
+    );
+    assert!(!env.socket().exists());
+}

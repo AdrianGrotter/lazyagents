@@ -5,7 +5,8 @@ mod hook;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
+use protocol::StatePaths;
 
 /// A lazygit-style terminal UI for managing coding agents.
 #[derive(Parser)]
@@ -73,10 +74,15 @@ pub enum Kind {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        None => {
-            let _ = Cli::command().print_help();
-            Ok(())
-        }
+        None => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(anyhow::Error::from)
+            .and_then(|runtime| {
+                runtime.block_on(async {
+                    tui::run(StatePaths::from_env()?, std::env::current_exe()?).await
+                })
+            }),
         Some(Command::Hook { event }) => {
             hook::run(&event);
             Ok(())

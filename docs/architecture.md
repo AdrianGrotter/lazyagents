@@ -19,12 +19,12 @@ One binary, `lazyagents`, in a Cargo workspace:
 | `crates/protocol` | Message types, framing, protocol version | serde, postcard |
 | `crates/daemon` | Agent registry, PTYs, terminal emulation, input encoding, persistence, hook ingestion, status (git worktrees: planned) | protocol, alacritty_terminal, rustix, tokio |
 | `crates/client` | Connects to the daemon, starting it on demand; used by the CLI and the TUI | protocol, rustix, tokio |
-| `crates/tui` | ratatui client: layout, panels, popups, rendering of remote grids, input capture | protocol, ratatui, crossterm, tokio |
-| `crates/lazyagents` | Binary: CLI parsing and subcommand dispatch | daemon, client, protocol, clap |
+| `crates/tui` | ratatui client: layout, panels, popups, rendering of remote grids, input capture | client, protocol, ratatui, crossterm, tokio |
+| `crates/lazyagents` | Binary: CLI parsing and subcommand dispatch | daemon, client, tui, protocol, clap |
 
 Subcommands:
 
-- `lazyagents` — run the TUI (until it lands, prints help).
+- `lazyagents` — run the TUI; without an interactive terminal it exits with an error.
 - `lazyagents daemon` — run the daemon in the foreground (auto-spawn detaches it).
 - `lazyagents hook <event>` — invoked by Claude Code hooks; forwards the JSON payload
   on stdin to the daemon.
