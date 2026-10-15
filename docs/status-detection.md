@@ -19,8 +19,10 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   - `Stop` → `Idle`
 - **Session rules**: every start uses a fresh `--session-id` until a prompt has been
   submitted. `UserPromptSubmit` marks the agent resumable, and from then on restarts use
-  `--resume`. A `SessionStart` carrying a different session id (for example after
-  `/clear`) replaces the stored id and clears resumable. See
+  `--resume`. A `SessionStart` carrying a different session id replaces the stored id.
+  When its `source` is `resume` or `compact` (`/resume`, compaction) the agent is
+  resumable afterwards; for `startup`, `clear` or a missing source it is not until the
+  next prompt. See
   `docs/decisions/0006-resume-only-prompted-sessions.md`.
 - **Generic agents**: `Starting` until their first output, then `Working`; `Idle` after
   2 s without output, `Working` again on new output.

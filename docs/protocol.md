@@ -45,7 +45,9 @@ is rejected.
 - `Input { id, event }`
 - `Resize { id, cols, rows }`
 - `Scroll { id, lines }`
-- `Hook { id, kind, session_id }`
+- `Hook { id, kind, session_id, source }`: `session_id` and `source` come from the
+  Claude Code hook payload; `source` is `SessionStart`'s `startup`, `resume`, `clear`
+  or `compact`
 - `Shutdown`
 
 `Response`:

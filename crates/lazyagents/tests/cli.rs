@@ -269,7 +269,7 @@ fn claude_agent_hooks_drive_status_and_restart_resumes() {
         "{settings_json}"
     );
 
-    let hook = |event: &str| {
+    let hook = |event: &str, payload: &str| {
         let mut child = Command::new(BIN)
             .args(["hook", event])
             .env("LAZYAGENTS_AGENT_ID", &agent_id)
@@ -284,7 +284,7 @@ fn claude_agent_hooks_drive_status_and_restart_resumes() {
             .stdin
             .take()
             .expect("stdin")
-            .write_all(format!("{{\"session_id\":\"{session}\"}}").as_bytes())
+            .write_all(payload.as_bytes())
             .expect("payload");
         let out = child.wait_with_output().expect("hook output");
         assert!(
@@ -292,11 +292,12 @@ fn claude_agent_hooks_drive_status_and_restart_resumes() {
             "{out:?}"
         );
     };
-    hook("UserPromptSubmit");
+    let payload = format!("{{\"session_id\":\"{session}\"}}");
+    hook("UserPromptSubmit", &payload);
     assert!(wait_until(Duration::from_secs(5), || env
         .ok(&["ls"])
         .contains("working")));
-    hook("Notification");
+    hook("Notification", &payload);
     assert!(wait_until(Duration::from_secs(5), || env
         .ok(&["ls"])
         .contains("needs input")));
@@ -307,6 +308,19 @@ fn claude_agent_hooks_drive_status_and_restart_resumes() {
     assert_eq!(
         resumed.lines().take(2).collect::<Vec<_>>(),
         ["--resume", session.as_str()]
+    );
+
+    let other = "6f1c2b9e-1d2a-4c3b-9e8f-0a1b2c3d4e5f";
+    hook(
+        "SessionStart",
+        &format!("{{\"session_id\":\"{other}\",\"source\":\"resume\"}}"),
+    );
+    std::fs::remove_file(&args_file).expect("reset");
+    env.ok(&["restart", "c"]);
+    let resumed = wait_for_file(&args_file);
+    assert_eq!(
+        resumed.lines().take(2).collect::<Vec<_>>(),
+        ["--resume", other]
     );
 }
 

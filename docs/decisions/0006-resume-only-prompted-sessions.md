@@ -9,7 +9,7 @@ ADR 0003 starts Claude agents with `--session-id <uuid>` and restarts them with 
 
 ## Decision
 
-The daemon marks an agent `resumable` when its `UserPromptSubmit` hook fires. Restart passes `--resume` only for resumable agents; otherwise it starts a fresh session id. A `SessionStart` hook carrying a different session id replaces the stored one and clears `resumable`. `PostToolUse` maps to Working, so the status leaves "needs input" once an approved tool finishes.
+The daemon marks an agent `resumable` when its `UserPromptSubmit` hook fires. Restart passes `--resume` only for resumable agents; otherwise it starts a fresh session id. A `SessionStart` hook carrying a different session id replaces the stored one; it clears `resumable` when its `source` is `startup` or `clear` (or missing) and sets it when the source is `resume` or `compact`, since those continue a session that already has history. `PostToolUse` maps to Working, so the status leaves "needs input" once an approved tool finishes.
 
 ## Alternatives
 

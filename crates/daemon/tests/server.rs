@@ -637,6 +637,7 @@ async fn claude_agents_get_sessions_hooks_and_resume() {
         id: agent.id,
         kind: HookKind::UserPromptSubmit,
         session_id: None,
+        source: None,
     })
     .await
     .expect("hook");
@@ -645,6 +646,7 @@ async fn claude_agents_get_sessions_hooks_and_resume() {
         id: agent.id,
         kind: HookKind::Notification,
         session_id: None,
+        source: None,
     })
     .await
     .expect("hook");
@@ -666,6 +668,97 @@ async fn claude_agents_get_sessions_hooks_and_resume() {
         .expect("kill");
 }
 
+fn fake_claude(dir: &Path) -> (PathBuf, PathBuf) {
+    let args_file = dir.join("args");
+    let fake = dir.join("claude");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec sleep 30\n",
+            args_file.display()
+        ),
+    )
+    .expect("fake");
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    (fake, args_file)
+}
+
+async fn restart_args(conn: &mut Conn, id: AgentId, args_file: &Path) -> Vec<String> {
+    let _ = std::fs::remove_file(args_file);
+    conn.request(Request::RestartAgent {
+        id,
+        cols: 80,
+        rows: 24,
+    })
+    .await
+    .expect("restart");
+    wait_for_file(args_file)
+        .await
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+async fn session_start(conn: &mut Conn, id: AgentId, session: uuid::Uuid, source: &str) {
+    conn.request(Request::Hook {
+        id,
+        kind: HookKind::SessionStart,
+        session_id: Some(session.to_string()),
+        source: Some(source.into()),
+    })
+    .await
+    .expect("hook");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_start_source_decides_whether_the_session_stays_resumable() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let (fake, args_file) = fake_claude(dir.path());
+    let agent = create(
+        &mut conn,
+        &project,
+        "claude",
+        AgentKind::Claude,
+        &[fake.to_str().expect("utf8")],
+    )
+    .await
+    .expect("create");
+    wait_for_file(&args_file).await;
+    conn.request(Request::Hook {
+        id: agent.id,
+        kind: HookKind::UserPromptSubmit,
+        session_id: None,
+        source: None,
+    })
+    .await
+    .expect("prompt");
+
+    let resumed = uuid::Uuid::new_v4();
+    session_start(&mut conn, agent.id, resumed, "resume").await;
+    let args = restart_args(&mut conn, agent.id, &args_file).await;
+    assert_eq!(args[..2], ["--resume".to_string(), resumed.to_string()]);
+
+    drop(conn);
+    daemon.restart().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let args = restart_args(&mut conn, agent.id, &args_file).await;
+    assert_eq!(args[..2], ["--resume".to_string(), resumed.to_string()]);
+
+    let cleared = uuid::Uuid::new_v4();
+    session_start(&mut conn, agent.id, cleared, "clear").await;
+    let state = daemon::store::load(&StatePaths::new(daemon.path()).state_file()).expect("state");
+    assert_eq!(state.agents[0].session_id, Some(cleared));
+    assert!(!state.agents[0].resumable);
+    let args = restart_args(&mut conn, agent.id, &args_file).await;
+    assert_eq!(args[0], "--session-id");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn hook_for_unknown_agent_is_an_error() {
     let daemon = TestDaemon::start().await;
@@ -675,6 +768,7 @@ async fn hook_for_unknown_agent_is_an_error() {
             id: AgentId::random(),
             kind: HookKind::Stop,
             session_id: None,
+            source: None,
         })
         .await
         .expect_err("unknown");
@@ -952,6 +1046,7 @@ async fn late_hook_does_not_revive_an_exited_agent() {
         id: agent.id,
         kind: HookKind::UserPromptSubmit,
         session_id: None,
+        source: None,
     })
     .await
     .expect("late hook");

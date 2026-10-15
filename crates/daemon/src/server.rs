@@ -365,7 +365,10 @@ impl Daemon {
                 id,
                 kind,
                 session_id,
-            } => self.hook(id, kind, session_id).map(|()| Response::Ok),
+                source,
+            } => self
+                .hook(id, kind, session_id, source.as_deref())
+                .map(|()| Response::Ok),
             Request::Shutdown => {
                 self.stop_all();
                 Ok(Response::Ok)
@@ -703,6 +706,7 @@ impl Daemon {
         id: AgentId,
         kind: HookKind,
         session_id: Option<String>,
+        source: Option<&str>,
     ) -> Result<(), String> {
         let agent = self
             .agents
@@ -724,7 +728,7 @@ impl Daemon {
             && agent.record.session_id != Some(session)
         {
             agent.record.session_id = Some(session);
-            agent.record.resumable = false;
+            agent.record.resumable = matches!(source, Some("resume" | "compact"));
             changed_record = true;
         }
         agent.status = on_hook(kind);

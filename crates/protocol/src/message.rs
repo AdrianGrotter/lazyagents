@@ -58,6 +58,8 @@ pub enum Request {
         id: AgentId,
         kind: HookKind,
         session_id: Option<String>,
+        /// `SessionStart`'s `source`: `startup`, `resume`, `clear` or `compact`.
+        source: Option<String>,
     },
     Shutdown,
 }
@@ -173,6 +175,7 @@ mod tests {
                 id,
                 kind: HookKind::Notification,
                 session_id: Some("s".into()),
+                source: Some("resume".into()),
             },
             Request::Shutdown,
         ];

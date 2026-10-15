@@ -37,22 +37,26 @@ fn forward(event: &str) {
         tokio::time::timeout(BUDGET, async {
             let mut payload = String::new();
             let _ = tokio::io::stdin().read_to_string(&mut payload).await;
-            let session_id = serde_json::from_str::<serde_json::Value>(&payload)
-                .ok()
-                .and_then(|value| value.get("session_id")?.as_str().map(str::to_owned));
-            send(PathBuf::from(socket), AgentId(agent), kind, session_id).await
+            let payload = serde_json::from_str::<serde_json::Value>(&payload).ok();
+            let field = |name: &str| {
+                payload
+                    .as_ref()
+                    .and_then(|value| value.get(name)?.as_str().map(str::to_owned))
+            };
+            let request = Request::Hook {
+                id: AgentId(agent),
+                kind,
+                session_id: field("session_id"),
+                source: field("source"),
+            };
+            send(PathBuf::from(socket), request).await
         })
         .await
     });
     runtime.shutdown_background();
 }
 
-async fn send(
-    socket: PathBuf,
-    agent: AgentId,
-    kind: HookKind,
-    session_id: Option<String>,
-) -> std::io::Result<()> {
+async fn send(socket: PathBuf, request: Request) -> std::io::Result<()> {
     let mut stream = UnixStream::connect(socket).await?;
     let _welcome: Option<ServerMessage> = read_message(&mut stream).await?;
     write_message(
@@ -62,11 +66,6 @@ async fn send(
         },
     )
     .await?;
-    let request = Request::Hook {
-        id: agent,
-        kind,
-        session_id,
-    };
     write_message(&mut stream, &ClientMessage::Request { id: 1, request }).await?;
     let _reply: Option<ServerMessage> = read_message(&mut stream).await?;
     Ok(())
