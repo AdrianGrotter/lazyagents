@@ -10,6 +10,7 @@ use protocol::{
 };
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
@@ -89,6 +90,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let mut housekeeping = tokio::time::interval(HOUSEKEEPING);
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut busy_at = Instant::now();
+    let mut terminate = signal(SignalKind::terminate()).context("handling SIGTERM")?;
+    let mut interrupt = signal(SignalKind::interrupt()).context("handling SIGINT")?;
 
     loop {
         tokio::select! {
@@ -111,6 +114,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             Some(_) = readers.join_next(), if !readers.is_empty() => {}
             Some(_) = writers.join_next(), if !writers.is_empty() => {}
             _ = tick.tick() => daemon.tick(),
+            _ = terminate.recv() => {
+                tracing::info!("SIGTERM; shutting down");
+                break;
+            }
+            _ = interrupt.recv() => {
+                tracing::info!("SIGINT; shutting down");
+                break;
+            }
             _ = housekeeping.tick() => {
                 if socket_identity(&socket).ok() != Some(bound) {
                     tracing::warn!(socket = %socket.display(), "socket removed or replaced; shutting down");

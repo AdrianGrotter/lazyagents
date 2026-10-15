@@ -45,6 +45,14 @@ impl TestEnv {
     fn socket(&self) -> PathBuf {
         self.state.path().join("daemon.sock")
     }
+
+    fn daemon_pid(&self) -> i32 {
+        std::fs::read_to_string(self.state.path().join("daemon.lock"))
+            .expect("lock file")
+            .trim()
+            .parse()
+            .expect("pid in lock file")
+    }
 }
 
 impl Drop for TestEnv {
@@ -441,4 +449,17 @@ fn auto_started_daemon_creates_a_private_state_dir() {
     assert!(listed.status.success(), "{listed:?}");
     assert!(stopped.status.success(), "{stopped:?}");
     assert_eq!(mode.expect("state dir") & 0o777, 0o700);
+}
+
+#[test]
+fn sigterm_stops_the_daemon_and_its_agents() {
+    let env = TestEnv::new();
+    let leaves = start_tree_agents(&env, &env.project.path().join("pids"));
+    let daemon = rustix::process::Pid::from_raw(env.daemon_pid()).expect("pid");
+    rustix::process::kill_process(daemon, rustix::process::Signal::TERM).expect("SIGTERM");
+    assert!(
+        wait_until(Duration::from_secs(5), || !env.socket().exists()),
+        "socket survived SIGTERM"
+    );
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived SIGTERM");
 }
