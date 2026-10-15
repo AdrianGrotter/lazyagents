@@ -16,6 +16,7 @@ use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::encode::encode;
+use crate::lock::InstanceLock;
 use crate::reap::terminate_tree;
 use crate::spawn::{Launch, SpawnContext, find_in_path, hook_settings, spawn_spec};
 use crate::status::{generic_status, on_hook};
@@ -25,6 +26,8 @@ use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent};
 pub struct Config {
     pub paths: StatePaths,
     pub exe: PathBuf,
+    /// Exit after this long with no client connected and no agent running.
+    pub idle_exit: Option<Duration>,
 }
 
 type ClientId = u64;
@@ -49,12 +52,14 @@ enum Flow {
 const TICK: Duration = Duration::from_millis(33);
 const STOP_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+const HOUSEKEEPING: Duration = Duration::from_secs(1);
 const WHEEL_LINES: i32 = 3;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let paths = config.paths;
     std::fs::create_dir_all(paths.dir())
         .with_context(|| format!("creating {}", paths.dir().display()))?;
+    let _lock = InstanceLock::acquire(&paths.lock_file())?;
     let socket = paths.socket();
     if socket.exists() {
         if UnixStream::connect(&socket).await.is_ok() {
@@ -66,6 +71,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let state = store::load(&paths.state_file())?;
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
+    let bound = socket_identity(&socket)
+        .with_context(|| format!("{} vanished after binding", socket.display()))?;
     tracing::info!(socket = %socket.display(), "daemon listening");
 
     let (incoming_tx, mut incoming) = mpsc::unbounded_channel::<UnixStream>();
@@ -78,10 +85,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let mut next_client: ClientId = 1;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut housekeeping = tokio::time::interval(HOUSEKEEPING);
+    housekeeping.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut busy_at = Instant::now();
 
     loop {
         tokio::select! {
             Some(stream) = incoming.recv() => {
+                busy_at = Instant::now();
                 let client = next_client;
                 next_client += 1;
                 let (tx, rx) = mpsc::unbounded_channel();
@@ -99,6 +110,18 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             Some(_) = readers.join_next(), if !readers.is_empty() => {}
             Some(_) = writers.join_next(), if !writers.is_empty() => {}
             _ = tick.tick() => daemon.tick(),
+            _ = housekeeping.tick() => {
+                if socket_identity(&socket).ok() != Some(bound) {
+                    tracing::warn!(socket = %socket.display(), "socket removed or replaced; shutting down");
+                    break;
+                }
+                if daemon.busy() {
+                    busy_at = Instant::now();
+                } else if config.idle_exit.is_some_and(|limit| busy_at.elapsed() >= limit) {
+                    tracing::info!("idle; shutting down");
+                    break;
+                }
+            }
         }
     }
 
@@ -110,9 +133,18 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     })
     .await;
     readers.abort_all();
-    let _ = std::fs::remove_file(&socket);
+    if socket_identity(&socket).ok() == Some(bound) {
+        let _ = std::fs::remove_file(&socket);
+    }
     tracing::info!("daemon stopped");
     Ok(())
+}
+
+fn socket_identity(socket: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::symlink_metadata(socket)?;
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 async fn accept_loop(listener: UnixListener, incoming: UnboundedSender<UnixStream>) {
@@ -238,6 +270,14 @@ impl Daemon {
                 subscription: None,
             },
         );
+    }
+
+    fn busy(&self) -> bool {
+        !self.clients.is_empty()
+            || self
+                .agents
+                .values()
+                .any(|agent| agent.terminal.is_some() && agent.status.is_running())
     }
 
     fn handle_command(&mut self, command: Command) -> Flow {

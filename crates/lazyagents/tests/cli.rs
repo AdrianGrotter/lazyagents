@@ -18,8 +18,13 @@ impl TestEnv {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with_env(args, &[])
+    }
+
+    fn run_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
         Command::new(BIN)
             .args(args)
+            .envs(env.iter().copied())
             .env("LAZYAGENTS_STATE_DIR", self.state.path())
             .current_dir(self.project.path())
             .stdin(Stdio::null())
@@ -403,4 +408,15 @@ fn hook_does_not_wait_on_an_open_stdin() {
     }
     assert!(exited, "hook blocked on stdin");
     assert!(status.expect("status").success());
+}
+
+#[test]
+fn idle_exit_is_configured_from_the_environment() {
+    let env = TestEnv::new();
+    let out = env.run_with_env(&["ls"], &[("LAZYAGENTS_IDLE_EXIT_SECS", "1")]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        wait_until(Duration::from_secs(4), || !env.socket().exists()),
+        "idle daemon kept running"
+    );
 }

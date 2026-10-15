@@ -53,6 +53,10 @@ impl StatePaths {
         self.dir.join("daemon.sock")
     }
 
+    pub fn lock_file(&self) -> PathBuf {
+        self.dir.join("daemon.lock")
+    }
+
     pub fn state_file(&self) -> PathBuf {
         self.dir.join("state.toml")
     }

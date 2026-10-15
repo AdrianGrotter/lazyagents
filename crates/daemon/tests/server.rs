@@ -20,9 +20,26 @@ struct TestDaemon {
 
 impl TestDaemon {
     async fn start() -> Self {
+        Self::start_with(None).await
+    }
+
+    async fn start_with(idle_exit: Option<Duration>) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let task = Some(spawn_daemon(dir.path()).await);
+        let task = Some(spawn_daemon_with(dir.path(), idle_exit).await);
         Self { dir, task }
+    }
+
+    fn socket(&self) -> PathBuf {
+        StatePaths::new(self.path()).socket()
+    }
+
+    async fn exits_within(&mut self, limit: Duration) {
+        let task = self.task.take().expect("running");
+        tokio::time::timeout(limit, task)
+            .await
+            .expect("daemon did not exit in time")
+            .expect("join")
+            .expect("clean exit");
     }
 
     async fn restart(&mut self) {
@@ -50,12 +67,26 @@ impl Drop for TestDaemon {
     }
 }
 
-async fn spawn_daemon(dir: &Path) -> JoinHandle<anyhow::Result<()>> {
-    let config = Config {
+fn config(dir: &Path) -> Config {
+    Config {
         paths: StatePaths::new(dir),
         exe: PathBuf::from("/usr/bin/true"),
-    };
-    let task = tokio::spawn(run(config));
+        idle_exit: None,
+    }
+}
+
+async fn spawn_daemon(dir: &Path) -> JoinHandle<anyhow::Result<()>> {
+    spawn_daemon_with(dir, None).await
+}
+
+async fn spawn_daemon_with(
+    dir: &Path,
+    idle_exit: Option<Duration>,
+) -> JoinHandle<anyhow::Result<()>> {
+    let task = tokio::spawn(run(Config {
+        idle_exit,
+        ..config(dir)
+    }));
     let socket = StatePaths::new(dir).socket();
     let deadline = tokio::time::Instant::now() + WAIT;
     while UnixStream::connect(&socket).await.is_err() {
@@ -758,18 +789,64 @@ async fn shutdown_stops_agent_trees_and_removes_socket() {
 #[tokio::test(flavor = "multi_thread")]
 async fn second_daemon_refuses_to_start() {
     let daemon = TestDaemon::start().await;
-    let err = run(Config {
-        paths: StatePaths::new(daemon.path()),
-        exe: PathBuf::from("/usr/bin/true"),
-    })
-    .await
-    .expect_err("second daemon");
-    assert!(format!("{err:#}").contains("already"), "{err:#}");
+    let err = run(config(daemon.path())).await.expect_err("second daemon");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(&format!(
+            "a daemon is already running (pid {})",
+            std::process::id()
+        )),
+        "{message}"
+    );
+    assert!(daemon.socket().exists());
     let mut conn = Conn::open(daemon.path()).await;
     assert_eq!(
         conn.request(Request::ListAgents).await,
         Ok(Response::Agents(vec![]))
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_the_socket_stops_the_daemon_and_its_agents() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    create_owned(&mut conn, &project, "nohup", &ignores_sighup(&pidfile)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    std::fs::remove_file(daemon.socket()).expect("remove socket");
+    daemon.exits_within(Duration::from_secs(3)).await;
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived the daemon");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_daemon_exits() {
+    let mut daemon = TestDaemon::start_with(Some(Duration::from_secs(1))).await;
+    daemon.exits_within(Duration::from_secs(4)).await;
+    assert!(!daemon.socket().exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_exit_waits_for_running_agents() {
+    let mut daemon = TestDaemon::start_with(Some(Duration::from_secs(1))).await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let agent = create_owned(&mut conn, &project, "busy", &ignores_sighup(&pidfile)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    drop(conn);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !daemon.task.as_ref().expect("task").is_finished(),
+        "exited while an agent ran"
+    );
+    let mut conn = Conn::open(daemon.path()).await;
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    drop(conn);
+    daemon.exits_within(Duration::from_secs(4)).await;
+    assert_eq!(leaves.alive(), Vec::<u32>::new());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -789,12 +866,7 @@ async fn corrupt_state_prevents_start() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = StatePaths::new(dir.path()).state_file();
     std::fs::write(&state, "[[[ not toml").expect("write");
-    let err = run(Config {
-        paths: StatePaths::new(dir.path()),
-        exe: PathBuf::from("/usr/bin/true"),
-    })
-    .await
-    .expect_err("corrupt");
+    let err = run(config(dir.path())).await.expect_err("corrupt");
     assert!(format!("{err:#}").contains("state.toml"), "{err:#}");
     assert_eq!(
         std::fs::read_to_string(&state).expect("untouched"),

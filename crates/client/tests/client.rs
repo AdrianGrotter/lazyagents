@@ -12,6 +12,7 @@ async fn start_daemon(dir: &std::path::Path) -> tokio::task::JoinHandle<anyhow::
     let task = tokio::spawn(daemon::run(daemon::Config {
         paths: StatePaths::new(dir),
         exe: PathBuf::from("/usr/bin/true"),
+        idle_exit: None,
     }));
     let paths = StatePaths::new(dir);
     for _ in 0..250 {
