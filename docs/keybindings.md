@@ -51,6 +51,11 @@ changed files (up to 8, then `… and N more`) and asks `Remove anyway? y/n`: `y
 worktree with its changes, `n`/`esc` keeps everything. `enter` does nothing in these two
 prompts.
 
+**Protocol mismatch**: when the running daemon speaks another protocol version, the TUI
+opens on a full-screen prompt instead of the sidebar. `y` stops that daemon and its agents
+(SIGTERM, up to 5 s) and continues with a new daemon; `n`, `q`, `esc` and `ctrl-c` quit
+with the mismatch error.
+
 **Diff view** (`D`): the main pane shows `git diff` of the selected agent's directory:
 against the merge base with its base branch for a worktree agent (committed and uncommitted
 changes), against `HEAD` otherwise. Added lines are green, removed lines red, hunk headers

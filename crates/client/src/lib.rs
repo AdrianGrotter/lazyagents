@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use protocol::{
@@ -239,6 +239,37 @@ pub fn daemon_pid(paths: &StatePaths) -> Option<u32> {
     let mut holder = String::new();
     file.read_to_string(&mut holder).ok()?;
     holder.trim().parse().ok()
+}
+
+/// SIGTERMs the daemon holding the lock, which stops its agents before it exits, and waits
+/// until its socket is gone and it has released the lock. Never escalates to SIGKILL: that
+/// would orphan the agents' process trees.
+pub fn stop_daemon(paths: &StatePaths, timeout: Duration) -> anyhow::Result<()> {
+    use rustix::process::{Pid, Signal, kill_process};
+
+    let Some(pid) = daemon_pid(paths) else {
+        return Ok(());
+    };
+    let target = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| anyhow::anyhow!("daemon.lock names an invalid pid {pid}"))?;
+    if let Err(e) = kill_process(target, Signal::TERM)
+        && e != rustix::io::Errno::SRCH
+    {
+        return Err(anyhow::Error::new(e).context(format!("signalling daemon {pid}")));
+    }
+    let deadline = Instant::now() + timeout;
+    while paths.socket().exists() || daemon_pid(paths) == Some(pid) {
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "daemon {pid} did not stop within {}s",
+                timeout.as_secs_f32()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
 }
 
 /// Starts `exe daemon` away from the caller's directory, stdio, terminal variables and

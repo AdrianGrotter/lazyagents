@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_lazyagents");
@@ -545,19 +546,106 @@ fn serve_foreign_protocol(socket: PathBuf) {
     });
 }
 
+/// A stand-in for a daemon of another protocol: `sleep` holds its pid and the test holds
+/// the lock for it; once `sleep` exits the socket goes and the lock is released, as a real
+/// daemon's would. SIGKILLed on drop if it is still running, so a failing test leaks nothing.
+struct ForeignDaemon(Arc<Mutex<std::process::Child>>);
+
+impl ForeignDaemon {
+    fn start(env: &TestEnv) -> Self {
+        serve_foreign_protocol(env.socket());
+        let sleeper = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep");
+        let lock = env.state.path().join("daemon.lock");
+        std::fs::write(&lock, sleeper.id().to_string()).expect("lock file");
+        let held = std::fs::File::open(&lock).expect("open lock file");
+        held.lock().expect("hold the lock");
+        let fake = ForeignDaemon(Arc::new(Mutex::new(sleeper)));
+        let watched = Arc::clone(&fake.0);
+        let socket = env.socket();
+        std::thread::spawn(move || {
+            while !exited(&watched) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = std::fs::remove_file(socket);
+            drop(held);
+        });
+        fake
+    }
+}
+
+fn exited(child: &Mutex<std::process::Child>) -> bool {
+    let mut child = child.lock().unwrap_or_else(PoisonError::into_inner);
+    !matches!(child.try_wait(), Ok(None))
+}
+
+impl Drop for ForeignDaemon {
+    fn drop(&mut self) {
+        let mut child = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 #[test]
-fn shutdown_explains_how_to_stop_a_mismatched_daemon() {
+fn shutdown_stops_a_mismatched_daemon() {
     let env = TestEnv::new();
-    serve_foreign_protocol(env.socket());
-    let lock = env.state.path().join("daemon.lock");
-    std::fs::write(&lock, "4242").expect("lock file");
-    let held = std::fs::File::open(&lock).expect("open lock file");
-    held.lock().expect("hold the lock");
+    let fake = ForeignDaemon::start(&env);
     let out = env.run(&["shutdown"]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{out:?}");
-    assert!(stderr.contains("protocol 999"), "{stderr}");
-    assert!(stderr.contains("stop it with: kill 4242"), "{stderr}");
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("daemon stopped"),
+        "{out:?}"
+    );
+    assert!(exited(&fake.0), "shutdown did not stop it");
+}
+
+/// A `lazyagents daemon` child, SIGKILLed by its pid on drop if it is still running.
+struct DaemonChild(std::process::Child);
+
+impl Drop for DaemonChild {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+#[test]
+fn stop_daemon_stops_a_running_daemon() {
+    let env = TestEnv::new();
+    let mut daemon = DaemonChild(
+        Command::new(BIN)
+            .arg("daemon")
+            .env("LAZYAGENTS_STATE_DIR", env.state.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start daemon"),
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || env.socket().exists()),
+        "daemon never listened"
+    );
+    let paths = protocol::StatePaths::new(env.state.path());
+    client::stop_daemon(&paths, Duration::from_secs(5)).expect("stop");
+    assert!(!env.socket().exists(), "socket survived stop_daemon");
+    assert!(
+        wait_until(Duration::from_secs(5), || matches!(
+            daemon.0.try_wait(),
+            Ok(Some(_))
+        )),
+        "daemon still running"
+    );
 }
 
 #[test]

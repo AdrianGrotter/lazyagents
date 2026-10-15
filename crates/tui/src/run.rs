@@ -3,18 +3,18 @@ use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use client::Client;
+use client::{Client, VersionMismatch};
 use protocol::{Request, StatePaths};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyEvent, KeyEventKind, KeyboardEnhancementFlags, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::{execute, terminal};
 use ratatui::layout::{Position, Rect};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::MissedTickBehavior;
 
 use crate::app::{App, Effect};
@@ -85,7 +85,29 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
             "lazyagents needs an interactive terminal; run lazyagents --help for headless commands"
         );
     }
-    let client = Client::connect_or_spawn(&paths, &exe).await?;
+    let (client, mut guard, mut input) = match Client::connect_or_spawn(&paths, &exe).await {
+        Ok(client) => {
+            let (guard, input) = open_terminal()?;
+            (client, guard, input)
+        }
+        Err(error) => {
+            let Some(mismatch) = error.downcast_ref::<VersionMismatch>() else {
+                return Err(error);
+            };
+            let (mut guard, mut input) = open_terminal()?;
+            match ask_restart(&mut guard, &mut input, mismatch).await? {
+                Answer::Restart => {}
+                Answer::Quit => return Err(error),
+                Answer::Leave => return Ok(()),
+            }
+            let stop = paths.clone();
+            tokio::task::spawn_blocking(move || client::stop_daemon(&stop, Duration::from_secs(5)))
+                .await??;
+            let client = Client::connect_or_spawn(&paths, &exe).await?;
+            while input.try_recv().is_ok() {}
+            (client, guard, input)
+        }
+    };
     let (requests, mut incoming) = connection::spawn(client);
     let _ = requests.send(Request::ListProjects);
     let _ = requests.send(Request::ListAgents);
@@ -102,10 +124,6 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let config = config::load(config::default_path().as_deref());
     let mut app = App::new(cwd, shell, home, config);
-
-    let mut guard = TerminalGuard::enter()?;
-    let (input_tx, mut input) = mpsc::unbounded_channel();
-    std::thread::spawn(move || read_terminal(&input_tx));
 
     let mut layout = ui::areas(Rect::default(), 0, 0);
     let mut redraw = true;
@@ -180,6 +198,52 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                     return Ok(());
                 }
             }
+        }
+    }
+}
+
+fn open_terminal() -> anyhow::Result<(TerminalGuard, UnboundedReceiver<Term>)> {
+    let guard = TerminalGuard::enter()?;
+    let (input_tx, input) = mpsc::unbounded_channel();
+    std::thread::spawn(move || read_terminal(&input_tx));
+    Ok((guard, input))
+}
+
+enum Answer {
+    Restart,
+    Quit,
+    /// The terminal is gone, so there is no one to tell.
+    Leave,
+}
+
+async fn ask_restart(
+    guard: &mut TerminalGuard,
+    input: &mut UnboundedReceiver<Term>,
+    mismatch: &VersionMismatch,
+) -> anyhow::Result<Answer> {
+    let mut hangup = signal(SignalKind::hangup())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    loop {
+        guard.terminal.draw(|frame| {
+            ui::draw_mismatch(frame, &mismatch.daemon_version, mismatch.protocol_version)
+        })?;
+        tokio::select! {
+            event = input.recv() => match event {
+                Some(Term::Key(key)) => match key.code {
+                    KeyCode::Char('y') => return Ok(Answer::Restart),
+                    KeyCode::Char('n' | 'q') | KeyCode::Esc => return Ok(Answer::Quit),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(Answer::Quit);
+                    }
+                    _ => {}
+                },
+                Some(Term::Gone) | None => return Ok(Answer::Leave),
+                Some(_) => {}
+            },
+            _ = hangup.recv() => return Ok(Answer::Leave),
+            _ = terminate.recv() => return Ok(Answer::Quit),
+            _ = interrupt.recv() => return Ok(Answer::Quit),
         }
     }
 }

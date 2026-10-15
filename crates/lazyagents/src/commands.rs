@@ -2,10 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use client::{Client, VersionMismatch, daemon_pid};
-use protocol::{
-    AgentInfo, AgentKind, CreateAgent, PROTOCOL_VERSION, Project, Request, Response, StatePaths,
-};
+use client::{Client, VersionMismatch};
+use protocol::{AgentInfo, AgentKind, CreateAgent, Project, Request, Response, StatePaths};
 
 use crate::{Command, Kind, ProjectCommand};
 
@@ -120,20 +118,14 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
 async fn shutdown(paths: &StatePaths) -> anyhow::Result<()> {
     let mut client = match Client::connect(paths).await {
         Ok(client) => client,
-        Err(e) => {
-            let Some(mismatch) = e.downcast_ref::<VersionMismatch>() else {
-                println!("daemon is not running");
-                return Ok(());
-            };
-            let stop = match daemon_pid(paths) {
-                Some(pid) => format!("stop it with: kill {pid}"),
-                None => "stop the `lazyagents daemon` process with kill".to_string(),
-            };
-            bail!(
-                "daemon {} speaks protocol {}, this client speaks {PROTOCOL_VERSION}; {stop}",
-                mismatch.daemon_version,
-                mismatch.protocol_version
-            );
+        Err(e) if e.downcast_ref::<VersionMismatch>().is_some() => {
+            client::stop_daemon(paths, Duration::from_secs(5))?;
+            println!("daemon stopped");
+            return Ok(());
+        }
+        Err(_) => {
+            println!("daemon is not running");
+            return Ok(());
         }
     };
     tokio::time::timeout(Duration::from_secs(5), client.request(Request::Shutdown))

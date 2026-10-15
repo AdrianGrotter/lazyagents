@@ -269,3 +269,25 @@ async fn daemon_exiting_at_startup_fails_fast() {
         "{err:#}"
     );
 }
+
+#[test]
+fn stop_daemon_without_a_daemon_is_ok() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path());
+    client::stop_daemon(&paths, Duration::from_secs(1)).expect("nothing to stop");
+
+    let mut bystander = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("sleep");
+    std::fs::write(paths.lock_file(), bystander.id().to_string()).expect("lock file");
+    let result = client::stop_daemon(&paths, Duration::from_secs(1));
+    let survived = bystander.try_wait().expect("try_wait").is_none();
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    result.expect("an unlocked lock file names no daemon");
+    assert!(
+        survived,
+        "stop_daemon signalled a pid from an unlocked lock file"
+    );
+}

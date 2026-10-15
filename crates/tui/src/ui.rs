@@ -488,6 +488,32 @@ fn draw_too_small(frame: &mut Frame) {
     );
 }
 
+pub fn draw_mismatch(frame: &mut Frame, daemon_version: &str, protocol_version: u32) {
+    let screen = frame.area();
+    let lines = vec![
+        Line::from(format!(
+            "This lazyagents (protocol {}) can't talk to the running daemon {daemon_version} \
+             (protocol {protocol_version}).",
+            protocol::PROTOCOL_VERSION
+        )),
+        Line::from(""),
+        Line::from("Restart the daemon? This stops every running agent."),
+        Line::from(""),
+        Line::from("y restart · n quit").fg(Color::DarkGray),
+    ];
+    let block = Block::default().borders(Borders::ALL).title(" lazyagents ");
+    let inner = block.inner(screen);
+    frame.render_widget(block, screen);
+    let width = usize::from(inner.width.max(1));
+    let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
+    let top = inner.height.saturating_sub(rows as u16) / 2;
+    let area = Rect::new(inner.x, inner.y + top, inner.width, inner.height - top);
+    frame.render_widget(
+        Paragraph::new(lines).centered().wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
 fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
     let theme = &app.theme;
     let (title, width, height, lines) = match popup {
@@ -1325,5 +1351,34 @@ mod tests {
             ],
             "{text}"
         );
+    }
+
+    #[test]
+    fn mismatch_popup_text() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
+        terminal
+            .draw(|f| draw_mismatch(f, "0.1.0", 1))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains(&format!(
+                "This lazyagents (protocol {}) can't talk to the running daemon 0.1.0 (protocol 1).",
+                protocol::PROTOCOL_VERSION
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("Restart the daemon? This stops every running agent."),
+            "{text}"
+        );
+        assert!(text.contains("y restart · n quit"), "{text}");
     }
 }

@@ -14,8 +14,9 @@ is rejected.
    connects.
 2. The client compares the Welcome's `protocol_version` with its own. On a mismatch it
    fails with `client::VersionMismatch` without sending Hello. The fix is to stop that
-   daemon: `lazyagents shutdown` prints its pid and the `kill` command, and the next
-   command starts a matching daemon. On a match it sends `Hello { protocol_version }`.
+   daemon: `lazyagents shutdown`, or `y` in the TUI's mismatch popup, sends it SIGTERM,
+   and the next command starts a matching daemon. On a match it sends
+   `Hello { protocol_version }`.
 3. The client then sends `Request { id, request }`. The daemon answers each request with
    exactly one `Response { id, result }`, where `result` is `Ok(Response)` or
    `Err(message)`.
