@@ -94,10 +94,7 @@ paste still reaches the agent.
 `ctrl-5`, which works too. `alt-[` and `alt-]` are not bound: they reach the agent like
 any other key.
 
-Mouse wheel scrolls the emulator's scrollback when the agent hasn't enabled mouse
-reporting; otherwise it is forwarded. An exited or stopped agent's pane scrolls with the
-wheel too. Planned (plan 4): mouse drag selects text inside the pane and copies it via
-OSC 52 (fallback `pbcopy`/`wl-copy`).
+The mouse works in the pane too; see **Mouse** below.
 
 **Scroll mode** (`s` in the sidebar, `ctrl-q s` in the pane): keys move the selected
 agent's terminal through its history instead of reaching the agent. It needs an agent with
@@ -116,7 +113,39 @@ shows `SCROLL · j/k ctrl-u/d g/G · q exit`.
 
 Exiting returns to the pane if scroll mode was entered from the pane and the agent still
 runs, otherwise to the Agents box. The mode closes by itself, back to the Agents box, if its
-agent is removed. The mouse wheel behaves as before.
+agent is removed or stopped, or if the selection moves to another agent; in that last case
+the agent it leaves is scrolled back to the bottom. The mouse wheel scrolls the history
+three lines at a time instead of reaching the agent.
+
+**Mouse**: clicks and drags never reach the agent; the wheel may.
+
+| Action | Effect |
+|---|---|
+| click a Projects row | select that project and focus Projects |
+| click an Agents row | select that agent and focus Agents (never the pane) |
+| click elsewhere in the Projects or Agents box | focus that box |
+| click in the pane | focus the pane if the agent is running; otherwise the status bar says `<name> is not running — r restarts` |
+| drag in the pane | select text, shown reversed; the selection stays inside the pane |
+| release after a drag | copy the selected text and show `copied N characters` |
+| click outside an open popup | close it, like `esc` |
+| wheel over the pane | see below |
+
+The selection runs in reading order from where the drag started to where it ends, whole
+lines in between; trailing spaces are trimmed from each line. A click without a drag
+copies nothing. Clicking a sidebar row also closes the diff view, or scroll mode (scrolling
+its agent back to the bottom). In scroll mode a click or drag in the pane selects from the
+history on screen and keeps scroll mode; in the diff view it does nothing.
+
+Copying writes the text to the terminal as OSC 52, which Ghostty, kitty and WezTerm put on
+the system clipboard, and also pipes it to `pbcopy` (macOS) or `wl-copy` (Wayland) when one
+is on `PATH`. Inside tmux, OSC 52 reaches the outer terminal only with
+`set -g set-clipboard on` in `tmux.conf`. In most terminals, holding shift while dragging
+bypasses lazyagents and uses the terminal's own selection.
+
+The wheel over the pane scrolls the emulator's scrollback when the agent hasn't enabled
+mouse reporting; otherwise it is forwarded to the agent. An exited or stopped agent's pane
+scrolls with the wheel too. In the diff view it scrolls the diff, and in scroll mode the
+history.
 
 **Terminal too small**: while the pane would be smaller than 20×5 cells the TUI shows only
 "terminal too small", and keys and pastes do nothing except the quit keys (`q`/`ctrl-c`,

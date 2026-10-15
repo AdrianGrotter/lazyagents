@@ -8,24 +8,25 @@ use protocol::{Request, StatePaths};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::{execute, terminal};
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::MissedTickBehavior;
 
-use crate::app::{App, Effect};
+use crate::app::{App, Effect, MouseInput, MouseKind};
+use crate::clipboard;
 use crate::config;
 use crate::connection::{self, Incoming};
-use crate::ui::{self, Areas};
+use crate::ui;
 
 enum Term {
     Key(KeyEvent),
     Paste(String),
-    Wheel { up: bool, col: u16, row: u16 },
+    Mouse(MouseInput),
     Resize,
     Gone,
 }
@@ -147,7 +148,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
             event = input.recv() => match event {
                 Some(Term::Key(key)) => app.on_key(key),
                 Some(Term::Paste(text)) => app.on_paste(text),
-                Some(Term::Wheel { up, col, row }) => wheel(&mut app, &layout, up, col, row),
+                Some(Term::Mouse(mouse)) => app.on_mouse(mouse, &layout),
                 Some(Term::Resize) => Vec::new(),
                 Some(Term::Gone) | None => return Ok(()),
             },
@@ -184,6 +185,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                 Effect::Send(request) => {
                     let _ = requests.send(request);
                 }
+                Effect::Copy(text) => clipboard::copy(guard.terminal.backend_mut(), &text),
                 Effect::Quit => return Ok(()),
                 Effect::StopDaemonAndQuit => {
                     let _ = requests.send(Request::Shutdown);
@@ -256,33 +258,27 @@ fn send_all(requests: &UnboundedSender<Request>, effects: Vec<Effect>) {
     }
 }
 
-fn wheel(app: &mut App, layout: &Areas, up: bool, col: u16, row: u16) -> Vec<Effect> {
-    let pane = layout.pane_inner;
-    if !pane.contains(Position::new(col, row)) {
-        return Vec::new();
-    }
-    app.on_wheel(up, col - pane.x, row - pane.y)
-}
-
 /// Blocks on terminal input; a read error means the terminal is gone.
 fn read_terminal(tx: &UnboundedSender<Term>) {
     loop {
         let term = match event::read() {
             Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => Term::Key(key),
             Ok(Event::Paste(text)) => Term::Paste(text),
-            Ok(Event::Mouse(mouse)) => match mouse.kind {
-                MouseEventKind::ScrollUp => Term::Wheel {
-                    up: true,
+            Ok(Event::Mouse(mouse)) => {
+                let kind = match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => MouseKind::Down,
+                    MouseEventKind::Drag(MouseButton::Left) => MouseKind::Drag,
+                    MouseEventKind::Up(MouseButton::Left) => MouseKind::Up,
+                    MouseEventKind::ScrollUp => MouseKind::ScrollUp,
+                    MouseEventKind::ScrollDown => MouseKind::ScrollDown,
+                    _ => continue,
+                };
+                Term::Mouse(MouseInput {
+                    kind,
                     col: mouse.column,
                     row: mouse.row,
-                },
-                MouseEventKind::ScrollDown => Term::Wheel {
-                    up: false,
-                    col: mouse.column,
-                    row: mouse.row,
-                },
-                _ => continue,
-            },
+                })
+            }
             Ok(Event::Resize(..)) => Term::Resize,
             Ok(_) => continue,
             Err(_) => {

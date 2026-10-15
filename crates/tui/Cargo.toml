@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 client = { path = "../client" }
 protocol = { path = "../protocol" }
 ratatui.workspace = true

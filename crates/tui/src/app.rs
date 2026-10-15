@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -7,10 +8,12 @@ use protocol::{
     Response, Screen, ServerMessage, Status, WorktreeRequest,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Position, Rect};
 
 use crate::config::{Config, PresetDef, Theme};
 use crate::keymap::{Action, Keymap};
 use crate::keys;
+use crate::ui::Areas;
 
 pub const MESSAGE_TTL: Duration = Duration::from_secs(5);
 pub const MIN_PANE: (u16, u16) = (20, 5);
@@ -157,8 +160,84 @@ pub enum Popup {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     Send(Request),
+    Copy(String),
     Quit,
     StopDaemonAndQuit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseKind {
+    Down,
+    Drag,
+    Up,
+    ScrollUp,
+    ScrollDown,
+}
+
+/// A left-button or wheel event at absolute terminal coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseInput {
+    pub kind: MouseKind,
+    pub col: u16,
+    pub row: u16,
+}
+
+/// Cells of the pane as `(col, row)` relative to the pane's inner area; `anchor` is where
+/// the drag started, so it may come after `end` in reading order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: (u16, u16),
+    pub end: (u16, u16),
+}
+
+impl Selection {
+    fn ordered(self) -> ((u16, u16), (u16, u16)) {
+        let reading = |(col, row): (u16, u16)| (row, col);
+        if reading(self.anchor) <= reading(self.end) {
+            (self.anchor, self.end)
+        } else {
+            (self.end, self.anchor)
+        }
+    }
+
+    pub fn rows(self) -> RangeInclusive<u16> {
+        let ((_, first), (_, last)) = self.ordered();
+        first..=last
+    }
+
+    /// The selected columns of `row` in a line `width` cells wide: from the start column
+    /// on the first row, up to the end column on the last, the whole line in between.
+    pub fn columns(self, row: u16, width: u16) -> Option<RangeInclusive<u16>> {
+        let ((start_col, start_row), (end_col, end_row)) = self.ordered();
+        if width == 0 || !(start_row..=end_row).contains(&row) {
+            return None;
+        }
+        let first = if row == start_row { start_col } else { 0 };
+        let last = if row == end_row { end_col } else { u16::MAX };
+        let last = last.min(width - 1);
+        (first <= last).then_some(first..=last)
+    }
+
+    /// Spacer cells after wide characters have no text and are skipped; trailing spaces
+    /// are trimmed from every line.
+    pub fn text(self, screen: &Screen) -> String {
+        self.rows()
+            .map(|row| {
+                let Some(line) = screen.lines.get(usize::from(row)) else {
+                    return String::new();
+                };
+                let width = u16::try_from(line.len()).unwrap_or(u16::MAX);
+                let Some(columns) = self.columns(row, width) else {
+                    return String::new();
+                };
+                let text: String = columns
+                    .map(|col| line[usize::from(col)].text.as_str())
+                    .collect();
+                text.trim_end_matches(' ').to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +267,7 @@ pub struct App {
     pub git_stats: HashMap<AgentId, GitStat>,
     pub diff: Option<DiffView>,
     pub scroll: Option<ScrollMode>,
+    pub selection: Option<Selection>,
     stats_in_flight: HashMap<AgentId, Instant>,
     diffs_in_flight: HashMap<AgentId, Instant>,
     stat_polled: Option<(AgentId, Instant)>,
@@ -224,6 +304,7 @@ impl App {
             git_stats: HashMap::new(),
             diff: None,
             scroll: None,
+            selection: None,
             stats_in_flight: HashMap::new(),
             diffs_in_flight: HashMap::new(),
             stat_polled: None,
@@ -470,15 +551,36 @@ impl App {
         if self.focus == Focus::Diff && selected != self.diff.as_ref().map(|d| d.agent) {
             self.close_diff();
         }
-        if self.focus == Focus::Scroll && selected != self.scroll.map(|s| s.agent) {
-            self.scroll = None;
-            self.focus = Focus::Agents;
-        }
+        let mut effects = self.close_lost_scroll(selected);
         if let Some(id) = created {
             self.select_agent(id);
             self.focus = Focus::Pane;
         }
-        self.sync()
+        effects.extend(self.sync());
+        effects
+    }
+
+    /// Scroll mode ends when the selection moves to another agent, which scrolls the
+    /// agent it leaves back to the bottom, or when its agent is removed or stopped.
+    fn close_lost_scroll(&mut self, selected: Option<AgentId>) -> Vec<Effect> {
+        let Some(mode) = self.scroll.filter(|_| self.focus == Focus::Scroll) else {
+            return Vec::new();
+        };
+        let status = self
+            .agents
+            .iter()
+            .find(|a| a.id == mode.agent)
+            .map(|a| a.status);
+        let effects = match status {
+            None | Some(Status::Stopped) => Vec::new(),
+            Some(_) if selected != Some(mode.agent) => {
+                vec![scroll_request(mode.agent, SCROLL_BOTTOM)]
+            }
+            Some(_) => return Vec::new(),
+        };
+        self.scroll = None;
+        self.focus = Focus::Agents;
+        effects
     }
 
     /// Below `MIN_PANE` the size is forgotten, nothing is resized and keys are ignored
@@ -610,6 +712,7 @@ impl App {
         self.subscribed = wanted.map(|(id, _)| id);
         self.subscribed_running = running;
         self.screen = Screen::blank(0, 0);
+        self.selection = None;
         match wanted {
             Some((id, running)) => {
                 let mut effects = vec![Effect::Send(Request::Subscribe { id })];
@@ -876,6 +979,10 @@ impl App {
             });
             return Vec::new();
         }
+        if let (Focus::Scroll, Some(mode)) = (self.focus, self.scroll) {
+            let lines = if up { WHEEL_LINES } else { -WHEEL_LINES };
+            return vec![scroll_request(mode.agent, lines)];
+        }
         let Some(agent) = self.selected_agent() else {
             return Vec::new();
         };
@@ -891,6 +998,128 @@ impl App {
             }
         };
         vec![Effect::Send(request)]
+    }
+
+    pub fn on_mouse(&mut self, event: MouseInput, areas: &Areas) -> Vec<Effect> {
+        if self.too_small {
+            return Vec::new();
+        }
+        let at = Position::new(event.col, event.row);
+        let pane = areas.pane_inner;
+        match event.kind {
+            MouseKind::ScrollUp | MouseKind::ScrollDown if pane.contains(at) => self.on_wheel(
+                event.kind == MouseKind::ScrollUp,
+                event.col - pane.x,
+                event.row - pane.y,
+            ),
+            MouseKind::ScrollUp | MouseKind::ScrollDown => Vec::new(),
+            MouseKind::Down => {
+                self.interactions += 1;
+                self.selection = None;
+                if self.popup.is_some() {
+                    if crate::ui::popup_area(self, areas.screen).is_some_and(|r| !r.contains(at)) {
+                        self.popup = None;
+                    }
+                    return Vec::new();
+                }
+                self.on_click(at, areas)
+            }
+            MouseKind::Drag => {
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.end = clamped(at, pane);
+                }
+                Vec::new()
+            }
+            MouseKind::Up => {
+                let Some(mut selection) = self.selection.take() else {
+                    return Vec::new();
+                };
+                selection.end = clamped(at, pane);
+                if selection.anchor == selection.end {
+                    return Vec::new();
+                }
+                let text = selection.text(&self.screen);
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                self.fail(format!("copied {} characters", text.chars().count()));
+                vec![Effect::Copy(text)]
+            }
+        }
+    }
+
+    /// A click is an explicit action, so a click in the pane on a running agent focuses
+    /// it; a click on an Agents row never does.
+    fn on_click(&mut self, at: Position, areas: &Areas) -> Vec<Effect> {
+        if areas.projects.contains(at) {
+            let mut effects = self.leave_for_sidebar(Focus::Projects);
+            let row = crate::ui::row_at(
+                areas.projects,
+                self.project_index,
+                self.projects.len(),
+                at.y,
+            );
+            if let Some(index) = row {
+                self.highlight_project(index);
+            }
+            effects.extend(self.sync());
+            return effects;
+        }
+        if areas.agents.contains(at) {
+            let mut effects = self.leave_for_sidebar(Focus::Agents);
+            let agents = self.visible_agents();
+            let row = crate::ui::row_at(areas.agents, self.agent_index, agents.len(), at.y);
+            if let Some(id) = row.map(|index| agents[index].id) {
+                self.select_agent(id);
+            }
+            effects.extend(self.sync());
+            return effects;
+        }
+        if !areas.pane_inner.contains(at) || self.focus == Focus::Diff {
+            return Vec::new();
+        }
+        let Some((name, running)) = self
+            .selected_agent()
+            .map(|a| (a.name.clone(), a.status.is_running()))
+        else {
+            return Vec::new();
+        };
+        let cell = clamped(at, areas.pane_inner);
+        self.selection = Some(Selection {
+            anchor: cell,
+            end: cell,
+        });
+        if self.focus == Focus::Scroll {
+            return Vec::new();
+        }
+        if running {
+            self.focus = Focus::Pane;
+        } else {
+            let message = format!(
+                "{name} is not running — {} restarts",
+                self.keymap.first_key(Action::Restart)
+            );
+            self.fail(message);
+        }
+        Vec::new()
+    }
+
+    /// Closes the diff view or scroll mode, scrolling the agent back to the bottom, and
+    /// focuses a sidebar box.
+    fn leave_for_sidebar(&mut self, focus: Focus) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        match self.focus {
+            Focus::Diff => self.diff = None,
+            Focus::Scroll => {
+                if let Some(mode) = self.scroll.take() {
+                    effects.push(scroll_request(mode.agent, SCROLL_BOTTOM));
+                }
+            }
+            Focus::Projects | Focus::Agents | Focus::Pane => {}
+        }
+        self.focus = focus;
+        self.prefix_pending = false;
+        effects
     }
 
     fn on_pane_key(&mut self, key: KeyEvent) -> Vec<Effect> {
@@ -1314,6 +1543,15 @@ fn prefix_help(keymap: &Keymap) -> String {
     .map(|(keys, label)| format!("{keys} {label}"))
     .collect();
     format!("{}: {}", keymap.prefix(), parts.join(" · "))
+}
+
+/// `at` as a cell of `area`, moved inside it when the pointer has left it.
+fn clamped(at: Position, area: Rect) -> (u16, u16) {
+    let col =
+        at.x.clamp(area.x, area.right().saturating_sub(1).max(area.x));
+    let row =
+        at.y.clamp(area.y, area.bottom().saturating_sub(1).max(area.y));
+    (col - area.x, row - area.y)
 }
 
 fn wrap(index: usize, step: i32, count: usize) -> usize {
@@ -3269,5 +3507,351 @@ pub(crate) mod tests {
             app.current_message(Instant::now()),
             Some("not a git repository")
         );
+    }
+
+    fn screen_areas(app: &App) -> Areas {
+        crate::ui::layout(ratatui::layout::Rect::new(0, 0, 100, 30), app)
+    }
+
+    fn mouse(kind: MouseKind, (col, row): (u16, u16)) -> MouseInput {
+        MouseInput { kind, col, row }
+    }
+
+    fn in_pane(areas: &Areas, col: u16, row: u16) -> (u16, u16) {
+        (areas.pane_inner.x + col, areas.pane_inner.y + row)
+    }
+
+    fn agent_row_at(areas: &Areas, index: u16) -> (u16, u16) {
+        (areas.agents.x + 3, areas.agents.y + 1 + index)
+    }
+
+    fn project_row_at(areas: &Areas, index: u16) -> (u16, u16) {
+        (areas.projects.x + 3, areas.projects.y + 1 + index)
+    }
+
+    /// `世` is wide: it is followed by an empty spacer cell, as the daemon sends it.
+    fn screen_of(lines: &[&str]) -> Screen {
+        let mut screen = Screen::blank(20, lines.len() as u16);
+        for (row, line) in lines.iter().enumerate() {
+            let mut cells = Vec::new();
+            for c in line.chars() {
+                cells.push(Cell {
+                    text: c.to_string(),
+                    ..Cell::default()
+                });
+                if c == '世' {
+                    cells.push(Cell {
+                        text: String::new(),
+                        ..Cell::default()
+                    });
+                }
+            }
+            for (col, cell) in cells.into_iter().enumerate() {
+                screen.lines[row][col] = cell;
+            }
+        }
+        screen
+    }
+
+    #[test]
+    fn click_project_row_selects_and_focuses_projects() {
+        let p = project("p");
+        let q = project("q");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&q, "beta", Status::Idle);
+        let (mut app, _) = loaded(vec![p, q], vec![a.clone(), b.clone()]);
+        let areas = screen_areas(&app);
+        let effects = app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 1)), &areas);
+        assert_eq!((app.focus, app.project_index), (Focus::Projects, 1));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: b.id })]);
+        assert!(
+            app.on_mouse(mouse(MouseKind::Up, project_row_at(&areas, 1)), &areas)
+                .is_empty()
+        );
+        assert_eq!(app.focus, Focus::Projects);
+
+        app.focus = Focus::Pane;
+        app.prefix_pending = true;
+        let _ = app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 0)), &areas);
+        assert_eq!((app.focus, app.prefix_pending), (Focus::Projects, false));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+    }
+
+    #[test]
+    fn click_agent_row_selects_and_focuses_agents_not_pane() {
+        let (mut app, a, b) = two_agents();
+        app.focus = Focus::Projects;
+        let areas = screen_areas(&app);
+        let effects = app.on_mouse(mouse(MouseKind::Down, agent_row_at(&areas, 1)), &areas);
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: b.id })]);
+        assert!(
+            app.on_mouse(mouse(MouseKind::Up, agent_row_at(&areas, 1)), &areas)
+                .is_empty()
+        );
+        assert_eq!((app.focus, app.selection), (Focus::Agents, None));
+
+        app.focus = Focus::Pane;
+        app.prefix_pending = true;
+        let _ = app.on_mouse(mouse(MouseKind::Down, agent_row_at(&areas, 0)), &areas);
+        assert_eq!((app.focus, app.prefix_pending), (Focus::Agents, false));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+
+        app.focus = Focus::Projects;
+        let _ = app.on_mouse(mouse(MouseKind::Down, agent_row_at(&areas, 5)), &areas);
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+    }
+
+    #[test]
+    fn click_leaves_the_diff_and_scroll_views() {
+        let (mut app, a, b) = two_agents();
+        let areas = screen_areas(&app);
+        open_diff(&mut app, a.id);
+        let effects = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 0, 0)), &areas);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!((app.focus, app.selection), (Focus::Diff, None));
+        let _ = app.on_mouse(mouse(MouseKind::Down, agent_row_at(&areas, 1)), &areas);
+        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+
+        let _ = app.on_key(key('s'));
+        let effects = app.on_mouse(mouse(MouseKind::Down, agent_row_at(&areas, 0)), &areas);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::Send(Request::Scroll {
+                    id: b.id,
+                    lines: i32::MIN / 2
+                }),
+                Effect::Send(Request::Subscribe { id: a.id }),
+            ]
+        );
+        assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
+
+        let _ = app.on_key(key('s'));
+        let effects = app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 0)), &areas);
+        assert_eq!(effects, scroll_effects(a.id, i32::MIN / 2));
+        assert_eq!((app.focus, app.scroll), (Focus::Projects, None));
+    }
+
+    #[test]
+    fn click_in_scroll_mode_selects_history_without_leaving() {
+        let (mut app, _, _) = two_agents();
+        let areas = screen_areas(&app);
+        app.screen = screen_of(&["older line"]);
+        let _ = app.on_key(key('s'));
+        assert!(
+            app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 0, 0)), &areas)
+                .is_empty()
+        );
+        assert_eq!(app.focus, Focus::Scroll);
+        let effects = app.on_mouse(mouse(MouseKind::Up, in_pane(&areas, 4, 0)), &areas);
+        assert_eq!(effects, vec![Effect::Copy("older".into())]);
+        assert_eq!(app.focus, Focus::Scroll);
+    }
+
+    #[test]
+    fn click_pane_focuses_running_agent() {
+        let (mut app, _, _) = two_agents();
+        let areas = screen_areas(&app);
+        let at = in_pane(&areas, 4, 2);
+        assert!(app.on_mouse(mouse(MouseKind::Down, at), &areas).is_empty());
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(
+            app.selection,
+            Some(Selection {
+                anchor: (4, 2),
+                end: (4, 2)
+            })
+        );
+        assert!(app.on_mouse(mouse(MouseKind::Up, at), &areas).is_empty());
+        assert_eq!((app.focus, app.selection), (Focus::Pane, None));
+
+        let p = project("p");
+        let (mut empty, _) = loaded(vec![p], Vec::new());
+        assert!(
+            empty
+                .on_mouse(mouse(MouseKind::Down, at), &areas)
+                .is_empty()
+        );
+        assert_eq!((empty.focus, empty.selection), (Focus::Agents, None));
+    }
+
+    #[test]
+    fn click_pane_on_stopped_agent_keeps_focus() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Stopped);
+        let (mut app, _) = loaded(vec![p], vec![a]);
+        let areas = screen_areas(&app);
+        let effects = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 1, 1)), &areas);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("alpha is not running — r restarts")
+        );
+    }
+
+    #[test]
+    fn drag_selects_and_release_copies_text() {
+        let (mut app, _, _) = two_agents();
+        let areas = screen_areas(&app);
+        app.screen = screen_of(&["hello world   ", "a世b   ", "last line here"]);
+        let _ = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 6, 0)), &areas);
+        assert!(
+            app.on_mouse(mouse(MouseKind::Drag, in_pane(&areas, 10, 1)), &areas)
+                .is_empty()
+        );
+        let _ = app.on_mouse(mouse(MouseKind::Drag, in_pane(&areas, 2, 2)), &areas);
+        assert_eq!(
+            app.selection,
+            Some(Selection {
+                anchor: (6, 0),
+                end: (2, 2)
+            })
+        );
+        let effects = app.on_mouse(mouse(MouseKind::Up, in_pane(&areas, 2, 2)), &areas);
+        assert_eq!(effects, vec![Effect::Copy("world\na世b\nlas".into())]);
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("copied 13 characters")
+        );
+        assert_eq!(app.selection, None);
+
+        let _ = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 2, 2)), &areas);
+        let effects = app.on_mouse(mouse(MouseKind::Up, in_pane(&areas, 1, 1)), &areas);
+        assert_eq!(effects, vec![Effect::Copy("世b\nlas".into())]);
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("copied 6 characters")
+        );
+
+        let _ = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 2, 1)), &areas);
+        let effects = app.on_mouse(mouse(MouseKind::Up, in_pane(&areas, 9, 1)), &areas);
+        assert_eq!(effects, vec![Effect::Copy("b".into())]);
+    }
+
+    #[test]
+    fn plain_click_copies_nothing() {
+        let (mut app, _, _) = two_agents();
+        let areas = screen_areas(&app);
+        app.screen = screen_of(&["hello"]);
+        let at = in_pane(&areas, 1, 0);
+        let _ = app.on_mouse(mouse(MouseKind::Down, at), &areas);
+        assert!(app.on_mouse(mouse(MouseKind::Up, at), &areas).is_empty());
+        let _ = app.on_mouse(mouse(MouseKind::Down, at), &areas);
+        let _ = app.on_mouse(mouse(MouseKind::Drag, in_pane(&areas, 3, 0)), &areas);
+        let _ = app.on_mouse(mouse(MouseKind::Drag, at), &areas);
+        assert!(app.on_mouse(mouse(MouseKind::Up, at), &areas).is_empty());
+        assert_eq!(app.selection, None);
+        assert_eq!(app.current_message(Instant::now()), None);
+    }
+
+    #[test]
+    fn click_outside_popup_closes_it() {
+        let (mut app, _, _) = two_agents();
+        let areas = screen_areas(&app);
+        let _ = app.on_key(key('?'));
+        let popup = crate::ui::popup_area(&app, areas.screen).expect("popup area");
+        let inside = (popup.x + 1, popup.y + 1);
+        assert!(
+            app.on_mouse(mouse(MouseKind::Down, inside), &areas)
+                .is_empty()
+        );
+        assert!(
+            app.on_mouse(mouse(MouseKind::Up, inside), &areas)
+                .is_empty()
+        );
+        assert_eq!(app.popup, Some(Popup::Help));
+        assert!(
+            app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 0)), &areas)
+                .is_empty()
+        );
+        assert_eq!((&app.popup, app.focus), (&None, Focus::Agents));
+
+        let _ = app.on_key(key('x'));
+        let effects = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 0, 0)), &areas);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(
+            (&app.popup, app.focus, app.selection),
+            (&None, Focus::Agents, None)
+        );
+        assert!(
+            app.on_mouse(mouse(MouseKind::Up, in_pane(&areas, 5, 0)), &areas)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn drag_is_clamped_to_the_pane() {
+        let (mut app, _, _) = two_agents();
+        let areas = screen_areas(&app);
+        let (width, height) = (areas.pane_inner.width, areas.pane_inner.height);
+        let _ = app.on_mouse(mouse(MouseKind::Drag, in_pane(&areas, 1, 1)), &areas);
+        assert_eq!(app.selection, None);
+        let _ = app.on_mouse(mouse(MouseKind::Down, (0, 29)), &areas);
+        assert_eq!(app.selection, None);
+
+        let _ = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 5, 5)), &areas);
+        let end = |app: &App| app.selection.map(|s| s.end);
+        let _ = app.on_mouse(mouse(MouseKind::Drag, (0, 29)), &areas);
+        assert_eq!(end(&app), Some((0, height - 1)));
+        let _ = app.on_mouse(mouse(MouseKind::Drag, (99, 0)), &areas);
+        assert_eq!(end(&app), Some((width - 1, 0)));
+        let _ = app.on_mouse(mouse(MouseKind::Drag, (500, 500)), &areas);
+        assert_eq!(end(&app), Some((width - 1, height - 1)));
+    }
+
+    #[test]
+    fn wheel_scrolls_history_in_scroll_mode() {
+        let (mut app, a, _) = running_pair();
+        let areas = screen_areas(&app);
+        let _ = app.on_key(key('s'));
+        let at = in_pane(&areas, 1, 1);
+        assert_eq!(
+            app.on_mouse(mouse(MouseKind::ScrollUp, at), &areas),
+            scroll_effects(a.id, 3)
+        );
+        assert_eq!(
+            app.on_mouse(mouse(MouseKind::ScrollDown, at), &areas),
+            scroll_effects(a.id, -3)
+        );
+        assert_eq!(app.focus, Focus::Scroll);
+    }
+
+    #[test]
+    fn wheel_outside_the_pane_does_nothing() {
+        let (mut app, _, _) = running_pair();
+        let areas = screen_areas(&app);
+        assert!(
+            app.on_mouse(mouse(MouseKind::ScrollUp, agent_row_at(&areas, 0)), &areas)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn scroll_mode_bottoms_its_agent_when_the_selection_moves_away() {
+        let (mut app, a, b) = running_pair();
+        let _ = app.on_key(key('s'));
+        app.agent_index = 1;
+        let effects = app.apply_server(ServerMessage::AgentUpdated(b.clone()));
+        assert_eq!(effects.first(), scroll_effects(a.id, i32::MIN / 2).first());
+        assert!(effects.contains(&Effect::Send(Request::Subscribe { id: b.id })));
+        assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
+    }
+
+    #[test]
+    fn scroll_mode_closes_when_its_agent_stops() {
+        let (mut app, a, _) = running_pair();
+        let _ = app.on_key(key('s'));
+        let effects = app.apply_server(ServerMessage::AgentUpdated(AgentInfo {
+            status: Status::Stopped,
+            ..a.clone()
+        }));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
     }
 }

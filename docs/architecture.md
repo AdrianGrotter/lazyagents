@@ -155,14 +155,15 @@ An agent's branch is never deleted.
 daemon last told it.
 
 - **Model** (`app.rs`): `App` holds projects, agents, selection, focus (projects, agents
-  or pane), the open popup and the subscribed agent's screen. Key, paste and wheel events
-  and daemon messages go in; `Effect`s come out (`Send(Request)`, `Quit`,
-  `StopDaemonAndQuit`). It does no I/O, so behaviour is tested without a terminal or a
+  or pane), the open popup, the subscribed agent's screen and the pane's text selection.
+  Key, paste and mouse events and daemon messages go in; `Effect`s come out
+  (`Send(Request)`, `Copy(String)`, `Quit`, `StopDaemonAndQuit`). It does no I/O, so behaviour is tested without a terminal or a
   daemon. Selection follows an agent's id across list changes. The TUI is subscribed to
   at most one agent's screen, the selected one, and sizes a running agent's PTY to the
   pane.
 - **Focus rule**: keys reach an agent only while the pane has focus, and focus moves into
-  the pane only on an explicit user action: `enter` on a running agent, or a successful
+  the pane only on an explicit user action: `enter` on a running agent, a click in the
+  pane on a running agent (a click on an Agents row only selects), or a successful
   create from the new agent form, provided no key was pressed and no popup opened
   between submitting and the daemon's answer. `ctrl-q j`/`k` switch agents from inside
   the pane and keep focus there only when the new agent is running. A failed request clears the pending
@@ -176,7 +177,7 @@ daemon last told it.
   state lives in `App` and is cleared whenever focus leaves the pane.
 - **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane,
   the status line and popups from `App`; the pane copies the daemon's cell grid into the
-  ratatui buffer. The Info box grows to fit its lines (status, worktree branch, git stat,
+  ratatui buffer, with the text selection drawn reversed on top. The Info box grows to fit its lines (status, worktree branch, git stat,
   command, cwd, kind) as long as the Agents box keeps 8 rows, and keeps 6 rows while
   they fit. The status line shows a transient message in red, then `│` and the key hint,
   cut off on the right. Below a 20×5 pane only "terminal too small" is drawn,
@@ -197,6 +198,10 @@ daemon last told it.
   TUI exits, even with SIGHUP and SIGTERM ignored ([ADR 0005](decisions/0005-vendor-crossterm-dead-tty-fix.md)).
   SIGHUP, SIGTERM and SIGINT also exit. The guard and a panic hook restore every terminal
   mode on any exit path, ignoring errors from a vanished terminal.
+- **Clipboard** (`clipboard.rs`): the runtime handles `Copy` between draws, writing OSC 52
+  to the terminal and flushing it, and piping the text to `pbcopy` or `wl-copy` when one
+  is on `PATH`. The copier runs on a short-lived thread that writes its stdin, closes it
+  and waits for it, so it never blocks the UI or lingers as a zombie.
 
 ### Persistence and config
 

@@ -8,7 +8,9 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{AgentView, App, DiffView, Field, Focus, MIN_PANE, NewAgentForm, Popup, Preset};
+use crate::app::{
+    AgentView, App, DiffView, Field, Focus, MIN_PANE, NewAgentForm, Popup, Preset, Selection,
+};
 use crate::config::Theme;
 use crate::keymap::{Action, Keymap};
 
@@ -64,6 +66,7 @@ pub struct Areas {
     pub pane: Rect,
     pub pane_inner: Rect,
     pub status: Rect,
+    pub screen: Rect,
 }
 
 const INFO_MIN_HEIGHT: u16 = 6;
@@ -106,7 +109,20 @@ pub fn areas(area: Rect, project_count: usize, info_lines: usize) -> Areas {
         pane,
         pane_inner: pane.inner(Margin::new(1, 1)),
         status,
+        screen: area,
     }
+}
+
+/// The item of a bordered list at row `y`. ratatui scrolls a list only as far as needed to
+/// show the selected item, starting from offset 0 on every frame.
+pub fn row_at(area: Rect, selected: usize, len: usize, y: u16) -> Option<usize> {
+    let inner = area.inner(Margin::new(0, 1));
+    if inner.height == 0 || y < inner.y || y >= inner.bottom() {
+        return None;
+    }
+    let offset = selected.saturating_sub(usize::from(inner.height) - 1);
+    let index = offset + usize::from(y - inner.y);
+    (index < len).then_some(index)
 }
 
 pub fn glyph(status: Status, tick: u64, theme: &Theme) -> (&'static str, Style) {
@@ -376,8 +392,24 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
         return;
     }
     let cursor = render_screen(&app.screen, areas.pane_inner, frame.buffer_mut());
+    if let Some(selection) = app.selection {
+        draw_selection(selection, areas.pane_inner, frame.buffer_mut());
+    }
     if let (true, Some(position)) = (focused, cursor) {
         frame.set_cursor_position(position);
+    }
+}
+
+fn draw_selection(selection: Selection, area: Rect, buf: &mut Buffer) {
+    for row in selection.rows().filter(|row| *row < area.height) {
+        let Some(columns) = selection.columns(row, area.width) else {
+            continue;
+        };
+        for col in columns {
+            if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+                cell.modifier.insert(Modifier::REVERSED);
+            }
+        }
     }
 }
 
@@ -514,9 +546,15 @@ pub fn draw_mismatch(frame: &mut Frame, daemon_version: &str, protocol_version: 
     );
 }
 
-fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
+pub fn popup_area(app: &App, screen: Rect) -> Option<Rect> {
+    let popup = app.popup.as_ref()?;
+    let (_, width, height, _) = popup_content(popup, app);
+    Some(centered(screen, width, height))
+}
+
+fn popup_content(popup: &Popup, app: &App) -> (&'static str, u16, u16, Vec<Line<'static>>) {
     let theme = &app.theme;
-    let (title, width, height, lines) = match popup {
+    match popup {
         Popup::Help => {
             let lines = help_lines(&app.keymap);
             let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
@@ -547,10 +585,17 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
             let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
             (" Confirm ", width.max(50), lines.len() as u16 + 2, lines)
         }
-    };
+    }
+}
+
+fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
+    let (title, width, height, lines) = popup_content(popup, app);
     let area = centered(screen, width, height);
     frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).block(block(title, true, theme)), area);
+    frame.render_widget(
+        Paragraph::new(lines).block(block(title, true, &app.theme)),
+        area,
+    );
 }
 
 fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
@@ -1380,5 +1425,63 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("y restart · n quit"), "{text}");
+    }
+
+    #[test]
+    fn row_at_maps_rows_with_scrolling() {
+        let area = Rect::new(0, 3, 25, 6);
+        assert_eq!(row_at(area, 0, 10, 3), None);
+        assert_eq!(row_at(area, 0, 10, 4), Some(0));
+        assert_eq!(row_at(area, 0, 10, 7), Some(3));
+        assert_eq!(row_at(area, 0, 10, 8), None);
+        assert_eq!(row_at(area, 3, 10, 7), Some(3));
+        assert_eq!(row_at(area, 5, 10, 4), Some(2));
+        assert_eq!(row_at(area, 5, 10, 7), Some(5));
+        assert_eq!(row_at(area, 9, 10, 7), Some(9));
+        assert_eq!(row_at(area, 0, 2, 5), Some(1));
+        assert_eq!(row_at(area, 0, 2, 6), None);
+        assert_eq!(row_at(area, 0, 0, 4), None);
+        assert_eq!(row_at(Rect::new(0, 0, 25, 2), 0, 3, 0), None);
+        assert_eq!(row_at(Rect::new(0, 0, 25, 2), 0, 3, 1), None);
+    }
+
+    #[test]
+    fn row_at_matches_the_rendered_list() {
+        let p = project("p");
+        let agents: Vec<_> = (0..20)
+            .map(|i| agent(&p, &format!("agent{i:02}"), Status::Idle))
+            .collect();
+        let (mut app, _) = loaded(vec![p], agents);
+        app.agent_index = 19;
+        let (text, _) = render(&app);
+        let area = layout(Rect::new(0, 0, 100, 30), &app).agents;
+        let lines: Vec<&str> = text.lines().collect();
+        for y in area.y + 1..area.bottom() - 1 {
+            let index = row_at(area, app.agent_index, 20, y).expect("row");
+            let name = format!("agent{index:02}");
+            assert!(lines[usize::from(y)].contains(&name), "{y}: {name}\n{text}");
+        }
+    }
+
+    #[test]
+    fn selection_is_drawn_reversed() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.screen = Screen::blank(73, 27);
+        app.selection = Some(crate::app::Selection {
+            anchor: (70, 0),
+            end: (1, 1),
+        });
+        let (_, buffer) = render(&app);
+        let inner = layout(Rect::new(0, 0, 100, 30), &app).pane_inner;
+        let reversed = |x: u16, y: u16| {
+            buffer[(inner.x + x, inner.y + y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(!reversed(69, 0));
+        assert!(reversed(70, 0) && reversed(72, 0));
+        assert!(reversed(0, 1) && reversed(1, 1));
+        assert!(!reversed(2, 1) && !reversed(0, 2));
     }
 }
