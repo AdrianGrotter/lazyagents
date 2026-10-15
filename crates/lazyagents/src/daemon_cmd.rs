@@ -8,6 +8,7 @@ use protocol::StatePaths;
 const DEFAULT_IDLE_EXIT_SECS: u64 = 600;
 
 pub fn run() -> anyhow::Result<()> {
+    detach_from_terminal();
     let paths = StatePaths::from_env()?;
     paths
         .create_dir()
@@ -26,6 +27,13 @@ pub fn run() -> anyhow::Result<()> {
         tracing::error!("{e:#}");
     }
     result
+}
+
+/// Leaves the caller's session so the daemon has no controlling terminal. Fails with
+/// EPERM for a process group leader, such as a daemon a job-control shell started in
+/// the foreground, which then stays attached to that terminal.
+fn detach_from_terminal() {
+    let _ = rustix::process::setsid();
 }
 
 fn start(paths: StatePaths) -> anyhow::Result<()> {

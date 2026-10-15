@@ -27,7 +27,9 @@ One binary, `lazyagents`, in a Cargo workspace:
 Subcommands:
 
 - `lazyagents` — run the TUI; without an interactive terminal it exits with an error.
-- `lazyagents daemon` — run the daemon in the foreground (auto-spawn detaches it).
+- `lazyagents daemon` — run the daemon. It first calls `setsid` to leave the caller's
+  session and terminal; started by a job-control shell, where it leads its own process
+  group, that fails and it stays in the foreground.
 - `lazyagents hook <event>` — invoked by Claude Code hooks; forwards the JSON payload
   on stdin to the daemon.
 - `lazyagents ls` — list projects and agents.
@@ -38,8 +40,9 @@ Subcommands:
 - `lazyagents shutdown` — stop the daemon and every agent.
 
 Commands that talk to the daemon start it if its socket is missing or dead, except `shutdown`, which only connects to a running one.
-The auto-started daemon runs detached in its own process group, from `/`, without the
-caller's terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
+The auto-started daemon runs in its own session without a controlling terminal, from
+`/`, with null stdio and without the caller's terminal variables or Claude Code's
+`CLAUDECODE` and `CLAUDE_CODE_*` variables.
 
 ### Daemon lifecycle
 

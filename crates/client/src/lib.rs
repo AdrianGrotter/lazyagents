@@ -227,11 +227,10 @@ pub fn daemon_pid(paths: &StatePaths) -> Option<u32> {
     holder.trim().parse().ok()
 }
 
-/// Starts `exe daemon` detached from the caller's terminal, directory and Claude Code
-/// session, so agents it spawns do not look nested inside the caller's Claude.
+/// Starts `exe daemon` away from the caller's directory, stdio, terminal variables and
+/// Claude Code session, so agents it spawns do not look nested inside the caller's
+/// Claude. The daemon calls `setsid` itself, which needs it not to lead a process group.
 pub fn spawn_daemon(paths: &StatePaths, exe: &Path) -> std::io::Result<Child> {
-    use std::os::unix::process::CommandExt;
-
     let mut command = Command::new(std::path::absolute(exe)?);
     command
         .arg("daemon")
@@ -239,8 +238,7 @@ pub fn spawn_daemon(paths: &StatePaths, exe: &Path) -> std::io::Result<Child> {
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
+        .stderr(Stdio::null());
     for var in TERMINAL_VARS {
         command.env_remove(var);
     }

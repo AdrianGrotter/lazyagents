@@ -10,6 +10,7 @@ clap.workspace = true
 client = { path = "../client" }
 daemon = { path = "../daemon" }
 protocol = { path = "../protocol" }
+rustix.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -18,7 +19,6 @@ tui = { path = "../tui" }
 uuid.workspace = true
 
 [dev-dependencies]
-rustix.workspace = true
 tempfile.workspace = true
 
 [lints]
