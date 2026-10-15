@@ -1,4 +1,5 @@
 use std::io::{IsTerminal, stdout};
+use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -29,47 +30,52 @@ enum Term {
 }
 
 struct TerminalGuard {
-    terminal: DefaultTerminal,
+    /// Never dropped: `Terminal`'s own `Drop` prints to stderr when it cannot show the
+    /// cursor, and printing to a vanished tty panics.
+    terminal: ManuallyDrop<DefaultTerminal>,
     enhanced: bool,
 }
 
 impl TerminalGuard {
     fn enter() -> anyhow::Result<Self> {
-        let terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
-        let mut guard = TerminalGuard {
-            terminal,
-            enhanced: false,
+        let previous = std::panic::take_hook();
+        let terminal = ratatui::try_init();
+        let enhanced =
+            terminal.is_ok() && terminal::supports_keyboard_enhancement().unwrap_or(false);
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal(enhanced);
+            previous(info);
+        }));
+        let terminal = terminal.inspect_err(|_| restore_terminal(false))?;
+        let guard = TerminalGuard {
+            terminal: ManuallyDrop::new(terminal),
+            enhanced,
         };
         execute!(stdout(), EnableBracketedPaste, EnableMouseCapture)?;
-        guard.enhanced = terminal::supports_keyboard_enhancement().unwrap_or(false);
-        if guard.enhanced {
+        if enhanced {
             execute!(
                 stdout(),
                 PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
             )?;
         }
-        let enhanced = guard.enhanced;
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            leave_modes(enhanced);
-            previous(info);
-        }));
         Ok(guard)
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        leave_modes(self.enhanced);
-        ratatui::restore();
+        let _ = self.terminal.show_cursor();
+        restore_terminal(self.enhanced);
     }
 }
 
-fn leave_modes(enhanced: bool) {
+/// Ignores every error: the terminal may already be gone, and nothing here may print.
+fn restore_terminal(enhanced: bool) {
     if enhanced {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     }
     let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
+    let _ = ratatui::try_restore();
 }
 
 pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {

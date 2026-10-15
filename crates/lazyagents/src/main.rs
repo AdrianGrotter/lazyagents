@@ -2,6 +2,7 @@ mod commands;
 mod daemon_cmd;
 mod hook;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -97,7 +98,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("lazyagents: {e:#}");
+            let _ = writeln!(std::io::stderr(), "lazyagents: {e:#}");
             ExitCode::FAILURE
         }
     }
