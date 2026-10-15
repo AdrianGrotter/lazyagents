@@ -10,6 +10,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::keys;
 
 pub const MESSAGE_TTL: Duration = Duration::from_secs(5);
+pub const MIN_PANE: (u16, u16) = (20, 5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -286,7 +287,12 @@ impl App {
         self.sync()
     }
 
+    /// Below `MIN_PANE` the size is forgotten and nothing is resized.
     pub fn set_pane_size(&mut self, cols: u16, rows: u16) -> Vec<Effect> {
+        if cols < MIN_PANE.0 || rows < MIN_PANE.1 {
+            self.pane_size = None;
+            return Vec::new();
+        }
         if self.pane_size == Some((cols, rows)) {
             return Vec::new();
         }
@@ -978,6 +984,24 @@ pub(crate) mod tests {
         };
         let _ = app.apply_server(ServerMessage::AgentUpdated(stopped));
         assert!(app.set_pane_size(90, 20).is_empty());
+    }
+
+    #[test]
+    fn pane_sizes_below_the_floor_never_resize() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a.clone()]);
+        assert!(app.set_pane_size(19, 30).is_empty());
+        assert!(app.set_pane_size(80, 4).is_empty());
+        assert!(app.set_pane_size(0, 0).is_empty());
+        assert_eq!(
+            app.set_pane_size(20, 5),
+            vec![Effect::Send(Request::Resize {
+                id: a.id,
+                cols: 20,
+                rows: 5
+            })]
+        );
     }
 
     #[test]

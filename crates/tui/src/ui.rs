@@ -6,35 +6,43 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{AgentView, App, Field, Focus, NewAgentForm, Popup, Preset};
+use crate::app::{AgentView, App, Field, Focus, MIN_PANE, NewAgentForm, Popup, Preset};
 
 pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-const SIDEBAR_HINT: &str = "enter open · n new · x stop · r restart · d remove · R rename · a add project · A all · g next ! · ? help · q quit";
+const SIDEBAR_HINT: &str = "? help · q quit · enter open · n new · x stop · r restart · d remove · R rename · a add project · A all · g next !";
 const PANE_HINT: &str = "ctrl-] sidebar · alt-[ alt-] previous/next agent";
 const FORM_HINT: &str = "tab field · ←/→ preset · enter start · esc cancel";
 const CONFIRM_HINT: &str = "y/enter confirm · n/esc cancel";
 
-const SIDEBAR_KEYS: [(&str, &str); 11] = [
-    ("enter", "open"),
-    ("n", "new"),
-    ("x", "stop"),
-    ("r", "restart"),
-    ("d", "remove"),
-    ("R", "rename"),
+const SIDEBAR_KEYS: [(&str, &str); 15] = [
+    ("j/k ↑/↓", "move within the panel"),
+    ("h/l ←/→", "projects / agents panel"),
+    ("tab/shift-tab", "switch panel"),
+    ("enter", "open the agent's pane"),
+    ("n", "new agent"),
+    ("x", "stop agent"),
+    ("r", "restart agent"),
+    ("d", "remove agent"),
+    ("R", "rename agent"),
     ("a", "add project"),
-    ("A", "all agents"),
+    ("A", "all agents / this project"),
     ("g", "next agent needing input"),
     ("?", "help"),
-    ("q", "quit"),
+    ("q, ctrl-c", "quit (agents keep running)"),
+    ("Q", "stop the daemon and quit"),
 ];
-const PANE_KEYS: [(&str, &str); 3] = [
-    ("ctrl-]", "back to sidebar"),
-    ("alt-[", "previous agent"),
-    ("alt-]", "next agent"),
+const PANE_KEYS: [(&str, &str); 2] = [
+    ("ctrl-]", "back to the sidebar"),
+    ("alt-[ alt-]", "previous / next agent"),
 ];
+const PANE_NOTE: [&str; 2] = [
+    "alt-[ may not work in legacy terminals;",
+    "use ctrl-] then j/k there",
+];
+const TOO_SMALL: &str = "terminal too small";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Areas {
@@ -147,6 +155,10 @@ fn block(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
 }
 
 pub fn draw(frame: &mut Frame, app: &App, areas: &Areas, now: Instant, tick: u64) {
+    if areas.pane_inner.width < MIN_PANE.0 || areas.pane_inner.height < MIN_PANE.1 {
+        draw_too_small(frame);
+        return;
+    }
     draw_projects(frame, app, areas.projects);
     draw_agents(frame, app, areas.agents, tick);
     draw_info(frame, app, areas.info);
@@ -306,9 +318,29 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
+fn draw_too_small(frame: &mut Frame) {
+    let screen = frame.area();
+    let rows = if usize::from(screen.width) >= TOO_SMALL.len() {
+        1
+    } else {
+        2
+    };
+    frame.render_widget(
+        Paragraph::new(TOO_SMALL)
+            .centered()
+            .wrap(Wrap { trim: true }),
+        centered(screen, screen.width, rows),
+    );
+}
+
 fn draw_popup(frame: &mut Frame, popup: &Popup, screen: Rect) {
     let (title, width, height, lines) = match popup {
-        Popup::Help => (" Help ", 60, 18, help_lines()),
+        Popup::Help => {
+            let lines = help_lines();
+            let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
+            let height = lines.len() as u16 + 2;
+            (" Help ", width, height, lines)
+        }
         Popup::NewAgent(form) => (" New agent ", 56, 8, form_lines(form)),
         Popup::Rename { input, .. } => (
             " Rename ",
@@ -342,11 +374,17 @@ fn help_lines() -> Vec<Line<'static>> {
         let heading = Line::from(title).bold();
         let rows = keys
             .iter()
-            .map(|(key, action)| Line::from(format!("  {key:<8}{action}")));
+            .map(|(key, action)| Line::from(format!("  {key:<14}{action}")));
         std::iter::once(heading).chain(rows).collect::<Vec<_>>()
     };
     let mut lines = section("Sidebar", &SIDEBAR_KEYS);
+    lines.push(Line::default());
     lines.extend(section("Agent pane", &PANE_KEYS));
+    lines.extend(
+        PANE_NOTE
+            .iter()
+            .map(|note| Line::from(format!("  {note}")).dark_gray()),
+    );
     lines
 }
 
@@ -387,8 +425,12 @@ mod tests {
     use std::time::Instant;
 
     fn render(app: &App) -> (String, Buffer) {
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
-        let areas = areas(Rect::new(0, 0, 100, 30), app.projects.len());
+        render_at(app, 100, 30)
+    }
+
+    fn render_at(app: &App, width: u16, height: u16) -> (String, Buffer) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let areas = areas(Rect::new(0, 0, width, height), app.projects.len());
         terminal
             .draw(|f| draw(f, app, &areas, Instant::now(), 0))
             .expect("draw");
@@ -457,7 +499,11 @@ mod tests {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
         let (text, _) = render(&app);
-        assert!(text.contains("n new · x stop"), "{text}");
+        let status = text.lines().last().expect("status line");
+        assert!(
+            status.starts_with("? help · q quit · enter open · n new · x stop"),
+            "{status}"
+        );
         app.fail("boom happened");
         let (text, _) = render(&app);
         assert!(text.contains("boom happened"), "{text}");
@@ -491,6 +537,55 @@ mod tests {
         app.popup = Some(Popup::Help);
         let (text, _) = render(&app);
         assert!(text.contains(" Help ") && text.contains("ctrl-]"), "{text}");
+    }
+
+    #[test]
+    fn help_lists_every_binding_at_100x30() {
+        let mut app = App::new("/w".into(), "/bin/sh".into());
+        app.popup = Some(Popup::Help);
+        let (text, _) = render(&app);
+        for expected in [
+            "j/k ↑/↓",
+            "h/l ←/→",
+            "tab/shift-tab",
+            "enter ",
+            "n             new agent",
+            "x             stop agent",
+            "r             restart agent",
+            "d             remove agent",
+            "R             rename agent",
+            "a             add project",
+            "A             all agents",
+            "g             next agent needing input",
+            "?             help",
+            "q, ctrl-c",
+            "Q             stop the daemon and quit",
+            "ctrl-]        back to the sidebar",
+            "alt-[ alt-]   previous / next agent",
+            "legacy terminals",
+            "use ctrl-] then j/k",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}\n{text}");
+        }
+    }
+
+    #[test]
+    fn tiny_terminals_show_a_notice_instead_of_the_layout() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.popup = Some(Popup::Help);
+        let (text, _) = render_at(&app, 40, 6);
+        assert!(text.contains("terminal too small"), "{text}");
+        assert!(!text.contains(" Projects "), "{text}");
+        let (text, _) = render_at(&app, 10, 3);
+        assert!(
+            text.contains("terminal") && text.contains("too small"),
+            "{text}"
+        );
+        let _ = render_at(&app, 1, 1);
+        let _ = render_at(&app, 0, 0);
+        let (text, _) = render_at(&app, 46, 8);
+        assert!(text.contains(" Help "), "{text}");
     }
 
     #[test]
