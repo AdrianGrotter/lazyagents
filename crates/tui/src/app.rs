@@ -104,9 +104,10 @@ pub struct App {
     pub pane_size: Option<(u16, u16)>,
     pub message: Option<(String, Instant)>,
     pending_select: Option<(ProjectId, String)>,
-    #[allow(dead_code)]
+    subscribed_running: bool,
+    #[expect(dead_code)]
     cwd: PathBuf,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     shell: String,
 }
 
@@ -125,6 +126,7 @@ impl App {
             pane_size: None,
             message: None,
             pending_select: None,
+            subscribed_running: false,
             cwd,
             shell,
         }
@@ -183,8 +185,16 @@ impl App {
     pub fn apply_server(&mut self, message: ServerMessage) -> Vec<Effect> {
         match message {
             ServerMessage::AgentUpdated(info) => self.upsert_agent(info),
-            ServerMessage::AgentRemoved(id) => self.agents.retain(|a| a.id != id),
-            ServerMessage::ProjectsChanged(projects) => self.replace_projects(projects),
+            ServerMessage::AgentRemoved(id) => {
+                let selected = self.selected_agent().map(|a| a.id);
+                self.agents.retain(|a| a.id != id);
+                self.reselect(selected);
+            }
+            ServerMessage::ProjectsChanged(projects) => {
+                let selected = self.selected_agent().map(|a| a.id);
+                self.replace_projects(projects);
+                self.reselect(selected);
+            }
             ServerMessage::Frame(frame) => {
                 if Some(frame.agent) == self.subscribed {
                     self.screen.apply(&frame);
@@ -198,13 +208,15 @@ impl App {
 
     pub fn apply_response(&mut self, response: Response) -> Vec<Effect> {
         match response {
-            Response::Projects(projects) => self.replace_projects(projects),
+            Response::Projects(projects) => {
+                let selected = self.selected_agent().map(|a| a.id);
+                self.replace_projects(projects);
+                self.reselect(selected);
+            }
             Response::Agents(agents) => {
                 let selected = self.selected_agent().map(|a| a.id);
                 self.agents = agents;
-                if let Some(id) = selected {
-                    self.select_agent(id);
-                }
+                self.reselect(selected);
             }
             Response::Project(project) => {
                 if !self.projects.iter().any(|p| p.id == project.id) {
@@ -265,6 +277,12 @@ impl App {
         }
     }
 
+    fn reselect(&mut self, selected: Option<AgentId>) {
+        if let Some(id) = selected {
+            self.select_agent(id);
+        }
+    }
+
     fn select_agent(&mut self, id: AgentId) {
         let Some(project) = self.agents.iter().find(|a| a.id == id).map(|a| a.project) else {
             return;
@@ -287,10 +305,19 @@ impl App {
         if wanted.is_none() && self.focus == Focus::Pane {
             self.focus = Focus::Agents;
         }
+        let running = wanted.is_some_and(|(_, running)| running);
         if wanted.map(|(id, _)| id) == self.subscribed {
-            return Vec::new();
+            let started = running && !self.subscribed_running;
+            self.subscribed_running = running;
+            return match (wanted, self.pane_size) {
+                (Some((id, _)), Some((cols, rows))) if started => {
+                    vec![Effect::Send(Request::Resize { id, cols, rows })]
+                }
+                _ => Vec::new(),
+            };
         }
         self.subscribed = wanted.map(|(id, _)| id);
+        self.subscribed_running = running;
         self.screen = Screen::blank(0, 0);
         match wanted {
             Some((id, running)) => {
@@ -520,6 +547,108 @@ pub(crate) mod tests {
         assert_eq!(
             app.current_message(now + MESSAGE_TTL + Duration::from_millis(1)),
             None
+        );
+    }
+
+    #[test]
+    fn removing_another_agent_keeps_the_selection() {
+        let p = project("p");
+        let a = agent(&p, "a", Status::Idle);
+        let b = agent(&p, "b", Status::Idle);
+        let c = agent(&p, "c", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a.clone(), b.clone(), c]);
+        app.agent_index = 1;
+        let _ = app.apply_server(ServerMessage::AgentUpdated(b.clone()));
+        let effects = app.apply_server(ServerMessage::AgentRemoved(a.id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.subscribed, Some(b.id));
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn pending_select_selects_and_focuses_the_new_agent_via_update() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let (mut app, _) = loaded(vec![p.clone()], vec![a]);
+        app.pending_select = Some((p.id, "aaa".into()));
+        let new = agent(&p, "aaa", Status::Starting);
+        let effects = app.apply_server(ServerMessage::AgentUpdated(new.clone()));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(new.id));
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(app.pending_select, None);
+        assert_eq!(
+            effects,
+            vec![Effect::Send(Request::Subscribe { id: new.id })]
+        );
+    }
+
+    #[test]
+    fn pending_select_selects_and_focuses_the_new_agent_via_response() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let (mut app, _) = loaded(vec![p.clone()], vec![a]);
+        app.pending_select = Some((p.id, "aaa".into()));
+        let new = agent(&p, "aaa", Status::Starting);
+        let effects = app.apply_response(Response::Agent(new.clone()));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(new.id));
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(app.pending_select, None);
+        assert_eq!(
+            effects,
+            vec![Effect::Send(Request::Subscribe { id: new.id })]
+        );
+    }
+
+    #[test]
+    fn all_view_selection_moves_the_project_highlight() {
+        let p = project("p");
+        let q = project("q");
+        let b = agent(&q, "b", Status::Idle);
+        let (mut app, _) = loaded(
+            vec![p.clone(), q.clone()],
+            vec![agent(&p, "a", Status::Idle), b.clone()],
+        );
+        app.view = AgentView::All;
+        app.select_agent(b.id);
+        assert_eq!(app.project_index, 1);
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+    }
+
+    #[test]
+    fn projects_changed_reorder_keeps_the_selected_agent() {
+        let p = project("p");
+        let q = project("q");
+        let b = agent(&q, "b", Status::Idle);
+        let (mut app, _) = loaded(
+            vec![p.clone(), q.clone()],
+            vec![agent(&p, "a", Status::Idle), b.clone()],
+        );
+        app.view = AgentView::All;
+        app.select_agent(b.id);
+        let _ = app.apply_server(ServerMessage::AgentUpdated(b.clone()));
+        let effects = app.apply_server(ServerMessage::ProjectsChanged(vec![q, p]));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn selected_agent_starting_again_gets_resized() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Stopped);
+        let (mut app, _) = loaded(vec![p], vec![a.clone()]);
+        let _ = app.set_pane_size(80, 20);
+        let restarted = AgentInfo {
+            status: Status::Starting,
+            ..a.clone()
+        };
+        let effects = app.apply_server(ServerMessage::AgentUpdated(restarted));
+        assert_eq!(
+            effects,
+            vec![Effect::Send(Request::Resize {
+                id: a.id,
+                cols: 80,
+                rows: 20
+            })]
         );
     }
 }
