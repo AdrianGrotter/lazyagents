@@ -12,6 +12,7 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 
 - `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, tmux harness self-test, spike smoke run. The done gate.
 - `just fmt`, `just lint`, `just test`, `just test-hooks`
+- `lazyagents ls|new|kill|restart|rm|shutdown`: manage agents through the daemon (`cargo run -p lazyagents -- ...`). Tests set `LAZYAGENTS_STATE_DIR` to a temp dir and shut the daemon down.
 - `just spike [cmd...]`: the milestone-1 embedded-terminal spike (default command `claude`); runs from any directory.
 
 ## Layout
@@ -20,6 +21,7 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 |---|---|
 | `crates/protocol` | client↔daemon messages and framing |
 | `crates/daemon` | agents, PTYs, terminal emulation, persistence, git worktrees |
+| `crates/client` | connects to the daemon, starting it on demand; used by the CLI and the TUI |
 | `crates/tui` | ratatui client |
 | `crates/lazyagents` | the binary and CLI |
 | `spike/` | throwaway embedded-terminal spike; removed once the TUI replaces it |

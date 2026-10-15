@@ -1,24 +1,30 @@
 # Status detection
 
-Status: designed; the spike shows hook events from a real claude in its sidebar.
+Status: implemented in crates/daemon (status.rs, server.rs).
 
 ## Detection rules
 
 Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stopped`.
 
 - **Claude agents** are launched as
-  `claude --session-id <uuid> --settings <state>/hooks/<agent_id>.json` (first start) or
-  `claude --resume <uuid> --settings ...` (restart). The generated settings file only adds
+  `claude --session-id <uuid> --settings <state>/hooks/<agent_id>.json` or
+  `claude --resume <uuid> --settings ...`. The generated settings file only adds
   hooks; Claude Code merges it with the user's own settings. Each hook runs
   `lazyagents hook <event>` with `LAZYAGENTS_AGENT_ID` and `LAZYAGENTS_SOCKET` in the
   environment:
-  - `SessionStart` → `Idle` (also records the session id from the payload, so `/clear`
-    and similar don't break resume)
-  - `UserPromptSubmit`, `PreToolUse` → `Working`
+  - `SessionStart` → `Idle`
+  - `UserPromptSubmit`, `PreToolUse`, `PostToolUse` → `Working` (`PostToolUse` moves an
+    agent out of `NeedsInput` once an approved tool finishes)
   - `Notification` → `NeedsInput`
   - `Stop` → `Idle`
-- **Generic agents**: `Working` if output arrived in the last 2 s, otherwise `Idle`.
+- **Session rules**: every start uses a fresh `--session-id` until a prompt has been
+  submitted. `UserPromptSubmit` marks the agent resumable, and from then on restarts use
+  `--resume`. A `SessionStart` carrying a different session id (for example after
+  `/clear`) replaces the stored id and clears resumable. See
+  `docs/decisions/0006-resume-only-prompted-sessions.md`.
+- **Generic agents**: `Starting` until their first output, then `Working`; `Idle` after
+  2 s without output, `Working` again on new output.
+- **Not running**: input and hook events for exited or stopped agents are ignored.
 - **Both**: process exit → `Exited(code)`; agents loaded from disk at daemon start →
   `Stopped`.
-- The merge behaviour of `--settings` with user hooks is verified in the spike before
-  being relied on (see `docs/decisions/0003-status-via-claude-hooks.md`).
+- The merge behaviour of `--settings` with user hooks was verified in the spike (see `docs/decisions/0003-status-via-claude-hooks.md`).

@@ -1,6 +1,6 @@
 # Architecture
 
-Status: designed; the spike (milestone 1) exists, crates are skeletons until plan 2.
+Status: daemon, protocol, client and CLI implemented; the TUI lands in plan 3 (the spike is the interim UI).
 
 ## Purpose
 
@@ -18,15 +18,24 @@ One binary, `lazyagents`, in a Cargo workspace:
 |---|---|---|
 | `crates/protocol` | Message types, framing, protocol version | serde, postcard |
 | `crates/daemon` | Agent registry, PTYs, terminal emulation, input encoding, persistence, git worktrees, hook ingestion, status | protocol, portable-pty, alacritty_terminal, tokio |
+| `crates/client` | Connects to the daemon, starting it on demand; used by the CLI and the TUI | protocol, tokio |
 | `crates/tui` | ratatui client: layout, panels, popups, rendering of remote grids, input capture | protocol, ratatui, crossterm, tokio |
-| `crates/lazyagents` | Binary: CLI parsing, daemon auto-spawn, subcommand dispatch | all of the above, clap |
+| `crates/lazyagents` | Binary: CLI parsing and subcommand dispatch | daemon, client, protocol, clap |
 
 Subcommands:
 
-- `lazyagents` — run the TUI; spawn the daemon if its socket is missing or dead.
+- `lazyagents` — run the TUI (until it lands, prints help).
 - `lazyagents daemon` — run the daemon in the foreground (auto-spawn detaches it).
 - `lazyagents hook <event>` — invoked by Claude Code hooks; forwards the JSON payload
   on stdin to the daemon.
+- `lazyagents ls` — list projects and agents.
+- `lazyagents project add [path] [--name n]` / `project rm <project>` — register or
+  unregister a project.
+- `lazyagents new <name> [--project p] [--kind claude|generic] [-- cmd...]` — start an agent.
+- `lazyagents kill|restart|rm <agent>`, `lazyagents rename <agent> <name>`.
+- `lazyagents shutdown` — stop the daemon and every agent.
+
+Commands that talk to the daemon start it if its socket is missing or dead, except `shutdown`, which only connects to a running one.
 
 ### The daemon is the terminal
 
