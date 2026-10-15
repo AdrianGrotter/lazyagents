@@ -15,4 +15,7 @@ test:
 test-hooks:
     scripts/test-hooks.sh
 
-check: fmt-check lint test test-hooks
+test-harness:
+    scripts/test-harness.sh
+
+check: fmt-check lint test test-hooks test-harness
