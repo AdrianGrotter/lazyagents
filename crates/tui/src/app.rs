@@ -180,6 +180,12 @@ impl App {
             .map(|(message, _)| message.as_str())
     }
 
+    pub fn animating(&self) -> bool {
+        self.agents
+            .iter()
+            .any(|a| matches!(a.status, Status::Working | Status::Starting))
+    }
+
     pub fn fail(&mut self, message: impl Into<String>) {
         self.message = Some((message.into(), Instant::now()));
     }
