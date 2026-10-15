@@ -62,6 +62,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .create_dir()
         .with_context(|| format!("creating {}", paths.dir().display()))?;
     let _lock = InstanceLock::acquire(&paths.lock_file())?;
+    let mut terminate = signal(SignalKind::terminate()).context("handling SIGTERM")?;
+    let mut interrupt = signal(SignalKind::interrupt()).context("handling SIGINT")?;
     let socket = paths.socket();
     if socket.exists() {
         if UnixStream::connect(&socket).await.is_ok() {
@@ -90,8 +92,6 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let mut housekeeping = tokio::time::interval(HOUSEKEEPING);
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut busy_at = Instant::now();
-    let mut terminate = signal(SignalKind::terminate()).context("handling SIGTERM")?;
-    let mut interrupt = signal(SignalKind::interrupt()).context("handling SIGINT")?;
 
     loop {
         tokio::select! {
@@ -609,7 +609,7 @@ impl Daemon {
     }
 
     /// Terminates the process trees of the given running agents, then drops their
-    /// terminals; returns once every process is gone.
+    /// terminals.
     fn stop(&mut self, ids: &[AgentId], grace: Duration) {
         let roots: Vec<u32> = ids
             .iter()

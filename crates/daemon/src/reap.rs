@@ -8,14 +8,16 @@ use std::time::{Duration, Instant};
 use rustix::process::{Pid, Signal, kill_process, kill_process_group, test_kill_process};
 
 const POLL: Duration = Duration::from_millis(25);
+const KILL_WAIT: Duration = Duration::from_millis(500);
 
 pub fn descendants(root: u32) -> Vec<u32> {
     descendants_in(&process_table(), root)
 }
 
 /// Signals every root's process group and every process in the roots' trees, waits up
-/// to `grace` for them to exit, then SIGKILLs whatever is left. The trees are captured
-/// before any signal is sent, because a dying parent hands its children to init.
+/// to `grace` for them to exit, then SIGKILLs whatever is left and waits briefly for it
+/// to go. The trees are captured before any signal is sent, because a dying parent hands
+/// its children to init.
 pub fn terminate_tree(roots: &[u32], grace: Duration) {
     let roots: Vec<u32> = roots
         .iter()
@@ -40,16 +42,8 @@ pub fn terminate_tree(roots: &[u32], grace: Duration) {
     for &pid in &pids {
         signal(pid, Signal::TERM);
     }
-    let deadline = Instant::now() + grace;
-    loop {
-        pids.retain(|&pid| alive(pid));
-        if pids.is_empty() {
-            return;
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(POLL);
+    if wait_gone(&mut pids, grace) {
+        return;
     }
     tracing::warn!(?pids, "agent processes outlived SIGTERM; sending SIGKILL");
     for &pid in &pids {
@@ -57,6 +51,24 @@ pub fn terminate_tree(roots: &[u32], grace: Duration) {
     }
     for &root in &roots {
         signal_group(root, Signal::KILL);
+    }
+    if !wait_gone(&mut pids, KILL_WAIT) {
+        tracing::error!(?pids, "agent processes outlived SIGKILL");
+    }
+}
+
+/// Polls until every pid is gone or `limit` passes; leaves the survivors in `pids`.
+fn wait_gone(pids: &mut Vec<u32>, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        pids.retain(|&pid| alive(pid));
+        if pids.is_empty() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL);
     }
 }
 
