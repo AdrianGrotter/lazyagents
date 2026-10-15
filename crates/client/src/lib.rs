@@ -31,7 +31,27 @@ const TERMINAL_VARS: [&str; 13] = [
     "VSCODE_INJECTION",
 ];
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Response, String>>>>>;
+/// `None` once the connection is closed; no request can register after that.
+type Pending = Arc<Mutex<Option<HashMap<u64, oneshot::Sender<Result<Response, String>>>>>>;
+
+#[derive(Debug)]
+pub struct VersionMismatch {
+    pub daemon_version: String,
+    pub protocol_version: u32,
+}
+
+impl std::fmt::Display for VersionMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "daemon {} speaks protocol {}, this client speaks {PROTOCOL_VERSION}; \
+             stop it with `lazyagents shutdown` and retry",
+            self.daemon_version, self.protocol_version
+        )
+    }
+}
+
+impl std::error::Error for VersionMismatch {}
 
 pub struct Client {
     write: OwnedWriteHalf,
@@ -67,10 +87,12 @@ impl Client {
             Some(ServerMessage::Welcome {
                 protocol_version,
                 daemon_version,
-            }) => anyhow::bail!(
-                "daemon {daemon_version} speaks protocol {protocol_version}, this client speaks {PROTOCOL_VERSION}; \
-                 stop it with `lazyagents shutdown` and retry"
-            ),
+            }) => {
+                return Err(anyhow::Error::new(VersionMismatch {
+                    daemon_version,
+                    protocol_version,
+                }));
+            }
             other => anyhow::bail!("unexpected greeting from daemon: {other:?}"),
         }
         write_message(
@@ -81,14 +103,17 @@ impl Client {
         )
         .await?;
 
-        let pending: Pending = Arc::default();
+        let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
         let (events_tx, events) = mpsc::unbounded_channel();
         let reader_pending = Arc::clone(&pending);
         let reader = tokio::spawn(async move {
             while let Ok(Some(message)) = read_message::<_, ServerMessage>(&mut read).await {
                 match message {
                     ServerMessage::Response { id, result } => {
-                        let waiter = reader_pending.lock().ok().and_then(|mut p| p.remove(&id));
+                        let waiter = reader_pending
+                            .lock()
+                            .ok()
+                            .and_then(|mut p| p.as_mut()?.remove(&id));
                         if let Some(waiter) = waiter {
                             let _ = waiter.send(result);
                         }
@@ -99,6 +124,9 @@ impl Client {
                         }
                     }
                 }
+            }
+            if let Ok(mut pending) = reader_pending.lock() {
+                pending.take();
             }
         });
         Ok(Client {
@@ -113,7 +141,7 @@ impl Client {
     pub async fn connect_or_spawn(paths: &StatePaths, exe: &Path) -> anyhow::Result<Client> {
         match Client::connect(paths).await {
             Ok(client) => return Ok(client),
-            Err(e) if e.to_string().contains("protocol") => return Err(e),
+            Err(e) if e.downcast_ref::<VersionMismatch>().is_some() => return Err(e),
             Err(_) => {}
         }
         std::fs::create_dir_all(paths.dir())?;
@@ -140,6 +168,8 @@ impl Client {
         self.pending
             .lock()
             .map_err(|_| anyhow::anyhow!("client state poisoned"))?
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("daemon closed the connection"))?
             .insert(id, tx);
         write_message(&mut self.write, &ClientMessage::Request { id, request }).await?;
         match rx.await {

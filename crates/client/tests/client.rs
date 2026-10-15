@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use client::Client;
+use protocol::PROTOCOL_VERSION;
 use protocol::{
     ClientMessage, Request, Response, ServerMessage, StatePaths, read_message, write_message,
 };
@@ -75,6 +76,11 @@ async fn version_mismatch_is_reported() {
     });
     let err = Client::connect(&paths).await.err().expect("mismatch");
     assert!(err.to_string().contains("protocol"), "{err}");
+    assert!(err.to_string().contains("lazyagents shutdown"), "{err}");
+    assert!(
+        err.downcast_ref::<client::VersionMismatch>().is_some(),
+        "{err}"
+    );
     fake.abort();
 }
 
@@ -82,4 +88,43 @@ async fn version_mismatch_is_reported() {
 async fn connect_without_daemon_fails_fast() {
     let dir = tempfile::tempdir().expect("tempdir");
     assert!(Client::connect(&StatePaths::new(dir.path())).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_fail_when_the_daemon_goes_away() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path());
+    let listener = UnixListener::bind(paths.socket()).expect("bind");
+    let fake = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        write_message(
+            &mut stream,
+            &ServerMessage::Welcome {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_version: "test".into(),
+            },
+        )
+        .await
+        .expect("welcome");
+        let _: Option<ClientMessage> = read_message(&mut stream).await.expect("hello");
+        let _: Option<ClientMessage> = read_message(&mut stream).await.expect("request");
+    });
+    let mut client = Client::connect(&paths).await.expect("connect");
+    let first = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.request(Request::ListProjects),
+    )
+    .await
+    .expect("first request must not hang")
+    .expect_err("daemon went away");
+    assert!(first.to_string().contains("closed"), "{first}");
+    let second = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.request(Request::ListProjects),
+    )
+    .await
+    .expect("second request must not hang")
+    .expect_err("still closed");
+    assert!(second.to_string().contains("closed"), "{second}");
+    fake.await.expect("fake server");
 }
