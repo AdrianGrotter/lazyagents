@@ -41,8 +41,9 @@ After `ctrl-q`, one more key picks a pane action:
 
 While the prefix waits for its second key the status bar shows `ctrl-q …`. Any other key
 after `ctrl-q` cancels the prefix, reaches nobody, and the status bar lists the prefix
-keys. Switching onto an agent that is not running returns focus to the sidebar, and a
-pending prefix is dropped whenever focus leaves the pane.
+keys. Switching onto an agent that is not running returns focus to the sidebar. A
+pending prefix is dropped whenever focus leaves the pane, and when a paste arrives; the
+paste still reaches the agent.
 
 `ctrl-]` is an alias that goes straight back to the sidebar; legacy terminals report it as
 `ctrl-5`, which works too. `alt-[` and `alt-]` are not bound: they reach the agent like

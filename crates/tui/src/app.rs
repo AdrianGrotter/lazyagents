@@ -514,6 +514,7 @@ impl App {
             return Vec::new();
         }
         if self.popup.is_none() {
+            self.prefix_pending = false;
             return match (self.focus, self.selected_agent()) {
                 (Focus::Pane, Some(agent)) => {
                     vec![Effect::Send(Request::Input {
@@ -1441,6 +1442,45 @@ pub(crate) mod tests {
             app.on_key(key('j')),
             vec![char_input(a.id, 'j', protocol::Modifiers::NONE)]
         );
+    }
+
+    #[test]
+    fn bare_esc_and_ctrl_c_reach_the_agent() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(
+            app.on_key(code(KeyCode::Esc)),
+            vec![input_key(
+                a.id,
+                protocol::Key::new(protocol::KeyCode::Esc, protocol::Modifiers::NONE)
+            )]
+        );
+        assert_eq!(
+            app.on_key(ctrl('c')),
+            vec![char_input(a.id, 'c', protocol::Modifiers::CTRL)]
+        );
+        assert_eq!(app.focus, Focus::Pane);
+        assert!(!app.prefix_pending);
+    }
+
+    #[test]
+    fn paste_with_the_prefix_pending_goes_to_the_agent_and_clears_it() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(ctrl('q'));
+        assert_eq!(
+            app.on_paste("text".into()),
+            vec![Effect::Send(Request::Input {
+                id: a.id,
+                event: InputEvent::Paste("text".into())
+            })]
+        );
+        assert!(!app.prefix_pending);
+        assert_eq!(
+            app.on_key(key('j')),
+            vec![char_input(a.id, 'j', protocol::Modifiers::NONE)]
+        );
+        assert_eq!(app.focus, Focus::Pane);
     }
 
     #[test]
