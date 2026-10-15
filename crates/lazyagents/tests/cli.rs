@@ -510,3 +510,54 @@ fn shutdown_explains_how_to_stop_a_mismatched_daemon() {
     assert!(stderr.contains("protocol 999"), "{stderr}");
     assert!(stderr.contains("stop it with: kill 4242"), "{stderr}");
 }
+
+#[test]
+fn daemon_that_dies_at_startup_fails_fast() {
+    let parent = tempfile::tempdir().expect("parent");
+    let state = parent.path().join("s".repeat(110));
+    let started = Instant::now();
+    let out = Command::new(BIN)
+        .arg("ls")
+        .env("LAZYAGENTS_STATE_DIR", &state)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lazyagents");
+    let took = started.elapsed();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr.contains(&format!(
+            "daemon exited during startup; see {}",
+            state.join("daemon.log").display()
+        )),
+        "{stderr}"
+    );
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+}
+
+#[test]
+fn daemon_does_not_inherit_claude_code_variables() {
+    let env = TestEnv::new();
+    let dump = env.project.path().join("env");
+    env.run_with_env(
+        &[
+            "new",
+            "dump",
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "env > '{}.tmp'; mv '{0}.tmp' '{0}'; sleep 30",
+                dump.display()
+            ),
+        ],
+        &[("CLAUDECODE", "1"), ("CLAUDE_CODE_ENTRYPOINT", "cli")],
+    );
+    let vars = wait_for_file(&dump);
+    assert!(vars.contains("LAZYAGENTS_AGENT_ID="), "{vars}");
+    let leaked: Vec<&str> = vars
+        .lines()
+        .filter(|line| line.starts_with("CLAUDECODE=") || line.starts_with("CLAUDE_CODE_"))
+        .collect();
+    assert!(leaked.is_empty(), "{leaked:?}");
+}

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -147,20 +147,10 @@ impl Client {
         paths
             .create_dir()
             .with_context(|| format!("creating {}", paths.dir().display()))?;
-        spawn_daemon(paths, exe).context("starting the daemon")?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match Client::connect(paths).await {
-                Ok(client) => return Ok(client),
-                Err(e) if tokio::time::Instant::now() >= deadline => {
-                    return Err(e.context(format!(
-                        "daemon did not start; see {}",
-                        paths.log_file().display()
-                    )));
-                }
-                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
-            }
-        }
+        let mut daemon = spawn_daemon(paths, exe).context("starting the daemon")?;
+        let result = wait_for_daemon(paths, &mut daemon).await;
+        std::thread::spawn(move || daemon.wait());
+        result
     }
 
     pub async fn request(&mut self, request: Request) -> anyhow::Result<Response> {
@@ -186,6 +176,43 @@ impl Client {
     }
 }
 
+async fn wait_for_daemon(paths: &StatePaths, daemon: &mut Child) -> anyhow::Result<Client> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let error = match Client::connect(paths).await {
+            Ok(client) => return Ok(client),
+            Err(e) => e,
+        };
+        if error.downcast_ref::<VersionMismatch>().is_some() {
+            return Err(error);
+        }
+        if daemon.try_wait()?.is_some() && !other_daemon_running(paths, daemon.id()) {
+            anyhow::bail!(
+                "daemon exited during startup; see {}",
+                paths.log_file().display()
+            );
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(error.context(format!(
+                "daemon did not start; see {}",
+                paths.log_file().display()
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// True when another daemon holds the lock, as when a concurrent client started one first.
+fn other_daemon_running(paths: &StatePaths, ours: u32) -> bool {
+    daemon_pid(paths).is_some_and(|pid| {
+        pid != ours
+            && i32::try_from(pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+                .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+    })
+}
+
 /// The pid the running daemon recorded in its lock file.
 pub fn daemon_pid(paths: &StatePaths) -> Option<u32> {
     std::fs::read_to_string(paths.lock_file())
@@ -195,13 +222,16 @@ pub fn daemon_pid(paths: &StatePaths) -> Option<u32> {
         .ok()
 }
 
-pub fn spawn_daemon(paths: &StatePaths, exe: &Path) -> std::io::Result<()> {
+/// Starts `exe daemon` detached from the caller's terminal, directory and Claude Code
+/// session, so agents it spawns do not look nested inside the caller's Claude.
+pub fn spawn_daemon(paths: &StatePaths, exe: &Path) -> std::io::Result<Child> {
     use std::os::unix::process::CommandExt;
 
-    let mut command = Command::new(exe);
+    let mut command = Command::new(std::path::absolute(exe)?);
     command
         .arg("daemon")
-        .env("LAZYAGENTS_STATE_DIR", paths.dir())
+        .env("LAZYAGENTS_STATE_DIR", std::path::absolute(paths.dir())?)
+        .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -209,5 +239,13 @@ pub fn spawn_daemon(paths: &StatePaths, exe: &Path) -> std::io::Result<()> {
     for var in TERMINAL_VARS {
         command.env_remove(var);
     }
-    command.spawn().map(drop)
+    for (name, _) in std::env::vars_os() {
+        let claude = name
+            .to_str()
+            .is_some_and(|name| name == "CLAUDECODE" || name.starts_with("CLAUDE_CODE_"));
+        if claude {
+            command.env_remove(name);
+        }
+    }
+    command.spawn()
 }

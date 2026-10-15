@@ -129,3 +129,77 @@ async fn requests_fail_when_the_daemon_goes_away() {
     assert!(second.to_string().contains("closed"), "{second}");
     fake.await.expect("fake server");
 }
+
+fn is_zombie_or_alive(pid: &str) -> bool {
+    std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .is_ok_and(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spawned_daemon_is_reaped_after_it_exits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path().join("state"));
+    let pidfile = dir.path().join("pid");
+    let exe = dir.path().join("fake-daemon");
+    std::fs::write(
+        &exe,
+        format!("#!/bin/sh\necho $$ > '{}'\nsleep 0.5\n", pidfile.display()),
+    )
+    .expect("fake daemon");
+    std::fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    let socket = paths.socket();
+    let fake = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let listener = UnixListener::bind(socket).expect("bind");
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        write_message(
+            &mut stream,
+            &ServerMessage::Welcome {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_version: "test".into(),
+            },
+        )
+        .await
+        .expect("welcome");
+        let _: Option<ClientMessage> = read_message(&mut stream).await.ok().flatten();
+    });
+    let client = Client::connect_or_spawn(&paths, &exe)
+        .await
+        .expect("connect");
+    let pid = std::fs::read_to_string(&pidfile).expect("pid");
+    let pid = pid.trim();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while is_zombie_or_alive(pid) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!is_zombie_or_alive(pid), "daemon {pid} was never reaped");
+    drop(client);
+    fake.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_exiting_at_startup_fails_fast() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path());
+    let exe = dir.path().join("fake-daemon");
+    std::fs::write(&exe, "#!/bin/sh\nexit 3\n").expect("fake daemon");
+    std::fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    let started = std::time::Instant::now();
+    let err = Client::connect_or_spawn(&paths, &exe)
+        .await
+        .err()
+        .expect("no daemon");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        err.to_string().contains("daemon exited during startup"),
+        "{err:#}"
+    );
+}

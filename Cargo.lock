@@ -296,6 +296,7 @@ dependencies = [
  "anyhow",
  "daemon",
  "protocol",
+ "rustix",
  "tempfile",
  "tokio",
 ]
