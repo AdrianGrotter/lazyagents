@@ -94,3 +94,95 @@ fn git_reply(id: AgentId, diff: bool, result: Result<Response, String>) -> Incom
         Incoming::GitStat { id, result }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::{ClientMessage, PROTOCOL_VERSION, StatePaths, read_message, write_message};
+    use std::time::Duration;
+    use tokio::net::UnixListener;
+
+    #[test]
+    fn git_replies_of_the_wrong_kind_become_errors() {
+        let id = AgentId::random();
+        let stat = git_reply(id, false, Ok(Response::Diff("+x".into())));
+        assert!(
+            matches!(&stat, Incoming::GitStat { id: got, result: Err(e) } if *got == id && e.contains("unexpected")),
+            "{stat:?}"
+        );
+        let diff = git_reply(id, true, Ok(Response::Diff("+x".into())));
+        assert!(
+            matches!(&diff, Incoming::Diff { result: Ok(text), .. } if text == "+x"),
+            "{diff:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn git_errors_arrive_tagged_and_never_as_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = StatePaths::new(dir.path());
+        let listener = UnixListener::bind(paths.socket()).expect("bind");
+        let fake = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            write_message(
+                &mut stream,
+                &ServerMessage::Welcome {
+                    protocol_version: PROTOCOL_VERSION,
+                    daemon_version: "test".into(),
+                },
+            )
+            .await
+            .expect("welcome");
+            let _: Option<ClientMessage> = read_message(&mut stream).await.expect("hello");
+            while let Ok(Some(ClientMessage::Request { id, request })) =
+                read_message(&mut stream).await
+            {
+                let error = match request {
+                    Request::GitStat { .. } => "stat failed",
+                    Request::GitDiff { .. } => "diff failed",
+                    _ => "list failed",
+                };
+                let reply = ServerMessage::Response {
+                    id,
+                    result: Err(error.into()),
+                };
+                write_message(&mut stream, &reply).await.expect("reply");
+            }
+        });
+        let client = Client::connect(&paths).await.expect("connect");
+        let (requests, mut incoming) = spawn(client);
+        let agent = AgentId::random();
+        for request in [
+            Request::GitStat { id: agent },
+            Request::GitDiff { id: agent },
+            Request::ListAgents,
+        ] {
+            requests.send(request).expect("send");
+        }
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let message = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+                .await
+                .expect("reply in time")
+                .expect("open");
+            seen.push(format!("{message:?}"));
+            match message {
+                Incoming::GitStat { id, result } => {
+                    assert_eq!((id, result), (agent, Err("stat failed".into())));
+                }
+                Incoming::Diff { id, result } => {
+                    assert_eq!((id, result), (agent, Err("diff failed".into())));
+                }
+                Incoming::Failed(message) => assert_eq!(message, "list failed"),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(
+            seen.iter().filter(|m| m.starts_with("Failed")).count(),
+            1,
+            "{seen:?}"
+        );
+        drop(requests);
+        fake.await.expect("fake server");
+    }
+}

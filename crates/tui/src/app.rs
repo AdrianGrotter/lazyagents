@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,7 @@ pub const MESSAGE_TTL: Duration = Duration::from_secs(5);
 pub const MIN_PANE: (u16, u16) = (20, 5);
 pub const STAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const DIFF_LINE_CAP: usize = 20_000;
+pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DIRTY_WORKTREE: &str = "worktree has uncommitted changes";
 const DIRTY_FILES_SHOWN: usize = 8;
 
@@ -179,7 +180,8 @@ pub struct App {
     pub message: Option<(String, Instant)>,
     pub git_stats: HashMap<AgentId, GitStat>,
     pub diff: Option<DiffView>,
-    stats_in_flight: HashSet<AgentId>,
+    stats_in_flight: HashMap<AgentId, Instant>,
+    diffs_in_flight: HashMap<AgentId, Instant>,
     stat_polled: Option<(AgentId, Instant)>,
     pending_remove: Option<AgentId>,
     pending_select: Option<PendingCreate>,
@@ -213,7 +215,8 @@ impl App {
             message,
             git_stats: HashMap::new(),
             diff: None,
-            stats_in_flight: HashSet::new(),
+            stats_in_flight: HashMap::new(),
+            diffs_in_flight: HashMap::new(),
             stat_polled: None,
             pending_remove: None,
             pending_select: None,
@@ -304,8 +307,12 @@ impl App {
     }
 
     /// Asks for the selected agent's git stat when the selection changed, and then every
-    /// `STAT_INTERVAL`, with at most one request per agent in flight.
+    /// `STAT_INTERVAL`, with at most one request per agent in flight. A git request
+    /// unanswered for `GIT_TIMEOUT` no longer counts as in flight.
     pub fn on_tick(&mut self, now: Instant) -> Vec<Effect> {
+        let fresh = |sent: &mut Instant| now.saturating_duration_since(*sent) < GIT_TIMEOUT;
+        self.stats_in_flight.retain(|_, sent| fresh(sent));
+        self.diffs_in_flight.retain(|_, sent| fresh(sent));
         let Some(id) = self.selected_agent().map(|a| a.id) else {
             self.stat_polled = None;
             return Vec::new();
@@ -320,9 +327,10 @@ impl App {
             return Vec::new();
         }
         self.stat_polled = Some((id, now));
-        if !self.stats_in_flight.insert(id) {
+        if self.stats_in_flight.contains_key(&id) {
             return Vec::new();
         }
+        self.stats_in_flight.insert(id, now);
         vec![Effect::Send(Request::GitStat { id })]
     }
 
@@ -343,6 +351,7 @@ impl App {
     }
 
     pub fn apply_diff(&mut self, id: AgentId, result: Result<String, String>) {
+        self.diffs_in_flight.remove(&id);
         let Some(view) = self
             .diff
             .as_mut()
@@ -367,7 +376,8 @@ impl App {
     fn forget_gone_agents(&mut self) {
         let exists = |id: &AgentId| self.agents.iter().any(|a| a.id == *id);
         self.git_stats.retain(|id, _| exists(id));
-        self.stats_in_flight.retain(exists);
+        self.stats_in_flight.retain(|id, _| exists(id));
+        self.diffs_in_flight.retain(|id, _| exists(id));
     }
 
     pub fn apply_server(&mut self, message: ServerMessage) -> Vec<Effect> {
@@ -645,10 +655,7 @@ impl App {
         }
         match self.focus {
             Focus::Pane => self.on_pane_key(key),
-            Focus::Diff => {
-                self.on_diff_key(key);
-                Vec::new()
-            }
+            Focus::Diff => self.on_diff_key(key),
             Focus::Projects | Focus::Agents => self.on_sidebar_key(key),
         }
     }
@@ -665,10 +672,18 @@ impl App {
         usize::from(self.pane_size.map_or(DEFAULT_SIZE.1, |(_, rows)| rows)).max(1)
     }
 
-    fn on_diff_key(&mut self, key: KeyEvent) {
-        if self.closes_diff(&key) {
+    /// Closes the view or quits; `None` for any other key.
+    fn leave_diff(&mut self, key: &KeyEvent) -> Option<Vec<Effect>> {
+        if self.closes_diff(key) {
             self.close_diff();
-            return;
+            return Some(Vec::new());
+        }
+        (self.keymap.sidebar(key) == Some(Action::Quit)).then(|| vec![Effect::Quit])
+    }
+
+    fn on_diff_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if let Some(effects) = self.leave_diff(&key) {
+            return effects;
         }
         let page = self.diff_page() as i64;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -681,9 +696,10 @@ impl App {
             (KeyCode::PageUp, _) => -page,
             (KeyCode::Char('g'), false) => i64::MIN / 2,
             (KeyCode::Char('G'), false) => i64::MAX / 2,
-            _ => return,
+            _ => return Vec::new(),
         };
         self.scroll_diff(step);
+        Vec::new()
     }
 
     fn scroll_diff(&mut self, step: i64) {
@@ -702,10 +718,7 @@ impl App {
     /// followed by a leave key (leave the pane) act; no key reaches an agent.
     fn on_too_small_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         if self.focus == Focus::Diff {
-            if self.closes_diff(&key) {
-                self.close_diff();
-            }
-            return Vec::new();
+            return self.leave_diff(&key).unwrap_or_default();
         }
         if self.focus == Focus::Pane {
             if std::mem::take(&mut self.prefix_pending) {
@@ -904,6 +917,10 @@ impl App {
                         scroll: 0,
                     });
                     self.focus = Focus::Diff;
+                    if self.diffs_in_flight.contains_key(&id) {
+                        return Vec::new();
+                    }
+                    self.diffs_in_flight.insert(id, Instant::now());
                     return vec![Effect::Send(Request::GitDiff { id })];
                 }
             }
@@ -1215,12 +1232,7 @@ fn force_prompt(files: &str) -> String {
         .filter(|line| !line.trim().is_empty())
         .collect();
     let mut lines = vec!["Worktree has uncommitted changes:".to_string()];
-    lines.extend(
-        files
-            .iter()
-            .take(DIRTY_FILES_SHOWN)
-            .map(ToString::to_string),
-    );
+    lines.extend(files.iter().take(DIRTY_FILES_SHOWN).map(|f| printable(f)));
     if files.len() > DIRTY_FILES_SHOWN {
         lines.push(format!("… and {} more", files.len() - DIRTY_FILES_SHOWN));
     }
@@ -1228,20 +1240,19 @@ fn force_prompt(files: &str) -> String {
     lines.join("\n")
 }
 
-/// Splits a diff into display lines, at most `DIFF_LINE_CAP` plus a truncation notice.
-/// Tabs become spaces and other control characters are dropped, so file contents
+/// Tabs become spaces and other control characters are dropped, so text from files
 /// cannot move the cursor or restyle the terminal.
+fn printable(line: &str) -> String {
+    line.replace('\t', "    ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
+/// Splits a diff into printable display lines, at most `DIFF_LINE_CAP` plus a truncation
+/// notice.
 fn diff_lines(text: &str) -> Vec<String> {
-    let mut lines: Vec<String> = text
-        .lines()
-        .take(DIFF_LINE_CAP)
-        .map(|line| {
-            line.replace('\t', "    ")
-                .chars()
-                .filter(|c| !c.is_control())
-                .collect()
-        })
-        .collect();
+    let mut lines: Vec<String> = text.lines().take(DIFF_LINE_CAP).map(printable).collect();
     let rest = text.lines().skip(DIFF_LINE_CAP).count();
     if rest > 0 {
         lines.push(format!("… diff truncated ({rest} more lines)"));
@@ -2748,8 +2759,42 @@ pub(crate) mod tests {
         app.apply_git_stat(b.id, Ok(stat(1)));
         assert_eq!(app.git_stats.get(&b.id), None);
 
-        let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
-        assert!(app.on_tick(at(30)).is_empty());
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        assert!(app.on_tick(at(16)).is_empty(), "polled a at 12");
+        assert_eq!(app.on_tick(at(17)), ask(a.id));
+    }
+
+    #[test]
+    fn unanswered_stat_is_given_up_after_30s() {
+        let (mut app, a, _) = two_agents();
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let ask = vec![Effect::Send(Request::GitStat { id: a.id })];
+        assert_eq!(app.on_tick(t0), ask);
+        for secs in [5, 10, 15, 20, 25, 29] {
+            assert!(app.on_tick(at(secs)).is_empty(), "{secs}s");
+        }
+        assert_eq!(app.on_tick(at(30)), ask);
+        assert!(app.on_tick(at(35)).is_empty(), "the retry is in flight");
+        app.apply_git_stat(a.id, Ok(stat(2)));
+        assert_eq!(app.git_stats.get(&a.id), Some(&stat(2)));
+    }
+
+    #[test]
+    fn force_prompt_strips_control_characters_from_file_names() {
+        let p = project("p");
+        let wt = worktree_agent(&p, "wt");
+        let (mut app, _) = loaded(vec![p], vec![wt]);
+        let _ = app.on_key(key('d'));
+        let _ = app.on_key(key('y'));
+        app.request_failed("worktree has uncommitted changes:\nevil\u{1b}[2J\u{7}.txt\ntab\there");
+        let Some(Popup::Confirm { prompt, .. }) = &app.popup else {
+            panic!("no confirm: {:?}", app.popup);
+        };
+        assert_eq!(
+            prompt,
+            "Worktree has uncommitted changes:\nevil[2J.txt\ntab    here\nRemove anyway? y/n"
+        );
     }
 
     #[test]
@@ -2911,6 +2956,7 @@ pub(crate) mod tests {
             assert_eq!(app.diff, None, "{close:?}");
             assert!(!app.prefix_pending);
             open_diff(&mut app, a.id);
+            app.apply_diff(a.id, Ok(String::new()));
         }
         app.apply_diff(a.id, Ok("+late".into()));
         let _ = app.on_key(key('q'));
@@ -2926,6 +2972,50 @@ pub(crate) mod tests {
         let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
         assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+    }
+
+    #[test]
+    fn diff_is_requested_once_while_loading() {
+        let (mut app, a, b) = two_agents();
+        open_diff(&mut app, a.id);
+        let _ = app.on_key(key('q'));
+        assert!(app.on_key(key('D')).is_empty(), "a's diff is still loading");
+        assert_eq!(app.focus, Focus::Diff);
+        assert_eq!(app.diff.as_ref().map(|d| d.agent), Some(a.id));
+        app.apply_diff(a.id, Ok("+one".into()));
+        assert_eq!(
+            app.diff.as_ref().and_then(|d| d.lines.clone()),
+            Some(vec!["+one".to_string()])
+        );
+        let _ = app.on_key(key('q'));
+        open_diff(&mut app, a.id);
+        let _ = app.on_key(key('q'));
+        let _ = app.on_key(key('j'));
+        open_diff(&mut app, b.id);
+    }
+
+    #[test]
+    fn unanswered_diff_is_given_up_after_30s() {
+        let (mut app, a, _) = two_agents();
+        let t0 = Instant::now();
+        open_diff(&mut app, a.id);
+        let _ = app.on_key(key('q'));
+        let _ = app.on_tick(t0 + Duration::from_secs(29));
+        assert!(app.on_key(key('D')).is_empty());
+        let _ = app.on_key(key('q'));
+        let _ = app.on_tick(t0 + Duration::from_secs(31));
+        open_diff(&mut app, a.id);
+    }
+
+    #[test]
+    fn quit_keys_quit_from_the_diff_view() {
+        let (mut app, a, _) = two_agents();
+        open_diff(&mut app, a.id);
+        assert_eq!(app.on_key(ctrl('c')), vec![Effect::Quit]);
+        let _ = app.set_pane_size(10, 3);
+        assert_eq!(app.on_key(ctrl('c')), vec![Effect::Quit]);
+        assert!(app.on_key(key('q')).is_empty());
+        assert_eq!(app.focus, Focus::Agents);
     }
 
     #[test]

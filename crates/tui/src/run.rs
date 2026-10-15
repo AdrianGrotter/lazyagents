@@ -107,13 +107,13 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
     let (input_tx, mut input) = mpsc::unbounded_channel();
     std::thread::spawn(move || read_terminal(&input_tx));
 
-    let mut layout = ui::areas(Rect::default(), 0);
+    let mut layout = ui::areas(Rect::default(), 0, 0);
     let mut redraw = true;
     let mut message_shown = false;
     loop {
         if redraw {
             let size = guard.terminal.size()?;
-            layout = ui::areas(Rect::new(0, 0, size.width, size.height), app.projects.len());
+            layout = ui::layout(Rect::new(0, 0, size.width, size.height), &app);
             send_all(
                 &requests,
                 app.set_pane_size(layout.pane_inner.width, layout.pane_inner.height),

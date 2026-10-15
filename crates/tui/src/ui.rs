@@ -64,12 +64,29 @@ pub struct Areas {
     pub status: Rect,
 }
 
-pub fn areas(area: Rect, project_count: usize) -> Areas {
+const INFO_MIN_HEIGHT: u16 = 6;
+const AGENTS_MIN_HEIGHT: u16 = 8;
+
+pub fn layout(area: Rect, app: &App) -> Areas {
+    areas(area, app.projects.len(), info_lines(app).len())
+}
+
+/// The Info box fits `info_lines` lines, but never takes the Agents box below
+/// `AGENTS_MIN_HEIGHT` rows to do so; it keeps `INFO_MIN_HEIGHT` rows while they fit.
+pub fn areas(area: Rect, project_count: usize, info_lines: usize) -> Areas {
     let body_height = area.height.saturating_sub(1);
     let status = Rect::new(area.x, area.y + body_height, area.width, area.height.min(1));
     let sidebar_width = (area.width / 4).clamp(24, 40).min(area.width);
     let projects_height = (project_count.clamp(1, 6) as u16 + 2).min(body_height);
-    let info_height = 6.min(body_height - projects_height);
+    let below_projects = body_height - projects_height;
+    let wanted = u16::try_from(info_lines)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .max(INFO_MIN_HEIGHT);
+    let room = below_projects
+        .saturating_sub(AGENTS_MIN_HEIGHT)
+        .max(INFO_MIN_HEIGHT);
+    let info_height = wanted.min(room).min(below_projects);
     let agents_height = body_height - projects_height - info_height;
     let projects = Rect::new(area.x, area.y, sidebar_width, projects_height);
     let agents = Rect::new(area.x, projects.bottom(), sidebar_width, agents_height);
@@ -265,9 +282,10 @@ fn kind_label(kind: AgentKind) -> &'static str {
     }
 }
 
-/// Git lines come right after the status, since the panel clips what does not fit.
-fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
-    let lines: Vec<String> = match (app.selected_agent(), app.selected_project()) {
+/// Git lines come right after the status, so they stay visible when a short terminal
+/// clips the panel.
+pub fn info_lines(app: &App) -> Vec<String> {
+    match (app.selected_agent(), app.selected_project()) {
         (Some(agent), _) => {
             let command = if agent.command.is_empty() {
                 "claude".to_string()
@@ -294,8 +312,11 @@ fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
         }
         (None, Some(project)) => vec![format!("path: {}", project.path.display())],
         (None, None) => Vec::new(),
-    };
-    let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
+    }
+}
+
+fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
+    let text: Vec<Line> = info_lines(app).into_iter().map(Line::from).collect();
     let block = block(" Info ", false, &app.theme);
     frame.render_widget(Paragraph::new(text).block(block), area);
 }
@@ -351,7 +372,7 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     }
 }
 
-fn diff_text(view: &DiffView, theme: &Theme, height: u16) -> Paragraph<'static> {
+fn diff_text<'a>(view: &'a DiffView, theme: &Theme, height: u16) -> Paragraph<'a> {
     let Some(lines) = &view.lines else {
         return Paragraph::new("loading diff…").fg(theme.dim);
     };
@@ -374,7 +395,7 @@ fn diff_text(view: &DiffView, theme: &Theme, height: u16) -> Paragraph<'static> 
         } else {
             Style::new()
         };
-        Line::styled(line.clone(), style)
+        Line::styled(line.as_str(), style)
     });
     Paragraph::new(styled.collect::<Vec<_>>())
 }
@@ -595,7 +616,7 @@ mod tests {
 
     fn render_at(app: &App, width: u16, height: u16) -> (String, Buffer) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-        let areas = areas(Rect::new(0, 0, width, height), app.projects.len());
+        let areas = layout(Rect::new(0, 0, width, height), app);
         terminal
             .draw(|f| draw(f, app, &areas, Instant::now(), 0))
             .expect("draw");
@@ -923,7 +944,7 @@ mod tests {
             ],
         );
         let (_, buffer) = render(&app);
-        let layout = areas(Rect::new(0, 0, 100, 30), 1);
+        let layout = layout(Rect::new(0, 0, 100, 30), &app);
         let fg = |(x, y): (u16, u16)| buffer[(x, y)].fg;
         assert_eq!(fg((layout.agents.x, layout.agents.y)), Color::Blue);
         assert_eq!(fg((layout.projects.x, layout.projects.y)), Color::Gray);
@@ -1044,7 +1065,7 @@ mod tests {
         };
         let info = |app: &App| {
             let (text, _) = render(app);
-            let layout = areas(Rect::new(0, 0, 100, 30), app.projects.len());
+            let layout = layout(Rect::new(0, 0, 100, 30), app);
             text.lines()
                 .skip(usize::from(layout.info.y))
                 .take(usize::from(layout.info.height))
@@ -1146,7 +1167,7 @@ mod tests {
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
         open_diff(&mut app, SAMPLE_DIFF);
         let (text, buffer) = render(&app);
-        let layout = areas(Rect::new(0, 0, 100, 30), 1);
+        let layout = layout(Rect::new(0, 0, 100, 30), &app);
         let at = |needle: &str| {
             let y = text
                 .lines()
@@ -1202,12 +1223,69 @@ mod tests {
 
     #[test]
     fn layout_reserves_status_row_and_sidebar() {
-        let a = areas(Rect::new(0, 0, 100, 30), 2);
+        let a = areas(Rect::new(0, 0, 100, 30), 2, 4);
         assert_eq!(a.status, Rect::new(0, 29, 100, 1));
         assert_eq!(a.projects.width, 25);
         assert_eq!(a.projects.height, 4);
         assert_eq!(a.info.height, 6);
         assert_eq!(a.pane.x, 25);
         assert_eq!(a.pane_inner, Rect::new(26, 1, 73, 27));
+        assert_eq!(areas(Rect::new(0, 0, 100, 30), 2, 1).info.height, 6);
+    }
+
+    #[test]
+    fn info_panel_fits_its_content_and_shrinks_on_short_terminals() {
+        let tall = areas(Rect::new(0, 0, 100, 30), 2, 7);
+        assert_eq!((tall.info.height, tall.agents.height), (9, 16));
+        assert_eq!(tall.info.bottom(), tall.status.y);
+        let medium = areas(Rect::new(0, 0, 100, 20), 2, 7);
+        assert_eq!((medium.info.height, medium.agents.height), (7, 8));
+        let short = areas(Rect::new(0, 0, 100, 16), 2, 7);
+        assert_eq!((short.info.height, short.agents.height), (6, 5));
+        let tiny = areas(Rect::new(0, 0, 100, 8), 2, 7);
+        assert_eq!((tiny.info.height, tiny.agents.height), (3, 0));
+    }
+
+    #[test]
+    fn info_shows_everything_for_a_worktree_agent_with_stats() {
+        let p = project("p");
+        let wt = worktree_agent(&p, "wt");
+        let (mut app, _) = loaded(vec![p], vec![wt.clone()]);
+        app.apply_git_stat(
+            wt.id,
+            Ok(GitStat {
+                insertions: 4,
+                deletions: 2,
+                files: 3,
+                uncommitted: 1,
+            }),
+        );
+        let (text, _) = render(&app);
+        let info = layout(Rect::new(0, 0, 100, 30), &app).info;
+        let rows: Vec<String> = text
+            .lines()
+            .skip(usize::from(info.y + 1))
+            .take(usize::from(info.height - 2))
+            .map(|line| {
+                line.chars()
+                    .skip(1)
+                    .take(usize::from(info.width - 2))
+                    .collect()
+            })
+            .collect();
+        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(
+            rows,
+            [
+                "status: idle",
+                "branch: lazyagents/wt",
+                "+4 −2 · 3 files",
+                "1 uncommitted",
+                "cmd: sh",
+                "cwd: /s/worktrees/wt",
+                "kind: generic",
+            ],
+            "{text}"
+        );
     }
 }

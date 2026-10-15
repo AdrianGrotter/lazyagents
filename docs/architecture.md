@@ -176,14 +176,20 @@ daemon last told it.
   state lives in `App` and is cleared whenever focus leaves the pane.
 - **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane,
   the status line and popups from `App`; the pane copies the daemon's cell grid into the
-  ratatui buffer. The status line shows a transient message in red, then `│` and the
-  key hint, cut off on the right. Below a 20×5 pane only "terminal too small" is drawn,
+  ratatui buffer. The Info box grows to fit its lines (status, worktree branch, git stat,
+  command, cwd, kind) as long as the Agents box keeps 8 rows, and keeps 6 rows while
+  they fit. The status line shows a transient message in red, then `│` and the key hint,
+  cut off on the right. Below a 20×5 pane only "terminal too small" is drawn,
   and keys do nothing except quitting from the sidebar and leaving the pane. Status glyphs animate from a frame counter the runtime ticks every
   100 ms while an agent is starting or working.
-- **Connection actor** (`connection.rs`): a task owning the `Client`. It sends requests
-  in order and forwards responses, errors and server events (agent list changes, screen
-  frames) on one channel. When the daemon closes the connection it reports `Closed`, and
-  the TUI exits with "the daemon stopped".
+- **Connection actor** (`connection.rs`): a task owning the `Client`. It forwards
+  responses, errors and server events (agent list changes, screen frames) on one channel.
+  `GitStat` and `GitDiff` go out without waiting for their replies, which the daemon may
+  answer late; each reply comes back tagged with its agent id as `Incoming::GitStat` or
+  `Incoming::Diff`, errors included, so a git error never looks like the failure of
+  another request. Every other request waits for its reply before the next is sent, so
+  those replies and errors arrive in request order. When the daemon closes the connection
+  it reports `Closed`, and the TUI exits with "the daemon stopped".
 - **Runtime and terminal guard** (`run.rs`): refuses to start without an interactive
   terminal, connects (starting the daemon if needed), then enters raw mode, the alternate
   screen, mouse capture, bracketed paste and, where supported, keyboard enhancement. A

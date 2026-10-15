@@ -64,6 +64,7 @@ shows at most 20 000 lines. A git error closes it and shows the error in the sta
 | `pagedown`/`pageup` | scroll a page |
 | `g`/`G` | top / bottom |
 | `D`, `q`, `esc` | close, back to the Agents box |
+| `ctrl-c` | quit the TUI (agents keep running) |
 
 The mouse wheel scrolls the diff too. The view closes by itself if its agent is removed.
 
