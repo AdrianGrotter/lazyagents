@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::encode::encode;
 use crate::lock::InstanceLock;
-use crate::reap::terminate_tree;
+use crate::reap::{self, Tracked, terminate_tree};
 use crate::spawn::{Launch, SpawnContext, find_in_path, hook_settings, spawn_spec};
 use crate::status::{generic_status, on_hook};
 use crate::store::{self, AgentRecord, StoredState};
@@ -54,6 +54,7 @@ const TICK: Duration = Duration::from_millis(33);
 const STOP_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const HOUSEKEEPING: Duration = Duration::from_secs(1);
+const SNAPSHOT: Duration = Duration::from_secs(1);
 const WHEEL_LINES: i32 = 3;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
@@ -209,6 +210,9 @@ struct Agent {
     generation: u64,
     last_output: Option<Instant>,
     dirty: bool,
+    /// The agent's descendants as of the latest snapshot, so processes that detach from
+    /// its tree can still be stopped once it exits or is killed.
+    tracked: Vec<Tracked>,
 }
 
 struct Subscription {
@@ -229,6 +233,7 @@ struct Daemon {
     agents: HashMap<AgentId, Agent>,
     clients: HashMap<ClientId, Client>,
     events: UnboundedSender<TerminalEvent>,
+    last_snapshot: Instant,
 }
 
 impl Drop for Daemon {
@@ -255,6 +260,7 @@ impl Daemon {
                     generation: 0,
                     last_output: None,
                     dirty: false,
+                    tracked: Vec::new(),
                 };
                 (agent.record.id, agent)
             })
@@ -267,6 +273,7 @@ impl Daemon {
             agents,
             clients: HashMap::new(),
             events,
+            last_snapshot: Instant::now(),
         }
     }
 
@@ -538,6 +545,7 @@ impl Daemon {
                 generation: 0,
                 last_output: None,
                 dirty: false,
+                tracked: Vec::new(),
             },
         );
         let started = self.start(id, Launch::Fresh, PaneSize::new(create.cols, create.rows));
@@ -608,8 +616,8 @@ impl Daemon {
         }
     }
 
-    /// Terminates the process trees of the given running agents, then drops their
-    /// terminals.
+    /// Terminates the process trees of the given running agents and the descendants they
+    /// were last seen with, then drops their terminals.
     fn stop(&mut self, ids: &[AgentId], grace: Duration) {
         let roots: Vec<u32> = ids
             .iter()
@@ -618,13 +626,16 @@ impl Daemon {
             .filter_map(|agent| agent.terminal.as_ref().map(Terminal::pid))
             .collect();
         terminate_tree(&roots, grace);
+        let mut tracked = Vec::new();
         for id in ids {
-            if let Some(agent) = self.agents.get_mut(id)
-                && agent.terminal.take().is_some()
-            {
-                agent.generation += 1;
+            if let Some(agent) = self.agents.get_mut(id) {
+                tracked.append(&mut agent.tracked);
+                if agent.terminal.take().is_some() {
+                    agent.generation += 1;
+                }
             }
         }
+        reap::terminate_tracked(&tracked, grace);
     }
 
     fn stop_all(&mut self) {
@@ -757,6 +768,7 @@ impl Daemon {
             Outcome::Exited(code) => {
                 agent.status = Status::Exited(code);
                 agent.dirty = true;
+                reap::terminate_tracked(&std::mem::take(&mut agent.tracked), STOP_GRACE);
                 self.announce(event.agent);
             }
             Outcome::Nothing => {}
@@ -765,6 +777,16 @@ impl Daemon {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        if now.duration_since(self.last_snapshot) >= SNAPSHOT {
+            self.last_snapshot = now;
+            for agent in self.agents.values_mut() {
+                if agent.status.is_running()
+                    && let Some(terminal) = agent.terminal.as_ref()
+                {
+                    agent.tracked = reap::snapshot(terminal.pid());
+                }
+            }
+        }
         let mut changed = Vec::new();
         for (id, agent) in &mut self.agents {
             if agent.record.kind == AgentKind::Generic

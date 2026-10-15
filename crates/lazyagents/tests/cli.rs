@@ -503,7 +503,10 @@ fn serve_foreign_protocol(socket: PathBuf) {
 fn shutdown_explains_how_to_stop_a_mismatched_daemon() {
     let env = TestEnv::new();
     serve_foreign_protocol(env.socket());
-    std::fs::write(env.state.path().join("daemon.lock"), "4242").expect("lock file");
+    let lock = env.state.path().join("daemon.lock");
+    std::fs::write(&lock, "4242").expect("lock file");
+    let held = std::fs::File::open(&lock).expect("open lock file");
+    held.lock().expect("hold the lock");
     let out = env.run(&["shutdown"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{out:?}");

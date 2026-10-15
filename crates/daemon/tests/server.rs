@@ -821,6 +821,60 @@ async fn kill_stops_a_descendant_in_its_own_session() {
     assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived kill");
 }
 
+async fn gone_within(leaves: &Leaves, limit: Duration) -> Vec<u32> {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        let alive = leaves.alive();
+        if alive.is_empty() || tokio::time::Instant::now() >= deadline {
+            return alive;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_stops_a_nohup_orphan_in_the_agent_group() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let script = format!(
+        "(nohup sleep 305 >/dev/null 2>&1 & echo $! > '{}'); exec sleep 306",
+        pidfile.display()
+    );
+    let agent = create_owned(&mut conn, &project, "orphan", &sh(&script)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    assert_eq!(leaves.alive(), leaves.0, "orphan never ran");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    assert_eq!(
+        gone_within(&leaves, Duration::from_secs(3)).await,
+        Vec::<u32>::new(),
+        "survived kill"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exited_agent_leaves_no_detached_descendants() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pids");
+    let script = format!(
+        "perl -e 'use POSIX; setsid(); exec q(sleep), 307' & echo $! > '{}'; sleep 2; exit 0",
+        pidfile.display()
+    );
+    let agent = create_owned(&mut conn, &project, "detach", &sh(&script)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+    conn.wait_status(agent.id, Status::Exited(0)).await;
+    assert_eq!(
+        gone_within(&leaves, Duration::from_secs(5)).await,
+        Vec::<u32>::new(),
+        "survived the agent's exit"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn remove_stops_the_agent_tree() {
     let daemon = TestDaemon::start().await;

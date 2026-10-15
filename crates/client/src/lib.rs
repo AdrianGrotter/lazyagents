@@ -213,13 +213,18 @@ fn other_daemon_running(paths: &StatePaths, ours: u32) -> bool {
     })
 }
 
-/// The pid the running daemon recorded in its lock file.
+/// The pid the running daemon recorded in its lock file; `None` unless another process
+/// holds the lock.
 pub fn daemon_pid(paths: &StatePaths) -> Option<u32> {
-    std::fs::read_to_string(paths.lock_file())
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(paths.lock_file()).ok()?;
+    if file.try_lock().is_ok() {
+        return None;
+    }
+    let mut holder = String::new();
+    file.read_to_string(&mut holder).ok()?;
+    holder.trim().parse().ok()
 }
 
 /// Starts `exe daemon` detached from the caller's terminal, directory and Claude Code

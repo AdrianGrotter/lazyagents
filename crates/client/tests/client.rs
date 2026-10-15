@@ -185,6 +185,14 @@ async fn spawned_daemon_is_reaped_after_it_exits() {
     fake.abort();
 }
 
+#[test]
+fn daemon_pid_ignores_an_unlocked_lock_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path());
+    std::fs::write(paths.lock_file(), "12345").expect("lock file");
+    assert_eq!(client::daemon_pid(&paths), None);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_exiting_at_startup_fails_fast() {
     let dir = tempfile::tempdir().expect("tempdir");
