@@ -2,8 +2,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use protocol::{
-    AgentId, AgentInfo, Project, ProjectId, Request, Response, Screen, ServerMessage, Status,
+    AgentId, AgentInfo, AgentKind, CreateAgent, InputEvent, Project, ProjectId, Request, Response,
+    Screen, ServerMessage, Status,
 };
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+use crate::keys;
 
 pub const MESSAGE_TTL: Duration = Duration::from_secs(5);
 
@@ -105,9 +109,7 @@ pub struct App {
     pub message: Option<(String, Instant)>,
     pending_select: Option<(ProjectId, String)>,
     subscribed_running: bool,
-    #[expect(dead_code)]
     cwd: PathBuf,
-    #[expect(dead_code)]
     shell: String,
 }
 
@@ -332,10 +334,393 @@ impl App {
     }
 }
 
+const DEFAULT_SIZE: (u16, u16) = (120, 40);
+const WHEEL_LINES: i32 = 3;
+
+#[derive(Debug, PartialEq, Eq)]
+enum Edit {
+    Continue,
+    Submit,
+    Cancel,
+}
+
+fn edit(input: &mut String, key: &KeyEvent) -> Edit {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Enter => Edit::Submit,
+        KeyCode::Esc => Edit::Cancel,
+        KeyCode::Backspace => {
+            input.pop();
+            Edit::Continue
+        }
+        KeyCode::Char('u') if ctrl => {
+            input.clear();
+            Edit::Continue
+        }
+        KeyCode::Char(c) if !ctrl => {
+            input.push(c);
+            Edit::Continue
+        }
+        _ => Edit::Continue,
+    }
+}
+
+impl App {
+    pub fn on_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if key.kind == KeyEventKind::Release {
+            return Vec::new();
+        }
+        if self.popup.is_some() {
+            return self.on_popup_key(key);
+        }
+        match self.focus {
+            Focus::Pane => self.on_pane_key(key),
+            Focus::Projects | Focus::Agents => self.on_sidebar_key(key),
+        }
+    }
+
+    pub fn on_paste(&mut self, text: String) -> Vec<Effect> {
+        if self.popup.is_none() {
+            return match (self.focus, self.selected_agent()) {
+                (Focus::Pane, Some(agent)) => {
+                    vec![Effect::Send(Request::Input {
+                        id: agent.id,
+                        event: InputEvent::Paste(text),
+                    })]
+                }
+                _ => Vec::new(),
+            };
+        }
+        let line = text.lines().next().unwrap_or_default().to_string();
+        match &mut self.popup {
+            Some(Popup::Rename { input, .. } | Popup::AddProject { input }) => {
+                input.push_str(&line)
+            }
+            Some(Popup::NewAgent(form)) => match form.field {
+                Field::Name => form.name.push_str(&line),
+                Field::Command => form.command.push_str(&line),
+                Field::Preset => {}
+            },
+            Some(Popup::Help | Popup::Confirm { .. }) | None => {}
+        }
+        Vec::new()
+    }
+
+    pub fn on_wheel(&mut self, up: bool, col: u16, row: u16) -> Vec<Effect> {
+        if self.popup.is_some() {
+            return Vec::new();
+        }
+        let Some(agent) = self.selected_agent() else {
+            return Vec::new();
+        };
+        let request = if agent.status.is_running() {
+            Request::Input {
+                id: agent.id,
+                event: InputEvent::Wheel { up, col, row },
+            }
+        } else {
+            Request::Scroll {
+                id: agent.id,
+                lines: if up { WHEEL_LINES } else { -WHEEL_LINES },
+            }
+        };
+        vec![Effect::Send(request)]
+    }
+
+    fn on_pane_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let Some(id) = self.selected_agent().map(|a| a.id) else {
+            self.focus = Focus::Agents;
+            return Vec::new();
+        };
+        if keys::is_detach(&key) {
+            self.focus = Focus::Agents;
+            return Vec::new();
+        }
+        if let Some(step) = keys::cycle_step(&key) {
+            self.move_agent(step);
+            return self.sync();
+        }
+        match keys::to_protocol(&key) {
+            Some(key) => vec![Effect::Send(Request::Input {
+                id,
+                event: InputEvent::Key(key),
+            })],
+            None => Vec::new(),
+        }
+    }
+
+    fn on_sidebar_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return match key.code {
+                KeyCode::Char('c') => vec![Effect::Quit],
+                _ => Vec::new(),
+            };
+        }
+        match key.code {
+            KeyCode::Char('q') => return vec![Effect::Quit],
+            KeyCode::Char('Q') => {
+                self.popup = Some(Popup::Confirm {
+                    prompt: "Stop the daemon and every agent?".into(),
+                    action: Confirmed::StopDaemon,
+                });
+            }
+            KeyCode::Char('?') => self.popup = Some(Popup::Help),
+            KeyCode::Char('j') | KeyCode::Down => self.step(1),
+            KeyCode::Char('k') | KeyCode::Up => self.step(-1),
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab => self.focus = Focus::Projects,
+            KeyCode::Char('l') | KeyCode::Right => self.focus = Focus::Agents,
+            KeyCode::Tab => {
+                self.focus = if self.focus == Focus::Projects {
+                    Focus::Agents
+                } else {
+                    Focus::Projects
+                };
+            }
+            KeyCode::Enter => match self.focus {
+                Focus::Projects => self.focus = Focus::Agents,
+                _ if self.selected_agent().is_some() => self.focus = Focus::Pane,
+                _ => {}
+            },
+            KeyCode::Char('n') => self.open_new_agent(),
+            KeyCode::Char('a') => {
+                self.popup = Some(Popup::AddProject {
+                    input: self.cwd.display().to_string(),
+                });
+            }
+            KeyCode::Char('x') => self.confirm_for_selected("Stop", Confirmed::Kill),
+            KeyCode::Char('d') => self.confirm_for_selected("Remove", Confirmed::Remove),
+            KeyCode::Char('r') => {
+                if let Some(agent) = self.selected_agent() {
+                    let (cols, rows) = self.pane_size.unwrap_or(DEFAULT_SIZE);
+                    return vec![Effect::Send(Request::RestartAgent {
+                        id: agent.id,
+                        cols,
+                        rows,
+                    })];
+                }
+            }
+            KeyCode::Char('R') => {
+                if let Some(agent) = self.selected_agent() {
+                    self.popup = Some(Popup::Rename {
+                        agent: agent.id,
+                        input: agent.name.clone(),
+                    });
+                }
+            }
+            KeyCode::Char('g') => self.next_attention(),
+            KeyCode::Char('A') => {
+                let selected = self.selected_agent().map(|a| a.id);
+                self.view = match self.view {
+                    AgentView::Project => AgentView::All,
+                    AgentView::All => AgentView::Project,
+                };
+                self.agent_index = 0;
+                if let Some(id) = selected {
+                    self.select_agent(id);
+                }
+            }
+            _ => {}
+        }
+        self.sync()
+    }
+
+    fn confirm_for_selected(&mut self, verb: &str, action: fn(AgentId) -> Confirmed) {
+        if let Some(agent) = self.selected_agent() {
+            let prompt = format!("{verb} {}?", agent.name);
+            let action = action(agent.id);
+            self.popup = Some(Popup::Confirm { prompt, action });
+        }
+    }
+
+    fn step(&mut self, step: i32) {
+        match self.focus {
+            Focus::Projects => {
+                let count = self.projects.len();
+                if count > 0 {
+                    self.project_index = wrap(self.project_index, step, count);
+                    self.agent_index = 0;
+                }
+            }
+            Focus::Agents | Focus::Pane => self.move_agent(step),
+        }
+    }
+
+    fn move_agent(&mut self, step: i32) {
+        let count = self.visible_agents().len();
+        if count == 0 {
+            return;
+        }
+        self.agent_index = wrap(self.agent_index, step, count);
+        if self.view == AgentView::All
+            && let Some(project) = self.selected_agent().map(|a| a.project)
+            && let Some(index) = self.projects.iter().position(|p| p.id == project)
+        {
+            self.project_index = index;
+        }
+    }
+
+    fn open_new_agent(&mut self) {
+        if self.selected_project().is_none() {
+            self.fail("add a project first (a)");
+            return;
+        }
+        self.popup = Some(Popup::NewAgent(NewAgentForm {
+            name: String::new(),
+            preset: Preset::Claude,
+            command: String::new(),
+            field: Field::Name,
+        }));
+    }
+
+    fn next_attention(&mut self) {
+        let position = |id: ProjectId| self.projects.iter().position(|p| p.id == id);
+        let mut ordered: Vec<&AgentInfo> = self.agents.iter().collect();
+        ordered.sort_by(|a, b| (position(a.project), &a.name).cmp(&(position(b.project), &b.name)));
+        let current = self.selected_agent().map(|a| a.id);
+        let start = current
+            .and_then(|id| ordered.iter().position(|a| a.id == id))
+            .map_or(0, |i| i + 1);
+        let next = (0..ordered.len())
+            .map(|offset| ordered[(start + offset) % ordered.len()])
+            .find(|a| a.status == Status::NeedsInput)
+            .map(|a| a.id);
+        match next {
+            Some(id) => self.select_agent(id),
+            None => self.fail("no agent needs input"),
+        }
+    }
+
+    fn on_popup_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let Some(popup) = self.popup.take() else {
+            return Vec::new();
+        };
+        match popup {
+            Popup::Help => Vec::new(),
+            Popup::Confirm { prompt, action } => match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => match action {
+                    Confirmed::Kill(id) => vec![Effect::Send(Request::KillAgent { id })],
+                    Confirmed::Remove(id) => vec![Effect::Send(Request::RemoveAgent { id })],
+                    Confirmed::StopDaemon => vec![Effect::StopDaemonAndQuit],
+                },
+                KeyCode::Char('n') | KeyCode::Esc => Vec::new(),
+                _ => {
+                    self.popup = Some(Popup::Confirm { prompt, action });
+                    Vec::new()
+                }
+            },
+            Popup::Rename { agent, mut input } => match edit(&mut input, &key) {
+                Edit::Submit => vec![Effect::Send(Request::RenameAgent {
+                    id: agent,
+                    name: input.trim().to_string(),
+                })],
+                Edit::Cancel => Vec::new(),
+                Edit::Continue => {
+                    self.popup = Some(Popup::Rename { agent, input });
+                    Vec::new()
+                }
+            },
+            Popup::AddProject { mut input } => match edit(&mut input, &key) {
+                Edit::Submit => vec![Effect::Send(Request::AddProject {
+                    path: self.cwd.join(input.trim()),
+                    name: None,
+                })],
+                Edit::Cancel => Vec::new(),
+                Edit::Continue => {
+                    self.popup = Some(Popup::AddProject { input });
+                    Vec::new()
+                }
+            },
+            Popup::NewAgent(form) => self.on_form_key(form, key),
+        }
+    }
+
+    fn on_form_key(&mut self, mut form: NewAgentForm, key: KeyEvent) -> Vec<Effect> {
+        match key.code {
+            KeyCode::Esc => return Vec::new(),
+            KeyCode::Enter => return self.submit_form(form),
+            KeyCode::Tab | KeyCode::Down => form.field = next_field(form.field, form.preset),
+            KeyCode::BackTab | KeyCode::Up => form.field = previous_field(form.field, form.preset),
+            KeyCode::Left if form.field == Field::Preset => form.preset = form.preset.previous(),
+            KeyCode::Right | KeyCode::Char(' ') if form.field == Field::Preset => {
+                form.preset = form.preset.next()
+            }
+            _ => {
+                let target = match form.field {
+                    Field::Name => Some(&mut form.name),
+                    Field::Command => Some(&mut form.command),
+                    Field::Preset => None,
+                };
+                if let Some(target) = target {
+                    edit(target, &key);
+                }
+            }
+        }
+        self.popup = Some(Popup::NewAgent(form));
+        Vec::new()
+    }
+
+    fn submit_form(&mut self, form: NewAgentForm) -> Vec<Effect> {
+        let Some(project) = self.selected_project().map(|p| p.id) else {
+            return Vec::new();
+        };
+        let name = form.name.trim().to_string();
+        if name.is_empty() {
+            self.fail("name the agent first");
+            self.popup = Some(Popup::NewAgent(form));
+            return Vec::new();
+        }
+        let (kind, command) = match form.preset {
+            Preset::Claude => (AgentKind::Claude, Vec::new()),
+            Preset::Shell => (AgentKind::Generic, vec![self.shell.clone()]),
+            Preset::Custom => {
+                let command = form.command.trim().to_string();
+                if command.is_empty() {
+                    self.fail("enter a command");
+                    self.popup = Some(Popup::NewAgent(form));
+                    return Vec::new();
+                }
+                (AgentKind::Generic, vec!["sh".into(), "-c".into(), command])
+            }
+        };
+        let (cols, rows) = self.pane_size.unwrap_or(DEFAULT_SIZE);
+        self.pending_select = Some((project, name.clone()));
+        vec![Effect::Send(Request::CreateAgent(CreateAgent {
+            project,
+            name,
+            kind,
+            command,
+            cols,
+            rows,
+        }))]
+    }
+}
+
+fn wrap(index: usize, step: i32, count: usize) -> usize {
+    (index as i64 + i64::from(step)).rem_euclid(count as i64) as usize
+}
+
+fn next_field(field: Field, preset: Preset) -> Field {
+    match (field, preset) {
+        (Field::Name, _) => Field::Preset,
+        (Field::Preset, Preset::Custom) => Field::Command,
+        (Field::Preset, _) | (Field::Command, _) => Field::Name,
+    }
+}
+
+fn previous_field(field: Field, preset: Preset) -> Field {
+    match (field, preset) {
+        (Field::Name, Preset::Custom) => Field::Command,
+        (Field::Name, _) => Field::Preset,
+        (Field::Preset, _) => Field::Name,
+        (Field::Command, _) => Field::Preset,
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use protocol::{AgentKind, Cell, Frame, Row};
+    use protocol::{AgentKind, Cell, CreateAgent, Frame, InputEvent, Row};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     pub(crate) fn project(name: &str) -> Project {
         Project {
@@ -650,5 +1035,404 @@ pub(crate) mod tests {
                 rows: 20
             })]
         );
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn code(k: KeyCode) -> KeyEvent {
+        KeyEvent::new(k, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            let _ = app.on_key(key(c));
+        }
+    }
+
+    fn input_key(id: AgentId, k: protocol::Key) -> Effect {
+        Effect::Send(Request::Input {
+            id,
+            event: InputEvent::Key(k),
+        })
+    }
+
+    fn two_agents() -> (App, AgentInfo, AgentInfo) {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Idle);
+        let (app, _) = loaded(vec![p], vec![a.clone(), b.clone()]);
+        (app, a, b)
+    }
+
+    #[test]
+    fn j_and_k_move_and_resubscribe() {
+        let (mut app, a, b) = two_agents();
+        assert_eq!(
+            app.on_key(key('j')),
+            vec![Effect::Send(Request::Subscribe { id: b.id })]
+        );
+        assert_eq!(
+            app.on_key(key('k')),
+            vec![Effect::Send(Request::Subscribe { id: a.id })]
+        );
+    }
+
+    #[test]
+    fn enter_focuses_the_pane_and_detach_returns() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Pane);
+        let _ = app.on_key(ctrl(']'));
+        assert_eq!(app.focus, Focus::Agents);
+    }
+
+    #[test]
+    fn pane_focus_sends_letters_to_the_agent() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        for (event, expected) in [
+            (
+                key('q'),
+                protocol::Key::new(protocol::KeyCode::Char('q'), protocol::Modifiers::NONE),
+            ),
+            (
+                key('x'),
+                protocol::Key::new(protocol::KeyCode::Char('x'), protocol::Modifiers::NONE),
+            ),
+            (
+                key('n'),
+                protocol::Key::new(protocol::KeyCode::Char('n'), protocol::Modifiers::NONE),
+            ),
+            (
+                ctrl('c'),
+                protocol::Key::new(protocol::KeyCode::Char('c'), protocol::Modifiers::CTRL),
+            ),
+        ] {
+            assert_eq!(app.on_key(event), vec![input_key(a.id, expected)]);
+            assert_eq!(app.focus, Focus::Pane);
+            assert_eq!(app.popup, None);
+        }
+    }
+
+    #[test]
+    fn pane_focus_never_quits() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        for event in [key('q'), key('Q'), ctrl('c'), code(KeyCode::Esc)] {
+            assert!(!app.on_key(event).contains(&Effect::Quit));
+        }
+    }
+
+    #[test]
+    fn alt_brackets_switch_agents_inside_the_pane() {
+        let (mut app, _, b) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        let effects = app.on_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: b.id })]);
+    }
+
+    #[test]
+    fn q_quits_from_the_sidebar() {
+        let (mut app, _, _) = two_agents();
+        assert_eq!(app.on_key(key('q')), vec![Effect::Quit]);
+    }
+
+    #[test]
+    fn stop_needs_confirmation() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(key('x'));
+        assert_eq!(
+            app.popup,
+            Some(Popup::Confirm {
+                prompt: "Stop alpha?".into(),
+                action: Confirmed::Kill(a.id)
+            })
+        );
+        assert!(app.on_key(key('n')).is_empty());
+        assert_eq!(app.popup, None);
+        let _ = app.on_key(key('x'));
+        assert_eq!(
+            app.on_key(key('y')),
+            vec![Effect::Send(Request::KillAgent { id: a.id })]
+        );
+    }
+
+    #[test]
+    fn remove_needs_confirmation() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(key('d'));
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            vec![Effect::Send(Request::RemoveAgent { id: a.id })]
+        );
+    }
+
+    #[test]
+    fn big_q_stops_the_daemon_after_confirmation() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('Q'));
+        assert_eq!(app.on_key(key('y')), vec![Effect::StopDaemonAndQuit]);
+    }
+
+    #[test]
+    fn restart_uses_the_pane_size() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.set_pane_size(100, 30);
+        assert_eq!(
+            app.on_key(key('r')),
+            vec![Effect::Send(Request::RestartAgent {
+                id: a.id,
+                cols: 100,
+                rows: 30
+            })]
+        );
+    }
+
+    #[test]
+    fn rename_popup_edits_and_submits() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(key('R'));
+        for _ in 0..5 {
+            let _ = app.on_key(code(KeyCode::Backspace));
+        }
+        type_text(&mut app, "omega");
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            vec![Effect::Send(Request::RenameAgent {
+                id: a.id,
+                name: "omega".into()
+            })]
+        );
+    }
+
+    #[test]
+    fn add_project_resolves_against_the_cwd() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('a'));
+        let _ = app.on_key(ctrl('u'));
+        type_text(&mut app, "repo");
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            vec![Effect::Send(Request::AddProject {
+                path: "/work/repo".into(),
+                name: None
+            })]
+        );
+    }
+
+    fn created(effects: Vec<Effect>) -> CreateAgent {
+        match effects.as_slice() {
+            [Effect::Send(Request::CreateAgent(c))] => c.clone(),
+            other => panic!("unexpected effects {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_agent_form_creates_each_preset() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "api");
+        let c = created(app.on_key(code(KeyCode::Enter)));
+        assert_eq!(
+            (c.name.as_str(), c.kind, c.command),
+            ("api", AgentKind::Claude, Vec::<String>::new())
+        );
+        assert_eq!((c.cols, c.rows), (120, 40));
+
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "sh1");
+        let _ = app.on_key(code(KeyCode::Tab));
+        let _ = app.on_key(code(KeyCode::Right));
+        let c = created(app.on_key(code(KeyCode::Enter)));
+        assert_eq!(
+            (c.kind, c.command),
+            (AgentKind::Generic, vec!["/bin/sh".to_string()])
+        );
+
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "job");
+        let _ = app.on_key(code(KeyCode::Tab));
+        let _ = app.on_key(code(KeyCode::Right));
+        let _ = app.on_key(code(KeyCode::Right));
+        let _ = app.on_key(code(KeyCode::Tab));
+        type_text(&mut app, "make test");
+        let c = created(app.on_key(code(KeyCode::Enter)));
+        assert_eq!(
+            (c.kind, c.command),
+            (
+                AgentKind::Generic,
+                vec!["sh".to_string(), "-c".to_string(), "make test".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn new_agent_form_validates() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        assert!(app.on_key(code(KeyCode::Enter)).is_empty());
+        assert!(matches!(app.popup, Some(Popup::NewAgent(_))));
+        assert_eq!(
+            app.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("name the agent first")
+        );
+    }
+
+    #[test]
+    fn new_agent_without_projects_says_so() {
+        let (mut app, _) = loaded(vec![], vec![]);
+        assert!(app.on_key(key('n')).is_empty());
+        assert_eq!(app.popup, None);
+        assert_eq!(
+            app.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("add a project first (a)")
+        );
+    }
+
+    #[test]
+    fn created_agent_gets_selected_and_focused() {
+        let (mut app, _, _) = two_agents();
+        let project = app.selected_project().map(|p| p.id).expect("project");
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "zed");
+        let _ = app.on_key(code(KeyCode::Tab));
+        let _ = app.on_key(code(KeyCode::Right));
+        let _ = created(app.on_key(code(KeyCode::Enter)));
+        let info = AgentInfo {
+            id: AgentId::random(),
+            project,
+            name: "zed".into(),
+            kind: AgentKind::Generic,
+            command: vec!["/bin/sh".into()],
+            cwd: "/p/p".into(),
+            status: Status::Starting,
+        };
+        let effects = app.apply_server(ServerMessage::AgentUpdated(info.clone()));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(info.id));
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(
+            effects,
+            vec![Effect::Send(Request::Subscribe { id: info.id })]
+        );
+    }
+
+    #[test]
+    fn g_jumps_to_the_next_agent_needing_input() {
+        let p = project("p");
+        let q = project("q");
+        let waiting = agent(&q, "w", Status::NeedsInput);
+        let (mut app, _) = loaded(
+            vec![p.clone(), q.clone()],
+            vec![agent(&p, "a", Status::Idle), waiting.clone()],
+        );
+        let _ = app.on_key(key('g'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(waiting.id));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(q.id));
+    }
+
+    #[test]
+    fn paste_goes_to_the_agent_or_the_popup() {
+        let (mut app, a, _) = two_agents();
+        assert!(app.on_paste("x".into()).is_empty());
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(
+            app.on_paste("hello\nworld".into()),
+            vec![Effect::Send(Request::Input {
+                id: a.id,
+                event: InputEvent::Paste("hello\nworld".into())
+            })]
+        );
+        let _ = app.on_key(ctrl(']'));
+        let _ = app.on_key(key('n'));
+        assert!(app.on_paste("pasted\nignored".into()).is_empty());
+        match &app.popup {
+            Some(Popup::NewAgent(form)) => assert_eq!(form.name, "pasted"),
+            other => panic!("unexpected popup {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wheel_inputs_running_agents_and_scrolls_exited_ones() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a.clone()]);
+        assert_eq!(
+            app.on_wheel(true, 3, 4),
+            vec![Effect::Send(Request::Input {
+                id: a.id,
+                event: InputEvent::Wheel {
+                    up: true,
+                    col: 3,
+                    row: 4
+                }
+            })]
+        );
+        let stopped = AgentInfo {
+            status: Status::Exited(0),
+            ..a.clone()
+        };
+        let _ = app.apply_server(ServerMessage::AgentUpdated(stopped));
+        assert_eq!(
+            app.on_wheel(true, 0, 0),
+            vec![Effect::Send(Request::Scroll { id: a.id, lines: 3 })]
+        );
+        assert_eq!(
+            app.on_wheel(false, 0, 0),
+            vec![Effect::Send(Request::Scroll {
+                id: a.id,
+                lines: -3
+            })]
+        );
+        let _ = app.on_key(key('?'));
+        assert!(app.on_wheel(true, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn help_closes_on_any_key() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('?'));
+        assert_eq!(app.popup, Some(Popup::Help));
+        let _ = app.on_key(key('z'));
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn big_a_toggles_the_all_agents_view() {
+        let p = project("p");
+        let q = project("q");
+        let a = agent(&p, "a", Status::Idle);
+        let b = agent(&q, "b", Status::Idle);
+        let (mut app, _) = loaded(vec![p.clone(), q.clone()], vec![a.clone(), b.clone()]);
+        let _ = app.on_key(key('A'));
+        assert_eq!(app.view, AgentView::All);
+        assert_eq!(app.visible_agents().len(), 2);
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(q.id));
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "new");
+        let c = created(app.on_key(code(KeyCode::Enter)));
+        assert_eq!(c.project, q.id);
+        let _ = app.on_key(key('A'));
+        assert_eq!(app.view, AgentView::Project);
+    }
+
+    #[test]
+    fn key_releases_are_ignored() {
+        let (mut app, _, _) = two_agents();
+        let mut release = key('q');
+        release.kind = KeyEventKind::Release;
+        assert!(app.on_key(release).is_empty());
     }
 }
