@@ -69,6 +69,7 @@ pub struct NewAgentForm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirmed {
     Kill(AgentId),
+    Restart(AgentId),
     Remove(AgentId),
     StopDaemon,
 }
@@ -569,16 +570,13 @@ impl App {
             }
             KeyCode::Char('x') => self.confirm_for_selected("Stop", Confirmed::Kill),
             KeyCode::Char('d') => self.confirm_for_selected("Remove", Confirmed::Remove),
-            KeyCode::Char('r') => {
-                if let Some(agent) = self.selected_agent() {
-                    let (cols, rows) = self.pane_size.unwrap_or(DEFAULT_SIZE);
-                    return vec![Effect::Send(Request::RestartAgent {
-                        id: agent.id,
-                        cols,
-                        rows,
-                    })];
+            KeyCode::Char('r') => match self.selected_agent() {
+                Some(agent) if agent.status.is_running() => {
+                    self.confirm_for_selected("Restart", Confirmed::Restart)
                 }
-            }
+                Some(agent) => return vec![self.restart(agent.id)],
+                None => {}
+            },
             KeyCode::Char('R') => {
                 if let Some(agent) = self.selected_agent() {
                     self.popup = Some(Popup::Rename {
@@ -602,6 +600,11 @@ impl App {
             _ => {}
         }
         self.sync()
+    }
+
+    fn restart(&self, id: AgentId) -> Effect {
+        let (cols, rows) = self.pane_size.unwrap_or(DEFAULT_SIZE);
+        Effect::Send(Request::RestartAgent { id, cols, rows })
     }
 
     fn confirm_for_selected(&mut self, verb: &str, action: fn(AgentId) -> Confirmed) {
@@ -678,6 +681,7 @@ impl App {
             Popup::Confirm { prompt, action } => match key.code {
                 KeyCode::Char('y') | KeyCode::Enter => match action {
                     Confirmed::Kill(id) => vec![Effect::Send(Request::KillAgent { id })],
+                    Confirmed::Restart(id) => vec![self.restart(id)],
                     Confirmed::Remove(id) => vec![Effect::Send(Request::RemoveAgent { id })],
                     Confirmed::StopDaemon => vec![Effect::StopDaemonAndQuit],
                 },
@@ -1232,8 +1236,35 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn restart_uses_the_pane_size() {
+    fn restarting_a_running_agent_needs_confirmation() {
         let (mut app, a, _) = two_agents();
+        let _ = app.set_pane_size(100, 30);
+        assert!(app.on_key(key('r')).is_empty());
+        assert_eq!(
+            app.popup,
+            Some(Popup::Confirm {
+                prompt: "Restart alpha?".into(),
+                action: Confirmed::Restart(a.id)
+            })
+        );
+        assert!(app.on_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!(app.popup, None);
+        let _ = app.on_key(key('r'));
+        assert_eq!(
+            app.on_key(key('y')),
+            vec![Effect::Send(Request::RestartAgent {
+                id: a.id,
+                cols: 100,
+                rows: 30
+            })]
+        );
+    }
+
+    #[test]
+    fn restarting_a_stopped_agent_uses_the_pane_size_at_once() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Stopped);
+        let (mut app, _) = loaded(vec![p], vec![a.clone()]);
         let _ = app.set_pane_size(100, 30);
         assert_eq!(
             app.on_key(key('r')),
@@ -1243,6 +1274,7 @@ pub(crate) mod tests {
                 rows: 30
             })]
         );
+        assert_eq!(app.popup, None);
     }
 
     #[test]

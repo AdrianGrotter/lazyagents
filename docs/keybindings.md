@@ -14,7 +14,7 @@ Two input modes:
 | `enter` | focus main pane (pane mode) |
 | `n` | new agent popup: name, preset (`claude`, `shell`, custom command); worktree toggle and base branch come with plan 4 |
 | `x` | stop agent (confirm) |
-| `r` | restart agent (Claude: resume session) |
+| `r` | restart agent (confirm while it is running; Claude: resume session) |
 | `d` | remove agent (confirm; worktree removal comes with plan 4) |
 | `R` | rename agent |
 | `a` | add project (path input, defaults to cwd) |
