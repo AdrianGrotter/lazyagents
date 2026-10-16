@@ -73,9 +73,12 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   that single pass. A failed process-table reading is retried once; if it fails again,
   the pass signals only the tree roots and the groups, and logs an error. A snapshot still running when the stop begins is waited for (up
   to 2 s) first when it covers an agent being stopped, so the descendants it reports are
-  part of that pass; shutdown waits for any running snapshot. A stop of agents the
-  snapshot does not cover leaves it running, and its results for other agents are
-  applied, or stopped as orphans, when it finishes. The request is
+  part of that pass. A stop of agents the snapshot does not cover leaves it running, and
+  a snapshot that takes longer than the wait stays running too; either way its results
+  are applied, or the descendants it reports for stopped agents are stopped as orphans,
+  when it finishes. Shutdown waits up to 10 s for any running snapshot and logs an error
+  if it is still running then, because the processes it would report cannot be
+  checked. The request is
   answered only once this is done, and a restart spawns the new process only
   afterwards.
 - **An agent that exits on its own.** When the agent's process exits, the daemon runs

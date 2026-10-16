@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::RecvTimeoutError;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -73,6 +74,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const HOUSEKEEPING: Duration = Duration::from_secs(1);
 const SNAPSHOT: Duration = Duration::from_secs(1);
 const SNAPSHOT_WAIT: Duration = Duration::from_secs(2);
+const SHUTDOWN_SNAPSHOT_WAIT: Duration = Duration::from_secs(10);
 const WHEEL_LINES: i32 = 3;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
@@ -816,16 +818,34 @@ impl Daemon {
     }
 
     /// Waits for the running snapshot and applies it, unless `covering` names only
-    /// agents the snapshot does not read; `None` waits whatever it covers.
+    /// agents the snapshot does not read; `None` waits whatever it covers. A snapshot
+    /// slower than a stop's wait stays pending, so `refresh_tracked` applies or reaps
+    /// its results later; at shutdown nothing comes later, so the wait is longer.
     fn finish_snapshot(&mut self, covering: Option<&[AgentId]>) {
         let Some(pending) = self.snapshot.take_if(|pending| {
             covering.is_none_or(|ids| pending.agents.iter().any(|agent| ids.contains(agent)))
         }) else {
             return;
         };
-        match pending.rx.recv_timeout(SNAPSHOT_WAIT) {
+        let wait = if covering.is_some() {
+            SNAPSHOT_WAIT
+        } else {
+            SHUTDOWN_SNAPSHOT_WAIT
+        };
+        match pending.rx.recv_timeout(wait) {
             Ok(results) => self.apply_snapshot(results),
-            Err(e) => tracing::warn!(error = %e, "stopping without the running snapshot"),
+            Err(RecvTimeoutError::Timeout) if covering.is_some() => {
+                tracing::warn!(
+                    "stopping before the running snapshot finished; its results are applied when it does"
+                );
+                self.snapshot = Some(pending);
+            }
+            Err(RecvTimeoutError::Timeout) => tracing::error!(
+                "shutting down without the running snapshot; the processes it would report could not be checked"
+            ),
+            Err(RecvTimeoutError::Disconnected) => {
+                tracing::warn!("the snapshot thread ended without a result")
+            }
         }
     }
 
@@ -1374,7 +1394,7 @@ mod tests {
         assert!(child.exited(), "kill answered while the child still ran");
     }
 
-    fn daemon_with_two_agents() -> (Daemon, AgentId, AgentId) {
+    fn daemon_with_two_agents() -> (tempfile::TempDir, Daemon, AgentId, AgentId) {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut daemon = test_daemon(dir.path());
         let a = claude_agent();
@@ -1382,12 +1402,12 @@ mod tests {
         let (a_id, b_id) = (a.record.id, b.record.id);
         daemon.agents.insert(a_id, a);
         daemon.agents.insert(b_id, b);
-        (daemon, a_id, b_id)
+        (dir, daemon, a_id, b_id)
     }
 
     #[test]
     fn stopping_an_uncovered_agent_does_not_wait_for_the_snapshot() {
-        let (mut daemon, a, b) = daemon_with_two_agents();
+        let (_dir, mut daemon, a, b) = daemon_with_two_agents();
         let (_tx, rx) = std::sync::mpsc::channel();
         daemon.snapshot = Some(PendingSnapshot {
             rx,
@@ -1408,7 +1428,7 @@ mod tests {
 
     #[test]
     fn stopping_a_covered_agent_waits_for_the_snapshot() {
-        let (mut daemon, a, _b) = daemon_with_two_agents();
+        let (_dir, mut daemon, a, _b) = daemon_with_two_agents();
         let (tx, rx) = std::sync::mpsc::channel();
         daemon.snapshot = Some(PendingSnapshot {
             rx,
@@ -1425,24 +1445,54 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_waits_for_any_snapshot() {
-        let (mut daemon, a, _b) = daemon_with_two_agents();
+    fn a_snapshot_slower_than_a_stop_is_reaped_when_it_arrives() {
+        let (_dir, mut daemon, a, _b) = daemon_with_two_agents();
+        let (mut child, tracked) = Stubborn::spawn();
         let (tx, rx) = std::sync::mpsc::channel();
         daemon.snapshot = Some(PendingSnapshot {
             rx,
             agents: vec![a],
         });
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            let _ = tx.send(Vec::new());
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(SNAPSHOT_WAIT + Duration::from_millis(500));
+            let _ = tx.send(vec![(a, 0, vec![tracked])]);
+        });
+        daemon.kill_agent(a).expect("kill");
+        assert!(
+            daemon.snapshot.is_some(),
+            "the slow snapshot must stay pending"
+        );
+        late.join().expect("snapshot thread");
+        daemon.refresh_tracked(Instant::now());
+        assert!(daemon.snapshot.is_none());
+        assert!(child.exits_within(Duration::from_secs(3)), "child survived");
+    }
+
+    #[test]
+    fn shutdown_applies_a_snapshot_slower_than_a_stop() {
+        let (_dir, mut daemon, a, _b) = daemon_with_two_agents();
+        let (mut child, tracked) = Stubborn::spawn();
+        let (tx, rx) = std::sync::mpsc::channel();
+        daemon.snapshot = Some(PendingSnapshot {
+            rx,
+            agents: vec![a],
+        });
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            let _ = tx.send(vec![(a, 0, vec![tracked])]);
         });
         daemon.stop_all();
+        late.join().expect("snapshot thread");
         assert!(daemon.snapshot.is_none());
+        assert!(
+            child.exited(),
+            "shutdown finished while the child still ran"
+        );
     }
 
     #[test]
     fn shutdown_stops_what_a_snapshot_of_a_removed_agent_finds() {
-        let (mut daemon, _a, _b) = daemon_with_two_agents();
+        let (_dir, mut daemon, _a, _b) = daemon_with_two_agents();
         let removed = AgentId::random();
         let (mut child, tracked) = Stubborn::spawn();
         let (tx, rx) = std::sync::mpsc::channel();
