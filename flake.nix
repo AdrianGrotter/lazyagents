@@ -32,6 +32,7 @@
             pkgs.jq
             pkgs.tmux
             pkgs.git
+            pkgs.direnv
           ];
           RUST_BACKTRACE = "1";
           shellHook = ''
