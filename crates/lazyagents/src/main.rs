@@ -80,9 +80,13 @@ fn main() -> ExitCode {
             .build()
             .map_err(anyhow::Error::from)
             .and_then(|runtime| {
-                runtime.block_on(async {
+                let result = runtime.block_on(async {
                     tui::run(StatePaths::from_env()?, std::env::current_exe()?).await
-                })
+                });
+                // A stop of the daemon the user abandoned may still be waiting on its
+                // own thread; dropping the runtime would wait for it.
+                runtime.shutdown_background();
+                result
             }),
         Some(Command::Hook { event }) => {
             hook::run(&event);
