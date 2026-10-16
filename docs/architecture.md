@@ -138,7 +138,10 @@ starting with `-` is rejected. The branch name is checked with `git check-ref-fo
 A failure before or during the add (project not a git repo, invalid branch name, branch
 exists, base missing, a failing checkout hook) answers `Err` and leaves no agent, no new
 branch and no directory: an add that fails after git created the branch or the checkout
-has both removed again, while a branch that existed before is kept. A spawn failure after
+has both removed again, while a branch that existed before is kept. The cleanup runs
+`git worktree prune` only when git had registered the failed path and `git worktree
+remove` could not remove it, so other worktrees whose directories are missing stay
+registered. A spawn failure after
 a successful add keeps the agent as `Exited` with its error in `AgentInfo.last_error`, and
 its worktree, so it can be restarted. The agent's cwd is the worktree, and
 `AgentInfo.worktree` holds its path, branch and base. Renaming the agent keeps its branch

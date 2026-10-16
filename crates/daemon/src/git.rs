@@ -117,10 +117,11 @@ fn undo_add(repo: &Path, path: &Path, branch: &str, branch_existed: bool) {
                 .any(|entry| entry.strip_prefix("worktree ").map(Path::new) == Some(path))
         })
         .unwrap_or(false);
-    if !registered || remove_worktree(repo, path, true).is_err() {
-        if path.exists() {
-            let _ = std::fs::remove_dir_all(path);
-        }
+    let removed = registered && remove_worktree(repo, path, true).is_ok();
+    if !removed && path.exists() {
+        let _ = std::fs::remove_dir_all(path);
+    }
+    if registered && !removed {
         let _ = git(Some(repo), ["worktree", "prune"]);
     }
     if !branch_existed {

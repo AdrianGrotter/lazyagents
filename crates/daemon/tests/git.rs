@@ -150,3 +150,32 @@ fn untracked_files_count_as_dirty_whatever_the_repo_config() {
     remove_worktree(repo.path(), &wt, false).expect_err("untracked file kept");
     assert!(wt.join("untracked.txt").is_file());
 }
+
+#[test]
+fn a_failed_add_leaves_other_stale_worktrees_registered() {
+    let repo = repo();
+    let root = tempfile::tempdir().expect("worktree root");
+    let stale = root.path().join("stale");
+    git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "mine",
+            stale.to_str().expect("utf8"),
+        ],
+    );
+    std::fs::remove_dir_all(&stale).expect("remove the checkout");
+
+    add_worktree(
+        repo.path(),
+        &root.path().join("wt"),
+        "lazyagents/wt",
+        "no-such-base",
+    )
+    .expect_err("bad base");
+    let list = git(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert!(list.contains("stale"), "{list}");
+}
