@@ -378,7 +378,6 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     };
     if let Some(error) = &agent.last_error
         && !agent.status.is_running()
-        && app.screen.text().trim().is_empty()
     {
         let retry = app.keymap.first_key(Action::Restart);
         let text = vec![
@@ -1274,6 +1273,25 @@ mod tests {
         );
         let (text, _) = render(&app);
         assert!(text.contains("press F to retry"), "{text}");
+    }
+
+    #[test]
+    fn an_exit_error_shows_over_the_agents_last_screen() {
+        let p = project("p");
+        let failed = AgentInfo {
+            last_error: Some(
+                "direnv blocked the worktree's .envrc; run: direnv allow /s/wt".into(),
+            ),
+            ..agent(&p, "wt", Status::Exited(1))
+        };
+        let (mut app, _) = loaded(vec![p], vec![failed]);
+        app.screen = Screen::blank(40, 3);
+        for (cell, c) in app.screen.lines[0].iter_mut().zip("direnv: error".chars()) {
+            cell.text = c.to_string();
+        }
+        let (text, _) = render_at(&app, 140, 30);
+        assert!(text.contains("run: direnv allow /s/wt"), "{text}");
+        assert!(text.contains("press r to retry"), "{text}");
     }
 
     fn open_diff(app: &mut App, text: &str) {

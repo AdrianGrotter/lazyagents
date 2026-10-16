@@ -1607,6 +1607,30 @@ async fn worktree_agent_runs_in_its_worktree() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_worktree_agent_stopped_by_a_blocked_envrc_says_how_to_allow_it() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _repo) = add_repo_project(&mut conn).await;
+    let blocked = "echo \"direnv: error $PWD/.envrc is blocked. Run \\`direnv allow\\` to approve its content\"; exit 1";
+    let agent = create_in_worktree(&mut conn, &project, "envrc", &["sh", "-c", blocked])
+        .await
+        .expect("create");
+    let path = worktree_path(&daemon, &project, "envrc");
+    let hint = format!("run: direnv allow {}", path.display());
+    let message = conn
+        .wait_for(|message| {
+            matches!(message, ServerMessage::AgentUpdated(info)
+                if info.id == agent.id
+                    && info.last_error.as_ref().is_some_and(|e| e.contains(&hint)))
+        })
+        .await;
+    let ServerMessage::AgentUpdated(info) = message else {
+        unreachable!()
+    };
+    assert_eq!(info.status, Status::Exited(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn invalid_branch_names_create_nothing() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;

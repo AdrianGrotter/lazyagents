@@ -84,6 +84,23 @@ pub fn find_envrc(cwd: &Path, root: &Path) -> Option<PathBuf> {
     None
 }
 
+/// direnv allows an `.envrc` by path, so the copy checked out in a new worktree starts
+/// out blocked even when the project's own is allowed. Spots direnv's refusal in the
+/// agent's screen, whatever the line wrapping.
+pub fn blocked_envrc_hint(screen: &str, worktree: &Path) -> Option<String> {
+    let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+    squeezed
+        .contains(".envrcisblocked.Run`direnvallow`")
+        .then(|| {
+            let path = worktree.display().to_string();
+            let plain = path
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'));
+            let path = if plain { path } else { shell_quote(&path) };
+            format!("direnv blocked the worktree's .envrc; run: direnv allow {path}")
+        })
+}
+
 pub fn hook_settings(exe: &Path) -> Value {
     let exe = shell_quote(&exe.display().to_string());
     let hooks: serde_json::Map<String, Value> = HookKind::ALL
@@ -115,6 +132,30 @@ mod tests {
     use super::*;
     use protocol::{AgentId, ProjectId};
     use uuid::Uuid;
+
+    #[test]
+    fn a_blocked_envrc_message_gives_the_allow_command() {
+        let worktree = Path::new("/s/worktrees/p-1234abcd/wt");
+        let hint = Some(
+            "direnv blocked the worktree's .envrc; run: direnv allow /s/worktrees/p-1234abcd/wt"
+                .to_string(),
+        );
+        let message = "direnv: error /s/worktrees/p-1234abcd/wt/.envrc is blocked. Run `direnv allow` to approve its content";
+        assert_eq!(blocked_envrc_hint(message, worktree), hint);
+        let wrapped = "direnv: error /s/worktrees/p-1234abcd/wt/.envrc is\nblocked. Run `direnv al\nlow` to approve its content";
+        assert_eq!(blocked_envrc_hint(wrapped, worktree), hint);
+        assert_eq!(
+            blocked_envrc_hint("command not found: claude", worktree),
+            None
+        );
+        assert_eq!(
+            blocked_envrc_hint(message, Path::new("/s/my work/wt")),
+            Some(
+                "direnv blocked the worktree's .envrc; run: direnv allow '/s/my work/wt'"
+                    .to_string()
+            )
+        );
+    }
 
     fn record(kind: AgentKind, command: &[&str], cwd: &Path) -> AgentRecord {
         AgentRecord {

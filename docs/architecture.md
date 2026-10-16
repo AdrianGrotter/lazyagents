@@ -144,6 +144,14 @@ its worktree, so it can be restarted. The agent's cwd is the worktree, and
 `AgentInfo.worktree` holds its path, branch and base. Renaming the agent keeps its branch
 and worktree path.
 
+direnv allows an `.envrc` by its path, so a worktree whose checkout contains an `.envrc`
+needs `direnv allow <worktree path>` once before its agent can start: until then
+`direnv exec` refuses and the agent exits at once. The daemon never runs `direnv allow`
+itself. When a worktree agent exits and its screen shows direnv's `.envrc is blocked`
+error, the daemon sets `last_error` to `direnv blocked the worktree's .envrc; run: direnv
+allow <worktree path>`, and the TUI shows it in the pane as `failed to start: …`; after
+the allow, `r` restarts the agent.
+
 `GitStat` and `GitDiff` run on their own thread and answer when git finishes, so the event
 loop keeps serving. For a worktree agent they compare the working tree with `git
 merge-base <base> HEAD` (committed and uncommitted work); for any other agent with `HEAD`

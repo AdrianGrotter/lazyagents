@@ -89,7 +89,9 @@ A `Hook` for an agent that is not running, or is not a Claude agent, is ignored.
 
 `AgentInfo` carries `worktree: Option<WorktreeInfo>` (`path`, `branch`, `base`) and
 `last_error: Option<String>`, the error of the agent's last failed start; a successful
-restart clears it. A worktree agent's `cwd` is its worktree path. The daemon answers
+restart clears it. A worktree agent that direnv refused to start (its screen shows
+direnv's `… .envrc is blocked` error when it exits) gets `direnv blocked the worktree's
+.envrc; run: direnv allow <worktree path>`. A worktree agent's `cwd` is its worktree path. The daemon answers
 `CreateAgent` with `Err` when the worktree cannot be made (see
 [architecture.md](architecture.md#worktrees)), and creates no agent.
 

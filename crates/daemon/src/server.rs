@@ -22,7 +22,9 @@ use crate::encode::encode;
 use crate::git;
 use crate::lock::InstanceLock;
 use crate::reap::{self, ProcessTable, Tracked};
-use crate::spawn::{Launch, SpawnContext, find_in_path, hook_settings, spawn_spec};
+use crate::spawn::{
+    Launch, SpawnContext, blocked_envrc_hint, find_in_path, hook_settings, spawn_spec,
+};
 use crate::status::{on_hook, settle};
 use crate::store::{self, AgentRecord, StoredState};
 use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent};
@@ -983,10 +985,14 @@ impl Daemon {
             Outcome::Output => {
                 agent.dirty = true;
                 agent.last_output = Some(Instant::now());
+                if note_blocked_envrc(agent) {
+                    self.announce(event.agent);
+                }
             }
             Outcome::Exited(code) => {
                 agent.set_status(Status::Exited(code));
                 agent.dirty = true;
+                note_blocked_envrc(agent);
                 let tracked = std::mem::take(&mut agent.tracked);
                 agent.group = reap::group_exists(root).then_some(root);
                 self.reap_off_loop(event.agent, vec![root], tracked);
@@ -1145,6 +1151,20 @@ impl Daemon {
             agent.dirty = false;
         }
     }
+}
+
+/// Records why a worktree agent that direnv refused to start exited; true when it did.
+/// The refusal can reach the screen after the exit, as the PTY is drained afterwards,
+/// so this runs again on output that follows the exit.
+fn note_blocked_envrc(agent: &mut Agent) -> bool {
+    if agent.status.is_running() || agent.last_error.is_some() {
+        return false;
+    }
+    let (Some(worktree), Some(terminal)) = (&agent.record.worktree, &agent.terminal) else {
+        return false;
+    };
+    agent.last_error = blocked_envrc_hint(&terminal.screen().text(), &worktree.path);
+    agent.last_error.is_some()
 }
 
 /// Room left in a frame for everything in a diff response but the text.
