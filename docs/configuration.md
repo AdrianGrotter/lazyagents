@@ -138,7 +138,7 @@ working = 208
 
 | Slot | Default | Used for |
 |---|---|---|
-| `accent` | green | the border of the focused box |
+| `accent` | green | the border of the focused box, the `copied N characters` message |
 | `attention` | red | agents that need input, exited agents, error messages |
 | `working` | yellow | the working spinner, the pending prefix |
 | `idle` | green | the idle check mark |

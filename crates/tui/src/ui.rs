@@ -9,7 +9,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{
-    AgentView, App, DiffView, Field, Focus, MIN_PANE, NewAgentForm, Popup, Preset, Selection,
+    AgentView, App, DiffView, Field, Focus, MIN_PANE, MessageKind, NewAgentForm, Popup, Preset,
+    Selection,
 };
 use crate::config::Theme;
 use crate::keymap::{Action, Keymap};
@@ -478,7 +479,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
     let theme = &app.theme;
     let mut spans = Vec::new();
     if let Some(message) = app.current_message(now) {
-        spans.push(Span::raw(message.to_string()).fg(theme.attention));
+        let colour = match app.message_kind {
+            MessageKind::Error => theme.attention,
+            MessageKind::Info => theme.accent,
+        };
+        spans.push(Span::raw(message.to_string()).fg(colour));
         spans.push(Span::raw(" │ ").fg(theme.dim));
     }
     spans.push(match app.focus {
@@ -701,7 +706,7 @@ fn form_lines(form: &NewAgentForm, app: &App) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
     use crate::app::tests::{agent, loaded, loaded_with, project, worktree_agent};
-    use crate::app::{App, Focus, Popup};
+    use crate::app::{App, Effect, Focus, MouseInput, MouseKind, Popup};
     use crate::config::Config;
     use protocol::{Cell, Color as ScreenColor, GitStat, Screen, Status, Style as ScreenStyle};
     use ratatui::Terminal;
@@ -823,6 +828,30 @@ mod tests {
             status.starts_with("boom happened │ ctrl-q q/esc sidebar"),
             "{status}"
         );
+    }
+
+    #[test]
+    fn a_copy_reports_itself_in_the_accent_colour() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        let mut screen = Screen::blank(20, 1);
+        for (cell, c) in screen.lines[0].iter_mut().zip("hello".chars()) {
+            cell.text = c.to_string();
+        }
+        app.screen = screen;
+        let areas = layout(Rect::new(0, 0, 100, 30), &app);
+        let (x, y) = (areas.pane_inner.x, areas.pane_inner.y);
+        let mouse = |kind, col| MouseInput { kind, col, row: y };
+        let _ = app.on_mouse(mouse(MouseKind::Down, x), &areas);
+        let _ = app.on_mouse(mouse(MouseKind::Drag, x + 2), &areas);
+        let effects = app.on_mouse(mouse(MouseKind::Up, x + 2), &areas);
+        assert_eq!(effects, vec![Effect::Copy("hel".into())]);
+        let (text, buffer) = render(&app);
+        let status = text.lines().last().expect("status line");
+        assert!(status.starts_with("copied 3 characters │"), "{status}");
+        let row = buffer.area.height - 1;
+        assert_eq!(buffer[(0, row)].fg, app.theme.accent);
+        assert_ne!(app.theme.accent, app.theme.attention);
     }
 
     #[test]

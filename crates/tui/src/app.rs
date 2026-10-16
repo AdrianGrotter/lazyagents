@@ -246,6 +246,12 @@ pub enum AgentView {
     All,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageKind {
+    Error,
+    Info,
+}
+
 struct PendingRemove {
     agent: AgentId,
     interactions: u64,
@@ -269,6 +275,7 @@ pub struct App {
     pub screen: Screen,
     pub pane_size: Option<(u16, u16)>,
     pub message: Option<(String, Instant)>,
+    pub message_kind: MessageKind,
     pub git_stats: HashMap<AgentId, GitStat>,
     pub diff: Option<DiffView>,
     pub scroll: Option<ScrollMode>,
@@ -306,6 +313,7 @@ impl App {
             screen: Screen::blank(0, 0),
             pane_size: None,
             message,
+            message_kind: MessageKind::Error,
             git_stats: HashMap::new(),
             diff: None,
             scroll: None,
@@ -382,6 +390,12 @@ impl App {
 
     pub fn fail(&mut self, message: impl Into<String>) {
         self.message = Some((message.into(), Instant::now()));
+        self.message_kind = MessageKind::Error;
+    }
+
+    pub fn inform(&mut self, message: impl Into<String>) {
+        self.message = Some((message.into(), Instant::now()));
+        self.message_kind = MessageKind::Info;
     }
 
     /// A dirty-worktree refusal opens the force prompt only while the user is still
@@ -1005,6 +1019,9 @@ impl App {
         let Some(agent) = self.selected_agent() else {
             return Vec::new();
         };
+        if agent.status == Status::Stopped {
+            return Vec::new();
+        }
         let request = if agent.status.is_running() {
             Request::Input {
                 id: agent.id,
@@ -1021,6 +1038,9 @@ impl App {
 
     pub fn on_mouse(&mut self, event: MouseInput, areas: &Areas) -> Vec<Effect> {
         if self.too_small {
+            if event.kind == MouseKind::Up {
+                self.selection = None;
+            }
             return Vec::new();
         }
         let at = Position::new(event.col, event.row);
@@ -1061,7 +1081,7 @@ impl App {
                 if text.is_empty() {
                     return Vec::new();
                 }
-                self.fail(format!("copied {} characters", text.chars().count()));
+                self.inform(format!("copied {} characters", text.chars().count()));
                 vec![Effect::Copy(text)]
             }
         }
@@ -3830,6 +3850,40 @@ pub(crate) mod tests {
         assert!(
             app.on_mouse(mouse(MouseKind::Up, in_pane(&areas, 5, 0)), &areas)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_release_while_too_small_drops_the_selection() {
+        let (mut app, _, _) = two_agents();
+        let areas = screen_areas(&app);
+        app.screen = screen_of(&["hello"]);
+        let _ = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 1, 0)), &areas);
+        assert!(app.selection.is_some());
+        let _ = app.set_pane_size(5, 2);
+        let effects = app.on_mouse(mouse(MouseKind::Up, in_pane(&areas, 3, 0)), &areas);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(app.selection, None);
+    }
+
+    #[test]
+    fn the_wheel_over_a_stopped_agent_does_nothing() {
+        let p = project("p");
+        let stopped = agent(&p, "halted", Status::Stopped);
+        let exited = agent(&p, "done", Status::Exited(0));
+        let (mut app, _) = loaded(vec![p], vec![stopped.clone(), exited.clone()]);
+        let areas = screen_areas(&app);
+        app.select_agent(stopped.id);
+        let wheel = mouse(MouseKind::ScrollUp, in_pane(&areas, 1, 1));
+        assert_eq!(app.on_mouse(wheel, &areas), Vec::new());
+        assert_eq!(app.current_message(Instant::now()), None);
+        app.select_agent(exited.id);
+        assert_eq!(
+            app.on_mouse(wheel, &areas),
+            vec![Effect::Send(Request::Scroll {
+                id: exited.id,
+                lines: WHEEL_LINES
+            })]
         );
     }
 

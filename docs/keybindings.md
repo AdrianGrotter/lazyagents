@@ -129,7 +129,7 @@ three lines at a time instead of reaching the agent.
 | click elsewhere in the Projects or Agents box | focus that box |
 | click in the pane | focus the pane if the agent is running; otherwise the status bar says `<name> is not running — r restarts` |
 | drag in the pane | select text, shown reversed; the selection stays inside the pane |
-| release after a drag | copy the selected text and show `copied N characters` |
+| release after a drag | copy the selected text and show `copied N characters` (in the `accent` colour) |
 | click outside an open popup | close it, like `esc` |
 | wheel over the pane | see below |
 
@@ -150,14 +150,14 @@ selection instead: shift in Ghostty, kitty and WezTerm, Option in iTerm2, Fn in
 Terminal.app. See [configuration.md](configuration.md#clipboard).
 
 The wheel over the pane scrolls the emulator's scrollback when the agent hasn't enabled
-mouse reporting; otherwise it is forwarded to the agent. An exited or stopped agent's pane
-scrolls with the wheel too. In the diff view it scrolls the diff, and in scroll mode the
-history.
+mouse reporting; otherwise it is forwarded to the agent. An exited agent's pane scrolls with
+the wheel too; over a stopped agent, which has no terminal, the wheel does nothing. In the
+diff view it scrolls the diff, and in scroll mode the history.
 
 **Terminal too small**: while the pane would be smaller than 20×5 cells the TUI shows only
 "terminal too small", and keys and pastes do nothing except the quit keys (`q`/`ctrl-c`,
 from the sidebar) and the prefix then a leave key (`ctrl-q` then `q` or `esc`, leaving the
-pane). Nothing reaches an agent.
+pane). Nothing reaches an agent, and releasing the mouse drops a selection without copying.
 
 Bindings match exactly. A bare character matches whether or not the terminal adds SHIFT.
 With `ctrl` or `alt`, SHIFT counts: `ctrl-Q` (or `ctrl-shift-q`) is a different key from
