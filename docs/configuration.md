@@ -27,6 +27,8 @@ warning, and all warnings are shown together in the status bar when the TUI star
 - a key bound to two actions in one scope (`keys.sidebar: d is bound to both remove and
   stop; stop wins`); the later binding wins and the other action loses that key;
 - `keys.pane.direct_leave` containing the prefix; the prefix is dropped from it;
+- no way left to leave the pane (`keys.pane: no way to leave the pane; leave restored to
+  q/esc`); `leave` gets its defaults back;
 - a preset without a name and a command, or with a `kind` other than `claude` or
   `generic`;
 - a colour that does not parse.
@@ -99,11 +101,11 @@ is set too. `direct_leave` may not contain the prefix.
 `alt-[` and `alt-]` are not bound by default, so they reach the agent
 ([ADR 0007](decisions/0007-ctrl-q-pane-prefix.md)).
 
-Unbinding every way out of the pane (`leave` and `direct_leave` both empty) traps you in
-it: the keys after the prefix can no longer return to the sidebar. lazyagents does not
-warn about this and does not restore the defaults, so keep at least one. Likewise
-`quit = []` leaves `Q` (stop the daemon and quit) and a signal as the only ways to end
-the TUI.
+If `leave` and `direct_leave` both end up empty, no key could return from the pane to the
+sidebar, so `leave` gets its defaults back (`q`, `esc`, taking them from any other pane
+action) with the warning `keys.pane: no way to leave the pane; leave restored to q/esc`.
+A click on the sidebar also leaves the pane. `quit = []` leaves `Q` (stop the daemon and
+quit) and a signal as the only ways to end the TUI.
 
 ## Presets
 

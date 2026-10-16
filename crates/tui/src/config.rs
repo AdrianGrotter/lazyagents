@@ -5,7 +5,7 @@ use protocol::AgentKind;
 use ratatui::style::Color;
 use toml::{Table, Value};
 
-use crate::keymap::{Action, KeySpec, Keymap, Rebound};
+use crate::keymap::{Action, KeySpec, Keymap, Rebound, join};
 
 #[derive(Clone, Debug, Default)]
 pub struct Config {
@@ -135,6 +135,13 @@ fn unknown(path: &str, value: &Value) -> String {
     }
 }
 
+fn pane_action_name(action: Action) -> String {
+    PANE_ACTIONS
+        .iter()
+        .find(|(_, a)| *a == action)
+        .map_or_else(String::new, |(n, _)| n.to_string())
+}
+
 impl Config {
     fn warn(&mut self, warning: impl Into<String>) {
         self.warnings.push(warning.into());
@@ -212,13 +219,7 @@ impl Config {
             }
         }
         for rebound in self.keymap.rebind_pane(bindings) {
-            let name = |action: Action| {
-                PANE_ACTIONS
-                    .iter()
-                    .find(|(_, a)| *a == action)
-                    .map_or_else(String::new, |(n, _)| n.to_string())
-            };
-            self.warn_rebound("keys.pane", rebound, name);
+            self.warn_rebound("keys.pane", rebound, pane_action_name);
         }
         let prefix = self.keymap.prefix();
         let mut leave = self.keymap.direct_leave().to_vec();
@@ -226,6 +227,16 @@ impl Config {
             leave.retain(|key| *key != prefix);
             self.keymap.set_direct_leave(leave);
             self.warn(format!("keys.pane.direct_leave: {prefix} is the prefix"));
+        }
+        if self.keymap.keys(Action::PaneLeave).is_empty() && self.keymap.direct_leave().is_empty() {
+            let defaults = Keymap::defaults().keys(Action::PaneLeave);
+            self.warn(format!(
+                "keys.pane: no way to leave the pane; leave restored to {}",
+                join(&defaults)
+            ));
+            for rebound in self.keymap.rebind_pane(vec![(Action::PaneLeave, defaults)]) {
+                self.warn_rebound("keys.pane", rebound, pane_action_name);
+            }
         }
     }
 
@@ -421,6 +432,28 @@ mod tests {
         );
         assert!(!keymap.is_direct_leave(&ctrl(']')));
         assert!(!keymap.is_direct_leave(&ctrl('5')));
+    }
+
+    #[test]
+    fn unbinding_every_way_out_of_the_pane_restores_leave() {
+        let config = load_text(
+            r#"
+            [keys.pane]
+            leave = []
+            direct_leave = []
+            "#,
+        );
+        assert_eq!(
+            config.warnings,
+            vec!["keys.pane: no way to leave the pane; leave restored to q/esc".to_string()]
+        );
+        let keymap = &config.keymap;
+        assert_eq!(keymap.after_prefix(&key('q')), Some(Action::PaneLeave));
+        assert_eq!(
+            keymap.after_prefix(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Action::PaneLeave)
+        );
+        assert!(keymap.direct_leave().is_empty());
     }
 
     #[test]
