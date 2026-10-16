@@ -19,6 +19,7 @@ async fn requests_events_and_closure_flow_through_the_actor() {
         paths: paths.clone(),
         exe: PathBuf::from("/usr/bin/true"),
         idle_exit: None,
+        direnv: None,
     }));
     let client = loop {
         if let Ok(client) = client::Client::connect(&paths).await {

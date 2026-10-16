@@ -26,8 +26,24 @@ impl TestDaemon {
     }
 
     async fn start_with(idle_exit: Option<Duration>) -> Self {
+        Self::start_configured(|config| Config {
+            idle_exit,
+            ..config
+        })
+        .await
+    }
+
+    async fn start_with_direnv(direnv: PathBuf) -> Self {
+        Self::start_configured(|config| Config {
+            direnv: Some(direnv),
+            ..config
+        })
+        .await
+    }
+
+    async fn start_configured(configure: impl FnOnce(Config) -> Config) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let task = Some(spawn_daemon_with(dir.path(), idle_exit).await);
+        let task = Some(spawn_configured(configure(config(dir.path()))).await);
         Self { dir, task }
     }
 
@@ -74,22 +90,17 @@ fn config(dir: &Path) -> Config {
         paths: StatePaths::new(dir),
         exe: PathBuf::from("/usr/bin/true"),
         idle_exit: None,
+        direnv: None,
     }
 }
 
 async fn spawn_daemon(dir: &Path) -> JoinHandle<anyhow::Result<()>> {
-    spawn_daemon_with(dir, None).await
+    spawn_configured(config(dir)).await
 }
 
-async fn spawn_daemon_with(
-    dir: &Path,
-    idle_exit: Option<Duration>,
-) -> JoinHandle<anyhow::Result<()>> {
-    let task = tokio::spawn(run(Config {
-        idle_exit,
-        ..config(dir)
-    }));
-    let socket = StatePaths::new(dir).socket();
+async fn spawn_configured(config: Config) -> JoinHandle<anyhow::Result<()>> {
+    let socket = config.paths.socket();
+    let task = tokio::spawn(run(config));
     let deadline = tokio::time::Instant::now() + WAIT;
     while UnixStream::connect(&socket).await.is_err() {
         assert!(
@@ -1657,6 +1668,108 @@ async fn a_worktree_agent_stopped_by_a_blocked_envrc_says_how_to_allow_it() {
         unreachable!()
     };
     assert_eq!(info.status, Status::Exited(1));
+}
+
+/// A stand-in for direnv: `status` runs `status`, `allow <dir>` appends to `calls` next
+/// to the script, and `exec <dir> <cmd…>` runs the command in `dir`.
+fn fake_direnv_with_status(dir: &Path, status: &str) -> PathBuf {
+    let fake = dir.join("direnv");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             status) {status} ;;\n\
+             allow) echo \"allow $2\" >> \"$(dirname \"$0\")/calls\" ;;\n\
+             exec) dir=$2; shift 2; cd \"$dir\" && exec \"$@\" ;;\n\
+             esac\n"
+        ),
+    )
+    .expect("fake direnv");
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    fake
+}
+
+fn fake_direnv(dir: &Path, allowed: bool) -> PathBuf {
+    let allowed = if allowed { 0 } else { 1 };
+    fake_direnv_with_status(
+        dir,
+        &format!(
+            r#"printf '{{"state":{{"foundRC":{{"allowed":{allowed},"path":"%s/.envrc"}}}}}}\n' "$PWD""#
+        ),
+    )
+}
+
+fn direnv_calls(fake: &Path) -> String {
+    std::fs::read_to_string(fake.with_file_name("calls")).unwrap_or_default()
+}
+
+async fn add_envrc_repo_project(conn: &mut Conn) -> (Project, tempfile::TempDir) {
+    let repo = common::repo();
+    std::fs::write(repo.path().join(".envrc"), "use flake\n").expect("write .envrc");
+    common::git(repo.path(), &["add", ".envrc"]);
+    common::git(repo.path(), &["commit", "-q", "-m", "envrc"]);
+    let Ok(Response::Project(project)) = conn
+        .request(Request::AddProject {
+            path: repo.path().to_path_buf(),
+            name: None,
+        })
+        .await
+    else {
+        panic!("add project failed");
+    };
+    (project, repo)
+}
+
+/// Creates a worktree agent under `fake` and returns direnv's recorded calls once the
+/// agent printed its working directory.
+async fn create_worktree_agent_under(fake: PathBuf, name: &str) -> (PathBuf, String) {
+    let daemon = TestDaemon::start_with_direnv(fake.clone()).await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _repo) = add_envrc_repo_project(&mut conn).await;
+    let agent = create_in_worktree(&mut conn, &project, name, &["sh", "-c", "pwd; sleep 30"])
+        .await
+        .expect("create");
+    let path = worktree_path(&daemon, &project, name);
+    conn.request(Request::Subscribe { id: agent.id })
+        .await
+        .expect("subscribe");
+    conn.wait_text(agent.id, &path.display().to_string()).await;
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    (path, direnv_calls(&fake))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identical_allowed_envrc_is_allowed_for_a_new_worktree() {
+    let bin = tempfile::tempdir().expect("bin");
+    let (path, calls) = create_worktree_agent_under(fake_direnv(bin.path(), true), "same").await;
+    assert_eq!(calls, format!("allow {}\n", path.display()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unallowed_project_envrc_is_not_copied_to_the_worktree() {
+    let bin = tempfile::tempdir().expect("bin");
+    let (_, calls) = create_worktree_agent_under(fake_direnv(bin.path(), false), "blocked").await;
+    assert_eq!(calls, "");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_failure_allows_nothing() {
+    let bin = tempfile::tempdir().expect("bin");
+    let fake = fake_direnv_with_status(bin.path(), "echo broken >&2; exit 1");
+    let (_, calls) = create_worktree_agent_under(fake, "failing").await;
+    assert_eq!(calls, "");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unparsable_status_allows_nothing() {
+    let bin = tempfile::tempdir().expect("bin");
+    let fake = fake_direnv_with_status(bin.path(), "echo nope");
+    let (_, calls) = create_worktree_agent_under(fake, "garbled").await;
+    assert_eq!(calls, "");
 }
 
 #[tokio::test(flavor = "multi_thread")]

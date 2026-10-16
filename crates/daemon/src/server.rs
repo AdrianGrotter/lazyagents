@@ -19,21 +19,21 @@ use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::encode::encode;
-use crate::git;
 use crate::lock::InstanceLock;
 use crate::reap::{self, ProcessTable, Tracked};
-use crate::spawn::{
-    Launch, SpawnContext, blocked_envrc_hint, find_in_path, hook_settings, spawn_spec,
-};
+use crate::spawn::{Launch, SpawnContext, blocked_envrc_hint, hook_settings, spawn_spec};
 use crate::status::{on_hook, settle};
 use crate::store::{self, AgentRecord, StoredState};
 use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent};
+use crate::{direnv, git};
 
 pub struct Config {
     pub paths: StatePaths,
     pub exe: PathBuf,
     /// Exit after this long with no client connected and no agent running.
     pub idle_exit: Option<Duration>,
+    /// The direnv binary that wraps agents in a directory with an `.envrc`.
+    pub direnv: Option<PathBuf>,
 }
 
 type ClientId = u64;
@@ -104,7 +104,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let accept = tokio::spawn(accept_loop(listener, incoming_tx));
     let mut readers = JoinSet::new();
     let mut writers = JoinSet::new();
-    let mut daemon = Daemon::new(paths.clone(), config.exe, state, events_tx);
+    let mut daemon = Daemon::new(paths.clone(), config.exe, config.direnv, state, events_tx);
     let mut next_client: ClientId = 1;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -323,6 +323,7 @@ impl Daemon {
     fn new(
         paths: StatePaths,
         exe: PathBuf,
+        direnv: Option<PathBuf>,
         state: StoredState,
         events: UnboundedSender<TerminalEvent>,
     ) -> Self {
@@ -334,7 +335,7 @@ impl Daemon {
         Self {
             paths,
             exe,
-            direnv: find_in_path("direnv"),
+            direnv,
             projects: state.projects,
             agents,
             clients: HashMap::new(),
@@ -635,6 +636,15 @@ impl Daemon {
             Some(request) => Some(self.add_worktree(&project, &create.name, request)?),
             None => None,
         };
+        if let (Some(direnv), Some(worktree)) = (self.direnv.as_deref(), worktree.as_ref()) {
+            match direnv::auto_allow(direnv, &project.path, &worktree.path, &[]) {
+                Ok(true) => {
+                    tracing::info!(path = %worktree.path.display(), "allowed the worktree's .envrc")
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, "checking the worktree's .envrc failed"),
+            }
+        }
         let record = AgentRecord {
             id: AgentId::random(),
             project: project.id,
@@ -1281,6 +1291,7 @@ mod tests {
         Daemon::new(
             StatePaths::new(dir),
             PathBuf::from("/usr/bin/true"),
+            None,
             StoredState::default(),
             events,
         )

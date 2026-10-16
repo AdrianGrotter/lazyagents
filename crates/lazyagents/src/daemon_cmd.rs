@@ -46,6 +46,7 @@ fn start(paths: StatePaths) -> anyhow::Result<()> {
             paths,
             exe,
             idle_exit,
+            direnv: daemon::find_in_path("direnv"),
         }))
 }
 

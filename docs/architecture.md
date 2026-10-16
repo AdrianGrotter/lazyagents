@@ -149,10 +149,15 @@ its worktree, so it can be restarted. The agent's cwd is the worktree, and
 `AgentInfo.worktree` holds its path, branch and base. Renaming the agent keeps its branch
 and worktree path.
 
-direnv allows an `.envrc` by its path, so a worktree whose checkout contains an `.envrc`
-needs `direnv allow <worktree path>` once before its agent can start: until then
-`direnv exec` refuses and the agent exits at once. The daemon never runs `direnv allow`
-itself. When a worktree agent exits and its screen shows direnv's `.envrc is blocked`
+direnv allows an `.envrc` by its path and content, so a new worktree's checked-out
+`.envrc` starts out blocked, and `direnv exec` refuses it until it is allowed. Right after
+the worktree is added, and only when `direnv` is on `PATH`, the daemon runs `direnv allow
+<worktree path>` when the worktree's `.envrc` is byte-identical to the project's and
+`direnv status --json`, run in the project, reports the project's `.envrc` as allowed
+(ADR 0008). In every other case (different content, a project `.envrc` the user has not
+allowed, no project `.envrc`, or a direnv call that fails or prints something
+unparsable) it leaves direnv untouched, logs any error, and still creates the agent, which
+then exits at once on the blocked `.envrc`. When a worktree agent exits and its screen shows direnv's `.envrc is blocked`
 error, the daemon sets `last_error` to `direnv blocked the worktree's .envrc; run: direnv
 allow <worktree path>`, and the TUI shows it in the pane as `failed to start: …`; after
 the allow, `r` restarts the agent.
