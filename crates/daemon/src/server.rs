@@ -295,7 +295,7 @@ struct Reaper {
     agent: AgentId,
     groups: Arc<[u32]>,
     tracked: Arc<[Tracked]>,
-    thread: JoinHandle<()>,
+    thread: JoinHandle<Vec<Tracked>>,
 }
 
 struct Subscription {
@@ -319,6 +319,8 @@ struct Daemon {
     last_snapshot: Instant,
     snapshot: Option<PendingSnapshot>,
     reapers: Vec<Reaper>,
+    leftovers: Vec<(AgentId, Tracked)>,
+    leftovers_retried: Option<Instant>,
 }
 
 impl Drop for Daemon {
@@ -351,6 +353,8 @@ impl Daemon {
             last_snapshot: Instant::now(),
             snapshot: None,
             reapers: Vec::new(),
+            leftovers: Vec::new(),
+            leftovers_retried: None,
         }
     }
 
@@ -799,7 +803,15 @@ impl Daemon {
             groups.extend(reaper.groups.iter().copied());
             tracked.extend(reaper.tracked.iter().cloned());
         }
-        reap::terminate(&trees, &groups, &tracked, grace);
+        tracked.extend(
+            self.leftovers
+                .extract_if(.., |(agent, _)| ids.contains(agent))
+                .map(|(_, tracked)| tracked),
+        );
+        let unverified = reap::terminate(&trees, &groups, &tracked, grace);
+        if let Some(&first) = ids.first() {
+            self.keep_leftovers(first, unverified);
+        }
         for id in ids {
             if let Some(agent) = self.agents.get_mut(id) {
                 agent.group = agent.group.filter(|&leader| reap::group_exists(leader));
@@ -814,7 +826,29 @@ impl Daemon {
         self.finish_snapshot(None);
         let mut ids: Vec<AgentId> = self.agents.keys().copied().collect();
         ids.extend(self.reapers.iter().map(|r| r.agent));
+        ids.extend(self.leftovers.iter().map(|(agent, _)| *agent));
         self.stop(&ids, SHUTDOWN_GRACE);
+        if !self.leftovers.is_empty() {
+            let pids: Vec<(u32, &str)> = self
+                .leftovers
+                .iter()
+                .map(|(_, tracked)| (tracked.pid, tracked.start.as_str()))
+                .collect();
+            tracing::error!(
+                ?pids,
+                "could not verify these processes before exiting; they were not signalled"
+            );
+        }
+    }
+
+    /// Records processes a stop could not verify, so they are retried and never
+    /// forgotten; a process already recorded is not recorded twice.
+    fn keep_leftovers(&mut self, agent: AgentId, unverified: Vec<Tracked>) {
+        for tracked in unverified {
+            if !self.leftovers.iter().any(|(_, kept)| *kept == tracked) {
+                self.leftovers.push((agent, tracked));
+            }
+        }
     }
 
     /// Waits for the running snapshot and applies it, unless `covering` names only
@@ -1151,14 +1185,51 @@ impl Daemon {
             }),
             Err(e) => {
                 tracing::error!(error = %e, "spawning a reaper thread failed; reaping inline");
-                reap::terminate(&[], &groups, &tracked, STOP_GRACE);
+                let unverified = reap::terminate(&[], &groups, &tracked, STOP_GRACE);
+                self.keep_leftovers(agent, unverified);
             }
+        }
+    }
+
+    /// Joins the finished reapers and keeps what they could not verify.
+    fn collect_reapers(&mut self) {
+        let (finished, running) = std::mem::take(&mut self.reapers)
+            .into_iter()
+            .partition::<Vec<_>, _>(|reaper| reaper.thread.is_finished());
+        self.reapers = running;
+        for reaper in finished {
+            let unverified = reaper.thread.join().unwrap_or_else(|_| {
+                tracing::error!(agent = %reaper.agent, "a reaper thread panicked");
+                reaper.tracked.to_vec()
+            });
+            self.keep_leftovers(reaper.agent, unverified);
+        }
+    }
+
+    /// Reaps the leftovers again, at most once per `SNAPSHOT` so a `ps` that keeps
+    /// failing does not start a reaper on every tick.
+    fn retry_leftovers(&mut self, now: Instant) {
+        if self.leftovers.is_empty()
+            || self
+                .leftovers_retried
+                .is_some_and(|at| now.duration_since(at) < SNAPSHOT)
+        {
+            return;
+        }
+        self.leftovers_retried = Some(now);
+        let mut by_agent: HashMap<AgentId, Vec<Tracked>> = HashMap::new();
+        for (agent, tracked) in self.leftovers.drain(..) {
+            by_agent.entry(agent).or_default().push(tracked);
+        }
+        for (agent, tracked) in by_agent {
+            self.reap_off_loop(agent, Vec::new(), tracked);
         }
     }
 
     fn tick(&mut self) {
         let now = Instant::now();
-        self.reapers.retain(|reaper| !reaper.thread.is_finished());
+        self.collect_reapers();
+        self.retry_leftovers(now);
         self.refresh_tracked(now);
         let mut changed = Vec::new();
         for (id, agent) in &mut self.agents {
@@ -1533,6 +1604,38 @@ mod tests {
         daemon.apply_snapshot(vec![(id, 0, vec![tracked])]);
         assert!(child.exits_within(Duration::from_secs(3)), "child survived");
         assert!(daemon.agents[&id].tracked.is_empty());
+    }
+
+    #[test]
+    fn leftovers_are_retried_until_verified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut daemon = test_daemon(dir.path());
+        let id = add_agent(&mut daemon, Status::Exited(0));
+        let (mut child, tracked) = Stubborn::spawn();
+        daemon.leftovers.push((id, tracked));
+        daemon.tick();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !daemon.reapers.is_empty() {
+            assert!(Instant::now() < deadline, "the reaper did not finish");
+            std::thread::sleep(Duration::from_millis(25));
+            daemon.tick();
+        }
+        assert!(child.exited(), "the leftover survived");
+        assert!(daemon.leftovers.is_empty());
+    }
+
+    #[test]
+    fn shutdown_stops_the_leftovers_of_a_removed_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut daemon = test_daemon(dir.path());
+        let (mut child, tracked) = Stubborn::spawn();
+        daemon.leftovers.push((AgentId::random(), tracked));
+        daemon.stop_all();
+        assert!(
+            child.exited(),
+            "shutdown finished while the leftover still ran"
+        );
+        assert!(daemon.leftovers.is_empty());
     }
 
     #[test]

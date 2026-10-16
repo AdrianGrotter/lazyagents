@@ -71,7 +71,11 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   and the group get SIGKILL, followed by a short wait (500 ms). The grace period is 1 s
   for one agent and 2 s shared by all agents on shutdown, which stops every agent in
   that single pass. A failed process-table reading is retried once; if it fails again,
-  the pass signals only the tree roots and the groups, and logs an error. A snapshot still running when the stop begins is waited for (up
+  the pass signals only the tree roots and the groups, and logs an error. The tracked
+  descendants it could not verify are never signalled; they are kept and passed to a
+  new pass at most once a second until a reading confirms whether they still run, and
+  every later stop covers them too. Any still unverified when shutdown finishes are
+  logged with their pid and start time and left alone. A snapshot still running when the stop begins is waited for (up
   to 2 s) first when it covers an agent being stopped, so the descendants it reports are
   part of that pass. A stop of agents the snapshot does not cover leaves it running, and
   a snapshot that takes longer than the wait stays running too; either way its results

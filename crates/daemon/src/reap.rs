@@ -146,7 +146,25 @@ pub fn terminate_tracked(tracked: &[Tracked], grace: Duration) {
 /// to `grace` until all of it is gone, then SIGKILLs what is left, including
 /// descendants forked meanwhile, and waits briefly for it to go. The trees are captured
 /// before any signal is sent, because a dying parent hands its children to init.
-pub fn terminate(trees: &[u32], groups: &[u32], tracked: &[Tracked], grace: Duration) {
+///
+/// Returns the `tracked` processes left unsignalled because no process table could be
+/// read to verify their start times; empty when a reading succeeded.
+pub fn terminate(
+    trees: &[u32],
+    groups: &[u32],
+    tracked: &[Tracked],
+    grace: Duration,
+) -> Vec<Tracked> {
+    terminate_with(&ProcessTable::read, trees, groups, tracked, grace)
+}
+
+fn terminate_with(
+    read: &dyn Fn() -> Option<ProcessTable>,
+    trees: &[u32],
+    groups: &[u32],
+    tracked: &[Tracked],
+    grace: Duration,
+) -> Vec<Tracked> {
     let trees: Vec<u32> = trees
         .iter()
         .copied()
@@ -156,27 +174,31 @@ pub fn terminate(trees: &[u32], groups: &[u32], tracked: &[Tracked], grace: Dura
     settle(&mut groups);
     groups.retain(|&leader| group_exists(leader));
     if trees.is_empty() && groups.is_empty() && tracked.is_empty() {
-        return;
+        return Vec::new();
     }
     let mut pids = trees.clone();
-    match ProcessTable::read().or_else(|| {
+    let mut unverified = Vec::new();
+    match read().or_else(|| {
         std::thread::sleep(POLL);
-        ProcessTable::read()
+        read()
     }) {
         Some(table) => {
             pids.extend(table.descendants(&trees));
             pids.extend(table.running(tracked));
         }
-        None => tracing::error!(
-            ?trees,
-            ?groups,
-            ?tracked,
-            "no process table; signalling only the trees' roots and the groups"
-        ),
+        None => {
+            tracing::error!(
+                ?trees,
+                ?groups,
+                ?tracked,
+                "no process table; signalling only the trees' roots and the groups"
+            );
+            unverified = tracked.to_vec();
+        }
     }
     settle(&mut pids);
     if pids.is_empty() && groups.is_empty() {
-        return;
+        return unverified;
     }
 
     for &leader in &groups {
@@ -187,7 +209,7 @@ pub fn terminate(trees: &[u32], groups: &[u32], tracked: &[Tracked], grace: Dura
         signal(pid, Signal::TERM);
     }
     if wait_gone(&mut pids, &groups, grace) {
-        return;
+        return unverified;
     }
     let survivors: Vec<u32> = trees
         .iter()
@@ -195,7 +217,7 @@ pub fn terminate(trees: &[u32], groups: &[u32], tracked: &[Tracked], grace: Dura
         .filter(|&pid| alive(pid))
         .chain(pids.iter().copied())
         .collect();
-    if let Some(table) = ProcessTable::read() {
+    if let Some(table) = read() {
         pids.extend(table.descendants(&survivors));
     }
     settle(&mut pids);
@@ -214,6 +236,7 @@ pub fn terminate(trees: &[u32], groups: &[u32], tracked: &[Tracked], grace: Dura
     if !wait_gone(&mut pids, &groups, KILL_WAIT) {
         tracing::error!(?pids, ?groups, "agent processes outlived SIGKILL");
     }
+    unverified
 }
 
 fn settle(pids: &mut Vec<u32>) {
@@ -383,6 +406,60 @@ mod tests {
             took >= Duration::from_millis(300) && took < Duration::from_secs(5),
             "took {took:?}"
         );
+    }
+
+    struct Child(std::process::Child);
+
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn tracked_child() -> (Child, Tracked) {
+        let child = Child(
+            Command::new("sh")
+                .args(["-c", "trap '' TERM HUP; exec sleep 300"])
+                .spawn()
+                .expect("spawn"),
+        );
+        let pid = child.0.id();
+        let tracked = snapshot(std::process::id())
+            .into_iter()
+            .find(|t| t.pid == pid)
+            .expect("ps lists the child");
+        (child, tracked)
+    }
+
+    #[test]
+    fn unverifiable_leftovers_are_never_signalled() {
+        let (mut child, tracked) = tracked_child();
+        let left = terminate_with(
+            &|| None,
+            &[],
+            &[],
+            std::slice::from_ref(&tracked),
+            Duration::from_millis(200),
+        );
+        assert_eq!(left, vec![tracked.clone()]);
+        assert!(
+            child.0.try_wait().expect("try_wait").is_none(),
+            "an unverified process was signalled"
+        );
+        let left = terminate_with(
+            &ProcessTable::read,
+            &[],
+            &[],
+            &[tracked],
+            Duration::from_millis(200),
+        );
+        assert!(left.is_empty());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.0.try_wait().expect("try_wait").is_none() {
+            assert!(Instant::now() < deadline, "the verified process survived");
+            std::thread::sleep(POLL);
+        }
     }
 
     #[test]
