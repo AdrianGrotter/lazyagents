@@ -6,7 +6,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 
 use crate::app::{
     AgentView, App, DiffView, Field, Focus, MIN_PANE, MessageKind, NewAgentForm, Popup, Preset,
@@ -197,9 +199,13 @@ pub fn render_screen(screen: &Screen, area: Rect, buf: &mut Buffer) -> Option<Po
     (x < area.width && y < area.height).then(|| Position::new(area.x + x, area.y + y))
 }
 
+fn rounded() -> Block<'static> {
+    Block::bordered().border_type(BorderType::Rounded)
+}
+
 fn block(title: impl Into<Line<'static>>, focused: bool, theme: &Theme) -> Block<'static> {
     let border = if focused { theme.accent } else { theme.border };
-    Block::bordered().title(title).border_style(border)
+    rounded().title(title).border_style(border)
 }
 
 pub fn draw(frame: &mut Frame, app: &App, areas: &Areas, now: Instant, tick: u64) {
@@ -365,9 +371,7 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
         None => " lazyagents ".to_string(),
     };
     let pane_block = if app.focus == Focus::Scroll {
-        Block::bordered()
-            .title(title)
-            .border_style(app.theme.scroll)
+        rounded().title(title).border_style(app.theme.scroll)
     } else {
         block(title, focused, &app.theme)
     };
@@ -557,7 +561,7 @@ pub fn draw_mismatch(
         Line::from(""),
         Line::from(footer).fg(Color::DarkGray),
     ];
-    let block = Block::default().borders(Borders::ALL).title(" lazyagents ");
+    let block = rounded().title(" lazyagents ");
     let inner = block.inner(screen);
     frame.render_widget(block, screen);
     let width = usize::from(inner.width.max(1));
@@ -1569,6 +1573,23 @@ mod tests {
             ],
             "{text}"
         );
+    }
+
+    fn assert_rounded(text: &str) {
+        assert!(text.contains('╭') && text.contains('╯'), "{text}");
+        assert!(!text.contains(['┌', '┐', '└', '┘']), "{text}");
+    }
+
+    #[test]
+    fn every_box_has_rounded_corners() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.popup = Some(Popup::Help);
+        assert_rounded(&render(&app).0);
+        app.popup = None;
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_rounded(&render(&app).0);
+        assert_rounded(&mismatch_text(Mismatch::Asking));
     }
 
     fn mismatch_text(stage: Mismatch) -> String {
