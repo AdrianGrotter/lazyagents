@@ -946,16 +946,23 @@ async fn kill_stops_a_descendant_in_its_own_session() {
     assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived kill");
 }
 
-/// How long an agent's parent shell stays alive after it reported its pids: several
-/// snapshot intervals, so its detached children are tracked before the parent exits.
-const RELEASE_AFTER: Duration = Duration::from_secs(3);
-
 fn wait_for_release(release: &Path) -> String {
     format!("until [ -e '{}' ]; do sleep 0.05; done", release.display())
 }
 
+/// Lets an agent's parent shell exit once the daemon has finished two process-table
+/// readings after the call, so at least one of them started after the agent's
+/// descendants existed and links them, however slow `ps` is.
 async fn release(release: &Path) {
-    tokio::time::sleep(RELEASE_AFTER).await;
+    let from = daemon::reap::readings();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while daemon::reap::readings() < from + 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon finished no two process-table readings"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     std::fs::write(release, "").expect("release");
 }
 
