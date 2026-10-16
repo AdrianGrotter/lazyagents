@@ -158,6 +158,7 @@ working = 208
 | `dim` | dark gray | hints, secondary text, starting, stopped and cleanly exited agents |
 | `border` | dark gray | unfocused borders |
 | `scroll` | yellow | the pane border in scroll mode |
+| `selected` | blue | the background of the selected row in the focused box and the add project picker |
 | `diff_add` | green | added lines in the diff view |
 | `diff_remove` | red | removed lines |
 | `diff_hunk` | cyan | hunk headers |

@@ -234,15 +234,27 @@ pub fn draw(frame: &mut Frame, app: &App, areas: &Areas, now: Instant, tick: u64
     }
 }
 
+/// The selected row keeps its own colours; it is bold, and only in the focused box it
+/// also gets the `selected` background.
+fn selection_style(focused: bool, theme: &Theme) -> Style {
+    let style = Style::new().bold();
+    if focused {
+        style.bg(theme.selected)
+    } else {
+        style
+    }
+}
+
 fn selectable_list(
     items: Vec<ListItem<'static>>,
     selected: usize,
     block: Block<'static>,
+    style: Style,
 ) -> (List<'static>, ListState) {
     let list = List::new(items)
         .block(block)
         .highlight_symbol("▸ ")
-        .highlight_style(Style::new().reversed());
+        .highlight_style(style);
     (list, ListState::default().with_selected(Some(selected)))
 }
 
@@ -270,7 +282,8 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
             ListItem::new(Line::from(spans))
         })
         .collect();
-    let (list, mut state) = selectable_list(items, app.project_index, block);
+    let style = selection_style(app.focus == Focus::Projects, &app.theme);
+    let (list, mut state) = selectable_list(items, app.project_index, block, style);
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -310,7 +323,8 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect, tick: u64) {
         return;
     }
     let items = agents.iter().map(|a| agent_row(app, a, tick)).collect();
-    let (list, mut state) = selectable_list(items, app.agent_index, block);
+    let style = selection_style(app.focus == Focus::Agents, &app.theme);
+    let (list, mut state) = selectable_list(items, app.agent_index, block, style);
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -585,64 +599,103 @@ pub fn draw_mismatch(
     );
 }
 
-pub fn popup_area(app: &App, screen: Rect) -> Option<Rect> {
-    let popup = app.popup.as_ref()?;
-    let (_, width, height, _) = popup_content(popup, app);
-    Some(centered(screen, width, height))
+struct PopupContent {
+    title: &'static str,
+    width: u16,
+    height: u16,
+    lines: Vec<Line<'static>>,
+    /// Column and row inside the border, for the text field being edited.
+    cursor: Option<(u16, u16)>,
 }
 
-fn popup_content(popup: &Popup, app: &App) -> (&'static str, u16, u16, Vec<Line<'static>>) {
+impl PopupContent {
+    fn new(title: &'static str, width: u16, lines: Vec<Line<'static>>) -> Self {
+        PopupContent {
+            title,
+            width,
+            height: lines.len() as u16 + 2,
+            lines,
+            cursor: None,
+        }
+    }
+
+    fn fitting(title: &'static str, min_width: u16, lines: Vec<Line<'static>>) -> Self {
+        let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
+        Self::new(title, width.max(min_width), lines)
+    }
+
+    /// Puts the cursor at the end of `row`.
+    fn cursor_at(mut self, row: Option<usize>) -> Self {
+        self.cursor = row.map(|row| (self.lines[row].width() as u16, row as u16));
+        self
+    }
+}
+
+pub fn popup_area(app: &App, screen: Rect) -> Option<Rect> {
+    let popup = app.popup.as_ref()?;
+    let content = popup_content(popup, app);
+    Some(centered(screen, content.width, content.height))
+}
+
+fn popup_content(popup: &Popup, app: &App) -> PopupContent {
     let theme = &app.theme;
     match popup {
-        Popup::Help => {
-            let lines = help_lines(&app.keymap);
-            let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
-            let height = lines.len() as u16 + 2;
-            (" Help ", width, height, lines)
-        }
+        Popup::Help => PopupContent::fitting(" Help ", 0, help_lines(&app.keymap)),
         Popup::NewAgent(form) => {
-            let lines = form_lines(form, app);
-            (" New agent ", 56, lines.len() as u16 + 2, lines)
+            let (lines, cursor) = form_lines(form, app);
+            PopupContent::new(" New agent ", 56, lines).cursor_at(cursor)
         }
-        Popup::Rename { input, .. } => (
-            " Rename ",
-            60,
-            5,
-            vec![Line::from(format!("Name: {input}"))],
-        ),
+        Popup::Rename { input, .. } => {
+            let lines = vec![
+                field_line("Name: ", input.clone(), true, theme),
+                Line::default(),
+            ];
+            PopupContent::new(" Rename ", 60, lines).cursor_at(Some(0))
+        }
         Popup::ProjectPicker { index } => {
-            let lines = picker_lines(app, *index);
-            let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
-            (
-                " Add project ",
-                width.max(60),
-                lines.len() as u16 + 2,
-                lines,
-            )
+            PopupContent::fitting(" Add project ", 60, picker_lines(app, *index))
         }
         Popup::AddProject(form) => {
-            let lines = project_form_lines(form, theme);
-            (" Add project ", 60, lines.len() as u16 + 2, lines)
+            let (lines, cursor) = project_form_lines(form, theme);
+            PopupContent::new(" Add project ", 60, lines).cursor_at(Some(cursor))
         }
         Popup::Confirm { prompt, action } => {
             let mut lines: Vec<Line> = prompt.lines().map(|l| Line::from(l.to_string())).collect();
             if !action.names_its_keys() {
                 lines.push(Line::from(CONFIRM_HINT).fg(theme.dim));
             }
-            let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
-            (" Confirm ", width.max(50), lines.len() as u16 + 2, lines)
+            PopupContent::fitting(" Confirm ", 50, lines)
         }
     }
 }
 
 fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
-    let (title, width, height, lines) = popup_content(popup, app);
-    let area = centered(screen, width, height);
+    let content = popup_content(popup, app);
+    let area = centered(screen, content.width, content.height);
+    let block = block(content.title, true, &app.theme);
+    let inner = block.inner(area);
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(block(title, true, &app.theme)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(content.lines).block(block), area);
+    if let Some((col, row)) = content.cursor
+        && row < inner.height
+        && inner.width > 0
+    {
+        frame.set_cursor_position(Position::new(
+            inner.x + col.min(inner.width - 1),
+            inner.y + row,
+        ));
+    }
+}
+
+/// A form row: the label is bold in the accent colour while the field has focus.
+fn field_line(label: &'static str, value: String, focused: bool, theme: &Theme) -> Line<'static> {
+    let label = Span::raw(label);
+    let label = if focused {
+        label.fg(theme.accent).bold()
+    } else {
+        label
+    };
+    Line::from(vec![label, Span::raw(value)])
 }
 
 fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
@@ -713,8 +766,11 @@ fn picker_lines(app: &App, index: usize) -> Vec<Line<'static>> {
         .skip(start)
         .take(PICKER_ROWS)
         .map(|(row, text)| {
-            let line = Line::from(text);
-            if row == index { line.reversed() } else { line }
+            if row == index {
+                Line::from(format!("▸ {text}")).style(selection_style(true, &app.theme))
+            } else {
+                Line::from(format!("  {text}"))
+            }
         })
         .collect();
     lines.push(Line::default());
@@ -722,60 +778,69 @@ fn picker_lines(app: &App, index: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn project_form_lines(form: &ProjectForm, theme: &Theme) -> Vec<Line<'static>> {
-    let field = |focus: ProjectField, text: String| {
-        let line = Line::from(text);
-        if form.field == focus {
-            line.reversed()
-        } else {
-            line
-        }
-    };
+/// Returns the lines and the row of the focused field.
+fn project_form_lines(form: &ProjectForm, theme: &Theme) -> (Vec<Line<'static>>, usize) {
     let name = if form.name.is_empty() && form.field != ProjectField::Name {
         "(directory name)"
     } else {
         form.name.as_str()
     };
-    vec![
-        field(ProjectField::Path, format!("Path: {}", form.path)),
-        field(ProjectField::Name, format!("Name: {name}")),
+    let lines = vec![
+        field_line(
+            "Path: ",
+            form.path.clone(),
+            form.field == ProjectField::Path,
+            theme,
+        ),
+        field_line(
+            "Name: ",
+            name.to_string(),
+            form.field == ProjectField::Name,
+            theme,
+        ),
         Line::default(),
         Line::from(PROJECT_FORM_HINT).fg(theme.dim),
-    ]
+    ];
+    let row = match form.field {
+        ProjectField::Path => 0,
+        ProjectField::Name => 1,
+    };
+    (lines, row)
 }
 
-fn form_lines(form: &NewAgentForm, app: &App) -> Vec<Line<'static>> {
-    let field = |focus: Field, text: String| {
-        let line = Line::from(text);
-        if form.field == focus {
-            line.reversed()
-        } else {
-            line
-        }
-    };
-    let mut lines = vec![
-        field(Field::Name, format!("Name:    {}", form.name)),
-        field(
+/// Returns the lines and, when the focused field takes text, its row.
+fn form_lines(form: &NewAgentForm, app: &App) -> (Vec<Line<'static>>, Option<usize>) {
+    let mut rows: Vec<(Field, &'static str, String)> = vec![
+        (Field::Name, "Name:    ", form.name.clone()),
+        (
             Field::Preset,
-            format!("Preset:  ‹ {} ›", form.preset.label(&app.presets)),
+            "Preset:  ",
+            format!("‹ {} ›", form.preset.label(&app.presets)),
         ),
     ];
     if form.preset == Preset::Custom {
-        lines.push(field(Field::Command, format!("Command: {}", form.command)));
+        rows.push((Field::Command, "Command: ", form.command.clone()));
     }
     let toggle = if form.worktree { "[x]" } else { "[ ]" };
-    lines.push(field(Field::Worktree, format!("Worktree: {toggle}")));
+    rows.push((Field::Worktree, "Worktree: ", toggle.to_string()));
     if form.worktree {
         let base = if form.base.is_empty() && form.field != Field::Base {
-            "(current branch)"
+            "(current branch)".to_string()
         } else {
-            form.base.as_str()
+            form.base.clone()
         };
-        lines.push(field(Field::Base, format!("Base:    {base}")));
+        rows.push((Field::Base, "Base:    ", base));
     }
+    let cursor = rows.iter().position(|(field, ..)| {
+        *field == form.field && matches!(field, Field::Name | Field::Command | Field::Base)
+    });
+    let mut lines: Vec<Line> = rows
+        .into_iter()
+        .map(|(field, label, value)| field_line(label, value, field == form.field, &app.theme))
+        .collect();
     lines.push(Line::default());
     lines.push(Line::from(FORM_HINT).fg(app.theme.dim));
-    lines
+    (lines, cursor)
 }
 
 #[cfg(test)]
@@ -1020,17 +1085,127 @@ mod tests {
         assert!(text.contains("web  ~/git/web"), "{text}");
         assert!(text.contains("old  /srv/old"), "{text}");
         assert!(text.contains("x forget"), "{text}");
-        let row = text
-            .lines()
-            .position(|l| l.contains("web  ~/git/web"))
-            .expect("web row");
-        let col = text.lines().nth(row).unwrap().find("web").unwrap() as u16;
-        assert!(
-            buffer[(col, row as u16)]
-                .modifier
-                .contains(Modifier::REVERSED),
-            "the highlighted row is reversed"
+        let marker = find_text(&buffer, buffer.area, "▸ web");
+        assert_selected(&buffer[marker], app.theme.selected);
+        let other = find_text(&buffer, buffer.area, "old  /srv/old");
+        assert_eq!(buffer[other].bg, Color::Reset);
+    }
+
+    fn assert_selected(cell: &ratatui::buffer::Cell, bg: Color) {
+        assert_eq!(cell.bg, bg, "{cell:?}");
+        assert!(cell.modifier.contains(Modifier::BOLD), "{cell:?}");
+        assert!(!cell.modifier.contains(Modifier::REVERSED), "{cell:?}");
+    }
+
+    fn assert_nothing_reversed(buffer: &Buffer) {
+        let reversed = buffer
+            .content
+            .iter()
+            .any(|cell| cell.modifier.contains(Modifier::REVERSED));
+        assert!(!reversed, "{buffer:?}");
+    }
+
+    /// The cursor's position when the frame leaves it visible.
+    fn cursor_of(app: &App) -> (Buffer, Option<(u16, u16)>) {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        let areas = layout(Rect::new(0, 0, 100, 30), app);
+        terminal
+            .draw(|f| draw(f, app, &areas, Instant::now(), 0))
+            .expect("draw");
+        let backend = terminal.backend();
+        let cursor = backend.cursor_visible().then(|| {
+            let at = backend.cursor_position();
+            (at.x, at.y)
+        });
+        (backend.buffer().clone(), cursor)
+    }
+
+    #[test]
+    fn selected_rows_keep_their_colours_and_only_the_focused_box_gets_a_background() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        let layout = layout(Rect::new(0, 0, 100, 30), &app);
+        let (_, buffer) = render(&app);
+        let dot = find_text(&buffer, layout.agents, "● a");
+        assert_eq!(buffer[dot].fg, IDLE_GREEN);
+        assert_selected(&buffer[dot], Color::Blue);
+        let project = find_text(&buffer, layout.projects, "▸ p");
+        assert_eq!(buffer[project].bg, Color::Reset);
+        assert!(buffer[project].modifier.contains(Modifier::BOLD));
+        assert_nothing_reversed(&buffer);
+
+        app.focus = Focus::Projects;
+        let (_, buffer) = render(&app);
+        assert_selected(&buffer[project], Color::Blue);
+        assert_eq!(buffer[dot].bg, Color::Reset);
+        assert_eq!(buffer[dot].fg, IDLE_GREEN);
+    }
+
+    #[test]
+    fn text_fields_show_the_cursor_instead_of_a_highlight() {
+        let (mut app, _) = loaded(Vec::new(), Vec::new());
+        app.popup = Some(Popup::AddProject(ProjectForm {
+            path: "/x/repo".into(),
+            name: String::new(),
+            field: ProjectField::Path,
+        }));
+        let (buffer, cursor) = cursor_of(&app);
+        assert_nothing_reversed(&buffer);
+        let path = find_text(&buffer, buffer.area, "Path: /x/repo");
+        assert_eq!(buffer[path].fg, app.theme.accent);
+        assert!(buffer[path].modifier.contains(Modifier::BOLD));
+        assert_eq!(
+            cursor,
+            Some((path.0 + "Path: /x/repo".len() as u16, path.1))
         );
+
+        app.popup = Some(Popup::AddProject(ProjectForm {
+            path: "/x/repo".into(),
+            name: "web".into(),
+            field: ProjectField::Name,
+        }));
+        let (buffer, cursor) = cursor_of(&app);
+        let name = find_text(&buffer, buffer.area, "Name: web");
+        assert_eq!(buffer[path].fg, Color::Reset);
+        assert_eq!(cursor, Some((name.0 + "Name: web".len() as u16, name.1)));
+
+        let agent_id = protocol::AgentId::random();
+        app.popup = Some(Popup::Rename {
+            agent: agent_id,
+            input: "abc".into(),
+        });
+        let (buffer, cursor) = cursor_of(&app);
+        let rename = find_text(&buffer, buffer.area, "Name: abc");
+        assert_eq!(
+            cursor,
+            Some((rename.0 + "Name: abc".len() as u16, rename.1))
+        );
+    }
+
+    #[test]
+    fn new_agent_form_has_a_cursor_only_on_text_fields() {
+        let (mut app, _) = loaded(vec![project("p")], Vec::new());
+        let mut form = NewAgentForm {
+            name: "bot".into(),
+            preset: Preset::Claude,
+            command: String::new(),
+            worktree: false,
+            base: String::new(),
+            field: Field::Name,
+        };
+        app.popup = Some(Popup::NewAgent(form.clone()));
+        let (buffer, cursor) = cursor_of(&app);
+        assert_nothing_reversed(&buffer);
+        let name = find_text(&buffer, buffer.area, "Name:    bot");
+        assert_eq!(cursor, Some((name.0 + "Name:    bot".len() as u16, name.1)));
+
+        form.field = Field::Preset;
+        app.popup = Some(Popup::NewAgent(form));
+        let (buffer, cursor) = cursor_of(&app);
+        assert_eq!(cursor, None);
+        let preset = find_text(&buffer, buffer.area, "Preset:");
+        assert_eq!(buffer[preset].fg, app.theme.accent);
+        assert_nothing_reversed(&buffer);
     }
 
     #[test]
