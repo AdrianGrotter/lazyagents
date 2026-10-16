@@ -94,6 +94,28 @@ pub struct NewAgentForm {
     pub field: Field,
 }
 
+/// A run of whitespace, with any dashes touching it, becomes one dash; dashes typed without
+/// whitespace stay as typed. Leading and trailing dashes are dropped.
+fn normalize_name(input: &str) -> String {
+    let separator = |c: char| c.is_whitespace() || c == '-';
+    let mut out = String::new();
+    let mut rest = input;
+    while !rest.is_empty() {
+        let split = rest.find(separator).unwrap_or(rest.len());
+        out.push_str(&rest[..split]);
+        rest = &rest[split..];
+        let end = rest.find(|c| !separator(c)).unwrap_or(rest.len());
+        let run = &rest[..end];
+        out.push_str(if run.contains(char::is_whitespace) {
+            "-"
+        } else {
+            run
+        });
+        rest = &rest[end..];
+    }
+    out.trim_matches('-').to_string()
+}
+
 impl NewAgentForm {
     pub fn fields(&self) -> Vec<Field> {
         let mut fields = vec![Field::Name, Field::Preset];
@@ -1414,7 +1436,7 @@ impl App {
             Popup::Rename { agent, mut input } => match edit(&mut input, &key) {
                 Edit::Submit => vec![Effect::Send(Request::RenameAgent {
                     id: agent,
-                    name: input.trim().to_string(),
+                    name: normalize_name(&input),
                 })],
                 Edit::Cancel => Vec::new(),
                 Edit::Continue => {
@@ -1522,7 +1544,7 @@ impl App {
         let Some(project) = self.selected_project().map(|p| p.id) else {
             return Vec::new();
         };
-        let name = form.name.trim().to_string();
+        let name = normalize_name(&form.name);
         if name.is_empty() {
             self.fail("name the agent first");
             self.popup = Some(Popup::NewAgent(form));
@@ -2385,6 +2407,59 @@ pub(crate) mod tests {
             })]
         );
         assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn normalize_name_turns_whitespace_into_single_dashes() {
+        for (input, expected) in [
+            ("a - b", "a-b"),
+            ("a  b", "a-b"),
+            ("a -- b", "a-b"),
+            ("a--b", "a--b"),
+            ("a\tb", "a-b"),
+            ("  my  new agent ", "my-new-agent"),
+            (" -x- ", "x"),
+            ("", ""),
+            ("   ", ""),
+            ("plain", "plain"),
+        ] {
+            assert_eq!(normalize_name(input), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn form_submit_normalizes_the_name() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, " my  new agent ");
+        let c = created(app.on_key(code(KeyCode::Enter)));
+        assert_eq!(c.name, "my-new-agent");
+    }
+
+    #[test]
+    fn rename_submit_normalizes_the_name() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(key('R'));
+        for _ in 0..5 {
+            let _ = app.on_key(code(KeyCode::Backspace));
+        }
+        type_text(&mut app, " big  omega ");
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            vec![Effect::Send(Request::RenameAgent {
+                id: a.id,
+                name: "big-omega".into()
+            })]
+        );
+    }
+
+    #[test]
+    fn blank_name_still_asks_for_a_name() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "  ");
+        assert_eq!(app.on_key(code(KeyCode::Enter)), Vec::new());
+        assert!(matches!(app.popup, Some(Popup::NewAgent(_))));
     }
 
     #[test]

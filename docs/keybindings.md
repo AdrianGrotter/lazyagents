@@ -37,6 +37,8 @@ Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the new ag
 `tab`/`shift-tab` (or `↓`/`↑`) move between the visible fields, `enter` starts the agent and
 `esc` cancels. The fields are Name, Preset (`←`/`→`/`space` change it), Command (only for the
 custom preset), Worktree (`space`/`←`/`→` toggle it) and Base (only while Worktree is on).
+Spaces in an agent's name (new agent form and rename) become dashes: `my new agent` is
+stored as `my-new-agent`.
 With Worktree on, the agent runs in a new git worktree on branch `lazyagents/<name>`, made
 from Base; an empty Base means the project's current branch. Removing an agent never
 deletes its branch, so a new worktree agent with a removed agent's name fails with git's
