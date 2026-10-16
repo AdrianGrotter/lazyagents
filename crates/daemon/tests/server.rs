@@ -1693,8 +1693,9 @@ async fn a_worktree_agent_stopped_by_a_blocked_envrc_says_how_to_allow_it() {
     assert_eq!(info.status, Status::Exited(1));
 }
 
-/// A stand-in for direnv: `status` runs `status`, `allow <dir>` appends to `calls` next
-/// to the script, and `exec <dir> <cmd…>` runs the command in `dir`.
+/// A stand-in for direnv: `status` and `allow <dir>` append themselves to `calls` next
+/// to the script, `status` then runs the given `status` command, and `exec <dir> <cmd…>`
+/// runs the command in `dir`.
 fn fake_direnv_with_status(dir: &Path, status: &str) -> PathBuf {
     let fake = dir.join("direnv");
     std::fs::write(
@@ -1702,7 +1703,7 @@ fn fake_direnv_with_status(dir: &Path, status: &str) -> PathBuf {
         format!(
             "#!/bin/sh\n\
              case \"$1\" in\n\
-             status) {status} ;;\n\
+             status) echo status >> \"$(dirname \"$0\")/calls\"; {status} ;;\n\
              allow) echo \"allow $2\" >> \"$(dirname \"$0\")/calls\" ;;\n\
              exec) dir=$2; shift 2; cd \"$dir\" && exec \"$@\" ;;\n\
              esac\n"
@@ -1769,14 +1770,14 @@ async fn create_worktree_agent_under(fake: PathBuf, name: &str) -> (PathBuf, Str
 async fn identical_allowed_envrc_is_allowed_for_a_new_worktree() {
     let bin = tempfile::tempdir().expect("bin");
     let (path, calls) = create_worktree_agent_under(fake_direnv(bin.path(), true), "same").await;
-    assert_eq!(calls, format!("allow {}\n", path.display()));
+    assert_eq!(calls, format!("status\nallow {}\n", path.display()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unallowed_project_envrc_is_not_copied_to_the_worktree() {
     let bin = tempfile::tempdir().expect("bin");
     let (_, calls) = create_worktree_agent_under(fake_direnv(bin.path(), false), "blocked").await;
-    assert_eq!(calls, "");
+    assert_eq!(calls, "status\n");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1784,7 +1785,7 @@ async fn status_failure_allows_nothing() {
     let bin = tempfile::tempdir().expect("bin");
     let fake = fake_direnv_with_status(bin.path(), "echo broken >&2; exit 1");
     let (_, calls) = create_worktree_agent_under(fake, "failing").await;
-    assert_eq!(calls, "");
+    assert_eq!(calls, "status\n");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1792,7 +1793,7 @@ async fn unparsable_status_allows_nothing() {
     let bin = tempfile::tempdir().expect("bin");
     let fake = fake_direnv_with_status(bin.path(), "echo nope");
     let (_, calls) = create_worktree_agent_under(fake, "garbled").await;
-    assert_eq!(calls, "");
+    assert_eq!(calls, "status\n");
 }
 
 #[tokio::test(flavor = "multi_thread")]

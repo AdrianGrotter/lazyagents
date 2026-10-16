@@ -5,7 +5,7 @@ use daemon::direnv::{allow, auto_allow, is_allowed};
 const ENVRC: &str = "export LAZYAGENTS_DIRENV_TEST=1\n";
 
 /// direnv's home, data, config and cache dirs, all inside one tempdir so the user's
-/// allow list is never read or written.
+/// allow list and config are never read or written.
 struct Home {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -32,12 +32,13 @@ impl Home {
         }
     }
 
-    fn env(&self) -> [(&str, &Path); 4] {
+    fn env(&self) -> [(&str, &Path); 5] {
         [
             ("HOME", &self.root),
             ("XDG_DATA_HOME", &self.data),
             ("XDG_CONFIG_HOME", &self.config),
             ("XDG_CACHE_HOME", &self.cache),
+            ("DIRENV_CONFIG", &self.config),
         ]
     }
 }
