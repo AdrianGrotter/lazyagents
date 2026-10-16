@@ -291,3 +291,63 @@ fn stop_daemon_without_a_daemon_is_ok() {
         "stop_daemon signalled a pid from an unlocked lock file"
     );
 }
+
+/// A `sleep` standing in for a daemon whose lock is held by the test; the lock is
+/// released once `sleep` exits. SIGKILLed by its pid on drop if it still runs.
+struct LockedSleeper(std::sync::Arc<std::sync::Mutex<std::process::Child>>);
+
+impl LockedSleeper {
+    fn exited(&self) -> bool {
+        let mut child = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !matches!(child.try_wait(), Ok(None))
+    }
+}
+
+impl Drop for LockedSleeper {
+    fn drop(&mut self) {
+        let mut child = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[test]
+fn stop_daemon_waits_for_a_pid_written_after_the_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path());
+    let sleeper = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .expect("sleep");
+    let pid = sleeper.id();
+    let lock = paths.lock_file();
+    std::fs::write(&lock, "").expect("lock file");
+    let held = std::fs::File::open(&lock).expect("open lock file");
+    held.lock().expect("hold the lock");
+    let fake = LockedSleeper(std::sync::Arc::new(std::sync::Mutex::new(sleeper)));
+    let watched = LockedSleeper(std::sync::Arc::clone(&fake.0));
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        std::fs::write(&lock, pid.to_string()).expect("write pid");
+        while !watched.exited() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(held);
+    });
+
+    let result = client::stop_daemon(&paths, Duration::from_secs(5));
+    let stopped = fake.exited();
+    drop(fake);
+    writer.join().expect("writer");
+    result.expect("stop");
+    assert!(stopped, "stop_daemon returned without stopping {pid}");
+}

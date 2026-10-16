@@ -520,7 +520,24 @@ fn draw_too_small(frame: &mut Frame) {
     );
 }
 
-pub fn draw_mismatch(frame: &mut Frame, daemon_version: &str, protocol_version: u32) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mismatch {
+    Asking,
+    /// The pid of the daemon being stopped, when its lock names one.
+    Stopping(Option<u32>),
+}
+
+pub fn draw_mismatch(
+    frame: &mut Frame,
+    daemon_version: &str,
+    protocol_version: u32,
+    stage: Mismatch,
+) {
+    let footer = match stage {
+        Mismatch::Asking => "y restart · n quit".to_string(),
+        Mismatch::Stopping(Some(pid)) => format!("stopping daemon {pid}…"),
+        Mismatch::Stopping(None) => "stopping daemon…".to_string(),
+    };
     let screen = frame.area();
     let lines = vec![
         Line::from(format!(
@@ -531,7 +548,7 @@ pub fn draw_mismatch(frame: &mut Frame, daemon_version: &str, protocol_version: 
         Line::from(""),
         Line::from("Restart the daemon? This stops every running agent."),
         Line::from(""),
-        Line::from("y restart · n quit").fg(Color::DarkGray),
+        Line::from(footer).fg(Color::DarkGray),
     ];
     let block = Block::default().borders(Borders::ALL).title(" lazyagents ");
     let inner = block.inner(screen);
@@ -1398,21 +1415,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mismatch_popup_text() {
+    fn mismatch_text(stage: Mismatch) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
         terminal
-            .draw(|f| draw_mismatch(f, "0.1.0", 1))
+            .draw(|f| draw_mismatch(f, "0.1.0", 1, stage))
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        let text = (0..buffer.area.height)
+        (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+    }
+
+    #[test]
+    fn mismatch_prompt_shows_the_daemon_being_stopped() {
+        let text = mismatch_text(Mismatch::Stopping(Some(4242)));
+        assert!(text.contains("stopping daemon 4242…"), "{text}");
+        assert!(!text.contains("y restart"), "{text}");
+        let text = mismatch_text(Mismatch::Stopping(None));
+        assert!(text.contains("stopping daemon…"), "{text}");
+    }
+
+    #[test]
+    fn mismatch_popup_text() {
+        let text = mismatch_text(Mismatch::Asking);
         assert!(
             text.contains(&format!(
                 "This lazyagents (protocol {}) can't talk to the running daemon 0.1.0 (protocol 1).",

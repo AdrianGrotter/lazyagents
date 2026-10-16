@@ -227,9 +227,9 @@ fn other_daemon_running(paths: &StatePaths, ours: u32) -> bool {
     })
 }
 
-/// The pid the running daemon recorded in its lock file; `None` unless another process
-/// holds the lock.
-pub fn daemon_pid(paths: &StatePaths) -> Option<u32> {
+/// Who holds the daemon lock: `None` when nobody does, `Some(None)` while the holder
+/// has not written a readable pid yet.
+fn lock_holder(paths: &StatePaths) -> Option<Option<u32>> {
     use std::io::Read;
 
     let mut file = std::fs::File::open(paths.lock_file()).ok()?;
@@ -237,30 +237,65 @@ pub fn daemon_pid(paths: &StatePaths) -> Option<u32> {
         return None;
     }
     let mut holder = String::new();
-    file.read_to_string(&mut holder).ok()?;
-    holder.trim().parse().ok()
+    Some(
+        file.read_to_string(&mut holder)
+            .ok()
+            .and_then(|_| holder.trim().parse().ok()),
+    )
 }
 
+/// The pid the running daemon recorded in its lock file; `None` unless another process
+/// holds the lock. A daemon writes its pid just after taking the lock, so an empty or
+/// unreadable pid is read again for up to `PID_WAIT`.
+pub fn daemon_pid(paths: &StatePaths) -> Option<u32> {
+    let deadline = Instant::now() + PID_WAIT;
+    loop {
+        match lock_holder(paths)? {
+            Some(pid) => return Some(pid),
+            None if Instant::now() >= deadline => return None,
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+}
+
+const PID_WAIT: Duration = Duration::from_millis(500);
+
 /// SIGTERMs the daemon holding the lock, which stops its agents before it exits, and waits
-/// until its socket is gone and it has released the lock. Never escalates to SIGKILL: that
-/// would orphan the agents' process trees.
+/// until it has released the lock. Never escalates to SIGKILL: that would orphan the
+/// agents' process trees. A daemon that answers on the socket without holding the lock
+/// cannot be identified, so it is an error rather than something stopped.
 pub fn stop_daemon(paths: &StatePaths, timeout: Duration) -> anyhow::Result<()> {
     use rustix::process::{Pid, Signal, kill_process};
 
+    let lock = paths.lock_file();
     let Some(pid) = daemon_pid(paths) else {
-        return Ok(());
+        if lock_holder(paths).is_some() {
+            anyhow::bail!(
+                "{} is locked but names no daemon pid; stop the daemon by hand",
+                lock.display()
+            );
+        }
+        return unlocked_daemon(paths);
     };
     let target = i32::try_from(pid)
         .ok()
         .and_then(Pid::from_raw)
         .ok_or_else(|| anyhow::anyhow!("daemon.lock names an invalid pid {pid}"))?;
+    match lock_holder(paths) {
+        Some(Some(holder)) if holder == pid => {}
+        None => return unlocked_daemon(paths),
+        Some(_) => anyhow::bail!(
+            "{} changed hands while stopping daemon {pid}; try again",
+            lock.display()
+        ),
+    }
     if let Err(e) = kill_process(target, Signal::TERM)
         && e != rustix::io::Errno::SRCH
     {
         return Err(anyhow::Error::new(e).context(format!("signalling daemon {pid}")));
     }
     let deadline = Instant::now() + timeout;
-    while paths.socket().exists() || daemon_pid(paths) == Some(pid) {
+    while lock_holder(paths).is_some() {
         if Instant::now() >= deadline {
             anyhow::bail!(
                 "daemon {pid} did not stop within {}s",
@@ -268,6 +303,20 @@ pub fn stop_daemon(paths: &StatePaths, timeout: Duration) -> anyhow::Result<()> 
             );
         }
         std::thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
+}
+
+/// Nothing holds the lock: fine unless something still answers on the socket.
+fn unlocked_daemon(paths: &StatePaths) -> anyhow::Result<()> {
+    let socket = paths.socket();
+    if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        anyhow::bail!(
+            "a daemon answers on {} but holds no lock on {}, so its pid is unknown; \
+             stop it by hand",
+            socket.display(),
+            paths.lock_file().display()
+        );
     }
     Ok(())
 }

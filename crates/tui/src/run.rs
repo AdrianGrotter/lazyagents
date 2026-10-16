@@ -3,6 +3,7 @@ use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use client::{Client, VersionMismatch};
 use protocol::{Request, StatePaths};
 use ratatui::DefaultTerminal;
@@ -21,7 +22,7 @@ use crate::app::{App, Effect, MouseInput, MouseKind};
 use crate::clipboard;
 use crate::config;
 use crate::connection::{self, Incoming};
-use crate::ui;
+use crate::ui::{self, Mismatch};
 
 enum Term {
     Key(KeyEvent),
@@ -96,15 +97,55 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                 return Err(error);
             };
             let (mut guard, mut input) = open_terminal()?;
-            match ask_restart(&mut guard, &mut input, mismatch).await? {
+            let mut signals = Signals::new()?;
+            match ask_restart(&mut guard, &mut input, mismatch, &mut signals).await? {
                 Answer::Restart => {}
                 Answer::Quit => return Err(error),
                 Answer::Leave => return Ok(()),
             }
+            let lock = paths.clone();
+            let pid = tokio::task::spawn_blocking(move || client::daemon_pid(&lock)).await?;
+            guard.terminal.draw(|frame| {
+                ui::draw_mismatch(
+                    frame,
+                    &mismatch.daemon_version,
+                    mismatch.protocol_version,
+                    Mismatch::Stopping(pid),
+                )
+            })?;
             let stop = paths.clone();
-            tokio::task::spawn_blocking(move || client::stop_daemon(&stop, Duration::from_secs(5)))
-                .await??;
-            let client = Client::connect_or_spawn(&paths, &exe).await?;
+            let mut stopping = tokio::task::spawn_blocking(move || {
+                client::stop_daemon(&stop, Duration::from_secs(5))
+            });
+            loop {
+                tokio::select! {
+                    stopped = &mut stopping => {
+                        stopped?.with_context(|| {
+                            format!(
+                                "stopping daemon {} (protocol {})",
+                                mismatch.daemon_version, mismatch.protocol_version
+                            )
+                        })?;
+                        break;
+                    }
+                    event = input.recv() => match event {
+                        Some(Term::Key(key)) if is_ctrl_c(&key) => return Ok(()),
+                        Some(Term::Gone) | None => return Ok(()),
+                        Some(_) => {}
+                    },
+                    _ = signals.hangup.recv() => return Ok(()),
+                    _ = signals.terminate.recv() => return Ok(()),
+                    _ = signals.interrupt.recv() => return Ok(()),
+                }
+            }
+            let client = tokio::select! {
+                client = Client::connect_or_spawn(&paths, &exe) => {
+                    client.context("starting a new daemon")?
+                }
+                _ = signals.hangup.recv() => return Ok(()),
+                _ = signals.terminate.recv() => return Ok(()),
+                _ = signals.interrupt.recv() => return Ok(()),
+            };
             while input.try_recv().is_ok() {}
             (client, guard, input)
         }
@@ -218,36 +259,59 @@ enum Answer {
     Leave,
 }
 
+/// Kept from the mismatch prompt until a new daemon answers: once a handler is
+/// installed the default action no longer applies, so the signals must stay watched.
+struct Signals {
+    hangup: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+    interrupt: tokio::signal::unix::Signal,
+}
+
+impl Signals {
+    fn new() -> anyhow::Result<Self> {
+        Ok(Self {
+            hangup: signal(SignalKind::hangup())?,
+            terminate: signal(SignalKind::terminate())?,
+            interrupt: signal(SignalKind::interrupt())?,
+        })
+    }
+}
+
 async fn ask_restart(
     guard: &mut TerminalGuard,
     input: &mut UnboundedReceiver<Term>,
     mismatch: &VersionMismatch,
+    signals: &mut Signals,
 ) -> anyhow::Result<Answer> {
-    let mut hangup = signal(SignalKind::hangup())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
     loop {
         guard.terminal.draw(|frame| {
-            ui::draw_mismatch(frame, &mismatch.daemon_version, mismatch.protocol_version)
+            ui::draw_mismatch(
+                frame,
+                &mismatch.daemon_version,
+                mismatch.protocol_version,
+                Mismatch::Asking,
+            )
         })?;
         tokio::select! {
             event = input.recv() => match event {
                 Some(Term::Key(key)) => match key.code {
                     KeyCode::Char('y') => return Ok(Answer::Restart),
                     KeyCode::Char('n' | 'q') | KeyCode::Esc => return Ok(Answer::Quit),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(Answer::Quit);
-                    }
+                    _ if is_ctrl_c(&key) => return Ok(Answer::Quit),
                     _ => {}
                 },
                 Some(Term::Gone) | None => return Ok(Answer::Leave),
                 Some(_) => {}
             },
-            _ = hangup.recv() => return Ok(Answer::Leave),
-            _ = terminate.recv() => return Ok(Answer::Quit),
-            _ = interrupt.recv() => return Ok(Answer::Quit),
+            _ = signals.hangup.recv() => return Ok(Answer::Leave),
+            _ = signals.terminate.recv() => return Ok(Answer::Quit),
+            _ = signals.interrupt.recv() => return Ok(Answer::Quit),
         }
     }
+}
+
+fn is_ctrl_c(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn send_all(requests: &UnboundedSender<Request>, effects: Vec<Effect>) {

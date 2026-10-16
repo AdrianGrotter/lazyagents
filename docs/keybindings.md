@@ -55,8 +55,9 @@ changes — d to try again` (with the configured remove key), and focus stays wh
 
 **Protocol mismatch**: when the running daemon speaks another protocol version, the TUI
 opens on a full-screen prompt instead of the sidebar. `y` stops that daemon and its agents
-(SIGTERM, up to 5 s) and continues with a new daemon; `n`, `q`, `esc` and `ctrl-c` quit
-with the mismatch error.
+(SIGTERM, up to 5 s; the prompt shows `stopping daemon <pid>…` meanwhile, and `ctrl-c`
+abandons the wait and quits) and continues with a new daemon; `n`, `q`, `esc` and `ctrl-c`
+quit with the mismatch error.
 
 **Diff view** (`D`): the main pane shows `git diff` of the selected agent's directory:
 against the merge base with its base branch for a worktree agent (committed and uncommitted

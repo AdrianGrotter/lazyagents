@@ -620,6 +620,21 @@ fn shutdown_stops_a_mismatched_daemon() {
     assert!(exited(&fake.0), "shutdown did not stop it");
 }
 
+#[test]
+fn shutdown_refuses_a_daemon_that_answers_without_the_lock() {
+    let env = TestEnv::new();
+    serve_foreign_protocol(env.socket());
+    let out = env.run(&["shutdown"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("daemon stopped"),
+        "{out:?}"
+    );
+    assert!(stderr.contains("9.9.9"), "{stderr}");
+    assert!(stderr.contains("stop it by hand"), "{stderr}");
+}
+
 /// A `lazyagents daemon` child, SIGKILLed by its pid on drop if it is still running.
 struct DaemonChild(std::process::Child);
 

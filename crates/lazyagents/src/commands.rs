@@ -118,13 +118,18 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
 async fn shutdown(paths: &StatePaths) -> anyhow::Result<()> {
     let mut client = match Client::connect(paths).await {
         Ok(client) => client,
-        Err(e) if e.downcast_ref::<VersionMismatch>().is_some() => {
-            client::stop_daemon(paths, Duration::from_secs(5))?;
+        Err(e) => {
+            let Some(mismatch) = e.downcast_ref::<VersionMismatch>() else {
+                println!("daemon is not running");
+                return Ok(());
+            };
+            client::stop_daemon(paths, Duration::from_secs(5)).with_context(|| {
+                format!(
+                    "stopping daemon {} (protocol {})",
+                    mismatch.daemon_version, mismatch.protocol_version
+                )
+            })?;
             println!("daemon stopped");
-            return Ok(());
-        }
-        Err(_) => {
-            println!("daemon is not running");
             return Ok(());
         }
     };

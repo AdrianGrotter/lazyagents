@@ -242,14 +242,20 @@ daemon last told it.
 
 - Protocol version mismatch → the client fails with `VersionMismatch`, which suggests
   `lazyagents shutdown`. A mismatched daemon cannot be asked to stop over the socket, so
-  `client::stop_daemon` sends SIGTERM to the pid in `daemon.lock` (only while the lock
-  is held) and waits up to 5 s for the socket to go and the lock to be released. The
-  daemon's SIGTERM handler stops every agent first. It never escalates to SIGKILL,
-  which would orphan the agents' process trees; on timeout it fails with
-  `daemon <pid> did not stop within 5s`. `shutdown` uses it and prints `daemon stopped`.
-  The TUI shows a full-screen popup naming both protocol versions: `y` stops the daemon
-  this way and continues with a new one, `n`, `q` or `esc` exits with the mismatch
-  error.
+  `client::stop_daemon` sends SIGTERM to the pid in `daemon.lock` and waits up to 5 s
+  for the lock to be released. A daemon writes its pid just after taking the lock, so
+  an empty pid is read again for up to 500 ms; the pid and the lock are checked once
+  more right before the signal. The daemon's SIGTERM handler stops every agent first.
+  It never escalates to SIGKILL, which would orphan the agents' process trees; on
+  timeout it fails with `daemon <pid> did not stop within 5s`. A daemon that answers on
+  the socket while nothing holds the lock cannot be identified, so `stop_daemon` fails
+  and asks the user to stop it by hand, as it does when the lock stays without a pid.
+  `shutdown` uses it, adds which daemon answered (version and protocol) to an error,
+  and prints `daemon stopped` only on success. The TUI shows a full-screen popup naming
+  both protocol versions: `y` shows `stopping daemon <pid>…`, stops the daemon this way
+  and continues with a new one (an error there says `starting a new daemon`); `ctrl-c`,
+  SIGINT, SIGTERM, SIGHUP or a vanished terminal meanwhile abandon the wait and quit. `n`, `q` or `esc` exits with
+  the mismatch error.
 - Socket exists but connect fails → spawn a daemon, which removes the stale socket once
   it holds the lock.
 - A daemon that exits while the client waits for it to start → the client fails at
