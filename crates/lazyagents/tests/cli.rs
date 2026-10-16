@@ -371,8 +371,20 @@ fn idle_notification_marks_a_claude_agent_idle() {
     assert!(!env.ok(&["ls"]).contains("needs input"));
 }
 
+/// Runs the binary once, so a timed run measures it rather than the first exec of a
+/// newly linked binary, which macOS holds up for its code-signature assessment.
+fn warm_up() {
+    let out = Command::new(BIN)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lazyagents --version");
+    assert!(out.status.success(), "{out:?}");
+}
+
 #[test]
 fn hook_is_silent_and_fast_without_daemon() {
+    warm_up();
     let start = Instant::now();
     let out = Command::new(BIN)
         .args(["hook", "Stop"])
@@ -453,6 +465,7 @@ fn daemon_startup_errors_are_logged() {
 #[test]
 fn hook_does_not_wait_on_an_open_stdin() {
     let dir = tempfile::tempdir().expect("dir");
+    warm_up();
     let mut child = Command::new(BIN)
         .args(["hook", "Stop"])
         .env(
@@ -652,6 +665,7 @@ fn stop_daemon_stops_a_running_daemon() {
 fn daemon_that_dies_at_startup_fails_fast() {
     let parent = tempfile::tempdir().expect("parent");
     let state = parent.path().join("s".repeat(110));
+    warm_up();
     let started = Instant::now();
     let out = Command::new(BIN)
         .arg("ls")
@@ -702,6 +716,7 @@ fn daemon_does_not_inherit_claude_code_variables() {
 #[test]
 fn no_subcommand_without_a_terminal_fails_cleanly() {
     let env = TestEnv::new();
+    warm_up();
     let started = Instant::now();
     let out = env.run(&[]);
     assert!(started.elapsed() < Duration::from_secs(5), "{out:?}");
