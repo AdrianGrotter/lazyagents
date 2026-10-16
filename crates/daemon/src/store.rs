@@ -20,6 +20,8 @@ pub struct AgentRecord {
     pub resumable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +76,7 @@ mod tests {
                         branch: "agent/api".into(),
                         base: "main".into(),
                     }),
+                    title: None,
                 },
                 AgentRecord {
                     id: AgentId::random(),
@@ -85,6 +88,7 @@ mod tests {
                     session_id: None,
                     resumable: false,
                     worktree: None,
+                    title: None,
                 },
             ],
             projects: vec![project],

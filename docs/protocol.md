@@ -1,6 +1,6 @@
 # Protocol
 
-Status: implemented in crates/protocol (version 2); that crate is the source of truth.
+Status: implemented in crates/protocol (version 3); that crate is the source of truth.
 
 ## Transport and framing
 
@@ -86,6 +86,13 @@ is rejected.
 work for any agent that still has a terminal, including an exited one, and are rejected
 for a stopped agent, which has none. `Subscribe` succeeds for any known agent.
 A `Hook` for an agent that is not running, or is not a Claude agent, is ignored.
+
+`AgentInfo.title` is a Claude agent's session title: the terminal title Claude Code sets
+(OSC 0/2), without its leading status glyph. `Claude Code` and an empty title are not
+session titles and leave the stored title alone. A new session (a fresh restart, or a
+`SessionStart` hook with a new session id that is not a resume or compact) clears it.
+The title is kept in `state.toml`, so a stopped agent keeps it. Other agents' titles are
+ignored and stay `None`.
 
 ## Worktrees and git queries
 

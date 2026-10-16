@@ -287,6 +287,14 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// A Claude agent is listed by its session's title once it has one.
+fn label(agent: &AgentInfo) -> &str {
+    match (&agent.title, agent.kind) {
+        (Some(title), AgentKind::Claude) => title,
+        _ => &agent.name,
+    }
+}
+
 fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
     let (symbol, style) = glyph(agent.status, tick, &app.theme);
     let name = match app.view {
@@ -295,10 +303,10 @@ fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
             format!(
                 "{}/{}",
                 project.map_or("?", |p| p.name.as_str()),
-                agent.name
+                label(agent)
             )
         }
-        AgentView::Project => agent.name.clone(),
+        AgentView::Project => label(agent).to_string(),
     };
     let rest = format!(" {name}  {}", agent.status.label());
     let line = Line::from(vec![Span::styled(symbol, style), Span::raw(rest)]);
@@ -346,6 +354,9 @@ pub fn info_lines(app: &App) -> Vec<String> {
                 agent.command.join(" ")
             };
             let mut lines = vec![format!("status: {}", agent.status.label())];
+            if label(agent) != agent.name {
+                lines.push(format!("name: {}", agent.name));
+            }
             if let Some(worktree) = &agent.worktree {
                 lines.push(format!("branch: {}", worktree.branch));
             }
@@ -888,6 +899,29 @@ mod tests {
         assert!(text.contains("press a to add a project"), "{text}");
         assert!(text.contains("press n to start an agent"), "{text}");
         assert!(text.contains(" lazyagents "), "{text}");
+    }
+
+    #[test]
+    fn claude_agents_are_listed_by_their_session_title() {
+        let p = project("p");
+        let mut titled = agent(&p, "claude-1", Status::Idle);
+        titled.kind = AgentKind::Claude;
+        titled.title = Some("Fix it".into());
+        let mut untitled = agent(&p, "claude-2", Status::Idle);
+        untitled.kind = AgentKind::Claude;
+        let mut shell = agent(&p, "sh", Status::Idle);
+        shell.title = Some("~/git/x".into());
+        let (mut app, _) = loaded(vec![p], vec![titled, untitled, shell]);
+        let (text, _) = render(&app);
+        assert!(text.contains("● Fix it  idle"), "{text}");
+        assert!(text.contains("● claude-2  idle"), "{text}");
+        assert!(text.contains("● sh  idle"), "{text}");
+        assert!(!text.contains("~/git/x"), "{text}");
+        assert!(info_lines(&app).contains(&"name: claude-1".to_string()));
+
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+        let (text, _) = render(&app);
+        assert!(text.contains("p/Fix it"), "{text}");
     }
 
     #[test]

@@ -1706,16 +1706,29 @@ impl App {
         Vec::new()
     }
 
+    /// `<preset>-<n>` with the lowest `n` that no agent in the project uses.
+    fn free_name(&self, project: ProjectId, preset: Preset) -> String {
+        let base = normalize_name(preset.label(&self.presets));
+        let base = if base.is_empty() { "agent" } else { &base };
+        let taken = |name: &str| {
+            self.agents
+                .iter()
+                .any(|a| a.project == project && a.name == name)
+        };
+        (1..)
+            .map(|n| format!("{base}-{n}"))
+            .find(|name| !taken(name))
+            .expect("some number is free")
+    }
+
     fn submit_form(&mut self, form: NewAgentForm) -> Vec<Effect> {
         let Some(project) = self.selected_project().map(|p| p.id) else {
             return Vec::new();
         };
-        let name = normalize_name(&form.name);
-        if name.is_empty() {
-            self.fail("name the agent first");
-            self.popup = Some(Popup::NewAgent(form));
-            return Vec::new();
-        }
+        let name = match normalize_name(&form.name) {
+            name if name.is_empty() => self.free_name(project, form.preset),
+            name => name,
+        };
         let (kind, command) = match form.preset {
             Preset::Claude => (AgentKind::Claude, Vec::new()),
             Preset::Shell => (AgentKind::Generic, vec![self.shell.clone()]),
@@ -1850,6 +1863,7 @@ pub(crate) mod tests {
             status,
             worktree: None,
             last_error: None,
+            title: None,
         }
     }
 
@@ -2626,15 +2640,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn blank_name_still_asks_for_a_name() {
-        let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
-        type_text(&mut app, "  ");
-        assert_eq!(app.on_key(code(KeyCode::Enter)), Vec::new());
-        assert!(matches!(app.popup, Some(Popup::NewAgent(_))));
-    }
-
-    #[test]
     fn number_keys_focus_the_sidebar_boxes() {
         let (mut app, _, _) = two_agents();
         let _ = app.on_key(key('2'));
@@ -3083,15 +3088,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn new_agent_form_validates() {
-        let (mut app, _, _) = two_agents();
+    fn an_empty_name_takes_the_next_free_number_for_the_preset() {
+        let (p, q) = (project("p"), project("q"));
+        let agents = vec![
+            agent(&p, "claude-1", Status::Idle),
+            agent(&p, "claude-3", Status::Idle),
+            agent(&q, "claude-2", Status::Idle),
+        ];
+        let (mut app, _) = loaded(vec![p, q], agents);
         let _ = app.on_key(key('n'));
-        assert!(app.on_key(code(KeyCode::Enter)).is_empty());
-        assert!(matches!(app.popup, Some(Popup::NewAgent(_))));
-        assert_eq!(
-            app.message.as_ref().map(|(m, _)| m.as_str()),
-            Some("name the agent first")
-        );
+        assert_eq!(created(app.on_key(code(KeyCode::Enter))).name, "claude-2");
+
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "   ");
+        let _ = app.on_key(code(KeyCode::Tab));
+        let _ = app.on_key(code(KeyCode::Right));
+        assert_eq!(created(app.on_key(code(KeyCode::Enter))).name, "shell-1");
     }
 
     #[test]
@@ -3122,6 +3134,7 @@ pub(crate) mod tests {
             status: Status::Starting,
             worktree: None,
             last_error: None,
+            title: None,
         }
     }
 

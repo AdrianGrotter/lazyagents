@@ -133,6 +133,7 @@ mod tests {
                 base: "main".into(),
             }),
             last_error: Some("no such file".into()),
+            title: Some("Fix the parser".into()),
         }
     }
 

@@ -303,6 +303,7 @@ mod tests {
             status: Status::Idle,
             worktree: None,
             last_error: None,
+            title: None,
         }
     }
 

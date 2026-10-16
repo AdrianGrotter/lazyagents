@@ -884,6 +884,121 @@ async fn session_start_source_decides_whether_the_session_stays_resumable() {
         .expect("kill");
 }
 
+fn titled_claude(dir: &Path) -> PathBuf {
+    let fake = dir.join("claude");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         printf '\\033]0;\u{2733} Claude Code\\007'\n\
+         sleep 0.3\n\
+         printf '\\033]0;\u{2810} Fix the parser\\007'\n\
+         sleep 0.3\n\
+         printf '\\033]0;\u{2733} Fix the parser\\007'\n\
+         exec sleep 30\n",
+    )
+    .expect("fake");
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    fake
+}
+
+async fn wait_title(conn: &mut Conn, id: AgentId, title: Option<&str>) {
+    conn.wait_for(|m| {
+        matches!(m, ServerMessage::AgentUpdated(info)
+            if info.id == id && info.title.as_deref() == title)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_terminal_title_names_the_session_and_is_kept() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let fake = titled_claude(dir.path());
+    let agent = create(
+        &mut conn,
+        &project,
+        "claude",
+        AgentKind::Claude,
+        &[fake.to_str().expect("utf8")],
+    )
+    .await
+    .expect("create");
+    assert_eq!(agent.title, None);
+    wait_title(&mut conn, agent.id, Some("Fix the parser")).await;
+    assert!(
+        !conn.pending.iter().any(|m| matches!(m,
+            ServerMessage::AgentUpdated(info) if info.title.as_deref() == Some("Claude Code"))),
+        "the default title is not a session title"
+    );
+
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+    drop(conn);
+    daemon.restart().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let Ok(Response::Agents(agents)) = conn.request(Request::ListAgents).await else {
+        panic!("list")
+    };
+    assert_eq!(agents[0].title.as_deref(), Some("Fix the parser"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_session_clears_the_title() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let fake = titled_claude(dir.path());
+    let agent = create(
+        &mut conn,
+        &project,
+        "claude",
+        AgentKind::Claude,
+        &[fake.to_str().expect("utf8")],
+    )
+    .await
+    .expect("create");
+    wait_title(&mut conn, agent.id, Some("Fix the parser")).await;
+    session_start(&mut conn, agent.id, uuid::Uuid::new_v4(), "clear").await;
+    wait_title(&mut conn, agent.id, None).await;
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generic_agents_ignore_terminal_titles() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "shell",
+        AgentKind::Generic,
+        &[
+            "sh",
+            "-c",
+            "printf '\\033]0;~/git/x\\007'; echo titled; exec sleep 30",
+        ],
+    )
+    .await
+    .expect("create");
+    conn.request(Request::Subscribe { id: agent.id })
+        .await
+        .expect("subscribe");
+    conn.wait_text(agent.id, "titled").await;
+    let Ok(Response::Agents(agents)) = conn.request(Request::ListAgents).await else {
+        panic!("list")
+    };
+    assert_eq!(agents[0].title, None);
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn hook_for_unknown_agent_is_an_error() {
     let daemon = TestDaemon::start().await;

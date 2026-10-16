@@ -276,7 +276,7 @@ daemon last told it.
 
 - State dir: `$LAZYAGENTS_STATE_DIR` (a relative path is taken from the current
   directory), default `~/.local/state/lazyagents/`, created with mode 0700: `state.toml`
-  (projects, agents, session ids, worktree info), `daemon.sock`, `daemon.lock`,
+  (projects, agents, session ids and titles, worktree info), `daemon.sock`, `daemon.lock`,
   `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`, and `known-projects.toml`, which
   only the TUI writes: every project it has seen, kept after removal for the add picker
   (`known.rs`, ADR 0009).

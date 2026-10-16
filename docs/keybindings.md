@@ -19,7 +19,7 @@ Two input modes:
 | `h`/`l`, `←`/`→`, `tab`/`shift-tab` | switch between Projects and Agents |
 | `1`/`2` | focus Projects / Agents |
 | `enter` | focus main pane (pane mode) |
-| `n` | new agent popup: name, preset (`claude`, `shell`, custom command), worktree toggle and base branch |
+| `n` | new agent popup: name (optional), preset (`claude`, `shell`, custom command), worktree toggle and base branch |
 | `x` | stop agent (confirm) |
 | `r` | restart agent (confirm while it is running; Claude: resume session) |
 | `d` | remove agent (confirm; for a worktree agent, choose whether the worktree goes too); with Projects focused, remove the project (confirm; refused while it has agents) |
@@ -46,7 +46,10 @@ Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the new ag
 `esc` cancels. The fields are Name, Preset (`←`/`→`/`space` change it), Command (only for the
 custom preset), Worktree (`space`/`←`/`→` toggle it) and Base (only while Worktree is on).
 Spaces in an agent's name (new agent form and rename) become dashes: `my new agent` is
-stored as `my-new-agent`.
+stored as `my-new-agent`. An empty name becomes `<preset>-<n>` with the lowest number no
+agent in the project uses (`claude-1`, `shell-2`). The Agents box lists a Claude agent by
+its session title once Claude has set one, and by its name until then; the name stays
+the agent's identity for the CLI and its worktree branch, and the Info box shows it.
 With Worktree on, the agent runs in a new git worktree on branch `lazyagents/<name>`, made
 from Base; an empty Base means the project's current branch. Removing an agent never
 deletes its branch, so a new worktree agent with a removed agent's name fails with git's

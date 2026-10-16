@@ -168,6 +168,7 @@ mod tests {
             session_id: (kind == AgentKind::Claude).then(Uuid::new_v4),
             resumable: false,
             worktree: None,
+            title: None,
         }
     }
 

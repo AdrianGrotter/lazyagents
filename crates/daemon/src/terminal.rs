@@ -91,7 +91,17 @@ impl EventListener for Proxy {
 pub enum Outcome {
     Output,
     Exited(i32),
+    Title(String),
     Nothing,
+}
+
+/// Claude Code titles its terminal with a status glyph and the session's title, or
+/// `Claude Code` before the session has one.
+pub fn session_title(raw: &str) -> Option<String> {
+    let title = raw
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim();
+    (!title.is_empty() && title != "Claude Code").then(|| title.to_string())
 }
 
 pub struct Terminal {
@@ -148,6 +158,7 @@ impl Terminal {
                 Outcome::Nothing
             }
             Event::ChildExit(status) => Outcome::Exited(exit_code(status)),
+            Event::Title(title) => Outcome::Title(title),
             _ => Outcome::Nothing,
         }
     }
@@ -410,6 +421,43 @@ mod tests {
     }
 
     const TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn session_title_drops_claudes_status_glyph() {
+        assert_eq!(
+            session_title("\u{2733} Lazyagents TUI project setup").as_deref(),
+            Some("Lazyagents TUI project setup")
+        );
+        assert_eq!(
+            session_title("\u{2810} Fixing tests").as_deref(),
+            Some("Fixing tests")
+        );
+        assert_eq!(session_title("Plain title").as_deref(), Some("Plain title"));
+        assert_eq!(session_title("2 bugs left").as_deref(), Some("2 bugs left"));
+    }
+
+    #[test]
+    fn default_and_blank_titles_name_no_session() {
+        for raw in ["\u{2733} Claude Code", "Claude Code", "", "  ", "\u{2733}"] {
+            assert_eq!(session_title(raw), None, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_title_sequence_is_reported() {
+        let (mut t, mut rx) = sh("printf '\\033]0;hello title\\007'; sleep 1");
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Ok(event) = rx.try_recv()
+                && let Outcome::Title(title) = t.handle(event.event)
+            {
+                assert_eq!(title, "hello title");
+                return;
+            }
+            assert!(Instant::now() < deadline, "no title event");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn output_reaches_the_screen() {

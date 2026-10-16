@@ -25,7 +25,7 @@ use crate::reap::{self, ProcessTable, Tracked};
 use crate::spawn::{Launch, SpawnContext, blocked_envrc_hint, hook_settings, spawn_spec};
 use crate::status::{on_hook, settle};
 use crate::store::{self, AgentRecord, StoredState};
-use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent};
+use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent, session_title};
 use crate::{direnv, git};
 
 pub struct Config {
@@ -529,6 +529,7 @@ impl Daemon {
             status: agent.status,
             worktree: agent.record.worktree.clone(),
             last_error: agent.last_error.clone(),
+            title: agent.record.title.clone(),
         }
     }
 
@@ -670,6 +671,7 @@ impl Daemon {
             session_id: None,
             resumable: false,
             worktree,
+            title: None,
         };
         let id = record.id;
         self.agents.insert(id, Agent::new(record));
@@ -730,6 +732,7 @@ impl Daemon {
             if !resume {
                 agent.record.session_id = Some(Uuid::new_v4());
                 agent.record.resumable = false;
+                agent.record.title = None;
             }
             let settings = self.paths.hook_settings(id);
             let written = std::fs::create_dir_all(self.paths.hooks_dir())
@@ -1046,6 +1049,9 @@ impl Daemon {
         {
             agent.record.session_id = Some(session);
             agent.record.resumable = matches!(source, Some("resume" | "compact"));
+            if !agent.record.resumable {
+                agent.record.title = None;
+            }
             changed_record = true;
         }
         agent.hooked(kind, Instant::now());
@@ -1083,6 +1089,17 @@ impl Daemon {
                 agent.group = reap::group_exists(root).then_some(root);
                 self.reap_off_loop(event.agent, vec![root], tracked);
                 self.announce(event.agent);
+            }
+            Outcome::Title(raw) => {
+                let title = session_title(&raw);
+                if agent.record.kind == AgentKind::Claude
+                    && title.is_some()
+                    && agent.record.title != title
+                {
+                    agent.record.title = title;
+                    self.persist();
+                    self.announce(event.agent);
+                }
             }
             Outcome::Nothing => {}
         }
@@ -1370,6 +1387,7 @@ mod tests {
             session_id: None,
             resumable: false,
             worktree: None,
+            title: None,
         })
     }
 

@@ -87,6 +87,8 @@ pub struct AgentInfo {
     pub status: Status,
     pub worktree: Option<WorktreeInfo>,
     pub last_error: Option<String>,
+    /// The Claude session's title, from the terminal title Claude Code sets.
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
