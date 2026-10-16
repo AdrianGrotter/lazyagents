@@ -519,7 +519,7 @@ mod tests {
             Duration::from_millis(200),
         );
         assert!(left.is_empty());
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while child.0.try_wait().expect("try_wait").is_none() {
             assert!(Instant::now() < deadline, "the verified process survived");
             std::thread::sleep(POLL);

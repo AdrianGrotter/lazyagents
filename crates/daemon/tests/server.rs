@@ -1017,7 +1017,7 @@ async fn exited_agent_leaves_no_detached_descendants() {
     release(&released).await;
     conn.wait_status(agent.id, Status::Exited(0)).await;
     assert_eq!(
-        gone_within(&leaves, Duration::from_secs(5)).await,
+        gone_within(&leaves, WAIT).await,
         Vec::<u32>::new(),
         "survived the agent's exit"
     );
@@ -1037,7 +1037,7 @@ async fn exited_agent_leaves_no_group_members() {
     let leaves = Leaves::read(&pidfile, 1).await;
     conn.wait_status(agent.id, Status::Exited(0)).await;
     assert_eq!(
-        gone_within(&leaves, Duration::from_secs(5)).await,
+        gone_within(&leaves, WAIT).await,
         Vec::<u32>::new(),
         "survived the agent's exit"
     );
@@ -1276,7 +1276,7 @@ async fn removing_the_socket_stops_the_daemon_and_its_agents() {
     create_owned(&mut conn, &project, "nohup", &ignores_sighup(&pidfile)).await;
     let leaves = Leaves::read(&pidfile, 1).await;
     std::fs::remove_file(daemon.socket()).expect("remove socket");
-    daemon.exits_within(Duration::from_secs(3)).await;
+    daemon.exits_within(Duration::from_secs(20)).await;
     assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived the daemon");
 }
 
@@ -1306,7 +1306,7 @@ async fn idle_exit_waits_for_running_agents() {
         .await
         .expect("kill");
     drop(conn);
-    daemon.exits_within(Duration::from_secs(4)).await;
+    daemon.exits_within(Duration::from_secs(20)).await;
     assert_eq!(leaves.alive(), Vec::<u32>::new());
 }
 

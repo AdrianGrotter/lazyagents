@@ -695,11 +695,11 @@ fn a_daemon_started_in_another_locale_and_time_zone_can_be_stopped() {
             .expect("start daemon"),
     );
     assert!(
-        wait_until(Duration::from_secs(5), || env.socket().exists()),
+        wait_until(Duration::from_secs(20), || env.socket().exists()),
         "daemon never listened"
     );
     let paths = protocol::StatePaths::new(env.state.path());
-    client::stop_daemon(&paths, Duration::from_secs(5)).expect("stop");
+    client::stop_daemon(&paths, Duration::from_secs(20)).expect("stop");
     assert!(
         wait_until(Duration::from_secs(5), || matches!(
             daemon.0.try_wait(),

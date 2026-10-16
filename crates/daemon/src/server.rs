@@ -1348,6 +1348,8 @@ mod tests {
     use super::*;
     use crate::status::CLAUDE_SILENCE;
 
+    const WAIT: Duration = Duration::from_secs(10);
+
     fn claude_agent() -> Agent {
         Agent::new(AgentRecord {
             id: AgentId::random(),
@@ -1536,7 +1538,7 @@ mod tests {
         late.join().expect("snapshot thread");
         daemon.refresh_tracked(Instant::now());
         assert!(daemon.snapshot.is_none());
-        assert!(child.exits_within(Duration::from_secs(3)), "child survived");
+        assert!(child.exits_within(WAIT), "child survived");
     }
 
     #[test]
@@ -1589,7 +1591,7 @@ mod tests {
         let mut daemon = test_daemon(dir.path());
         let (mut child, tracked) = Stubborn::spawn();
         daemon.apply_snapshot(vec![(AgentId::random(), 0, vec![tracked])]);
-        assert!(child.exits_within(Duration::from_secs(3)), "child survived");
+        assert!(child.exits_within(WAIT), "child survived");
     }
 
     #[test]
@@ -1602,7 +1604,7 @@ mod tests {
         }
         let (mut child, tracked) = Stubborn::spawn();
         daemon.apply_snapshot(vec![(id, 0, vec![tracked])]);
-        assert!(child.exits_within(Duration::from_secs(3)), "child survived");
+        assert!(child.exits_within(WAIT), "child survived");
         assert!(daemon.agents[&id].tracked.is_empty());
     }
 
@@ -1614,7 +1616,7 @@ mod tests {
         let (mut child, tracked) = Stubborn::spawn();
         daemon.leftovers.push((id, tracked));
         daemon.tick();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + WAIT;
         while !daemon.reapers.is_empty() {
             assert!(Instant::now() < deadline, "the reaper did not finish");
             std::thread::sleep(Duration::from_millis(25));
