@@ -77,25 +77,28 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   list as it was.
 - **Stopping an agent.** Kill, remove, restart and shutdown stop, in one pass, the
   agent's current process tree (read just before signalling, because a dying parent
-  hands its children to init), its process group and its tracked descendants: SIGHUP
-  and SIGTERM to the group, SIGTERM to every process, then one wait of up to the grace
-  period until all of it is gone. Survivors, including descendants forked meanwhile,
-  and the group get SIGKILL, followed by a short wait (500 ms). The grace period is 1 s
-  for one agent and 2 s shared by all agents on shutdown, which stops every agent in
-  that single pass. A failed process-table reading is retried once; if it fails again,
-  the pass signals only the tree roots and the groups, and logs an error. The tracked
-  descendants it could not verify are never signalled; they are kept and passed to a
-  new pass at most once a second until a reading confirms whether they still run, and
-  every later stop covers them too. Any still unverified when shutdown finishes are
-  logged with their pid and start time and left alone. A snapshot still running when the stop begins is waited for (up
-  to 2 s) first when it covers an agent being stopped, so the descendants it reports are
-  part of that pass. A stop of agents the snapshot does not cover leaves it running, and
-  a snapshot that takes longer than the wait stays running too; either way its results
-  are applied, or the descendants it reports for stopped agents are stopped as orphans,
-  when it finishes. Shutdown waits up to 10 s for any running snapshot and logs an error
-  if it is still running then, because the processes it would report cannot be
-  checked. The request is
-  answered only once this is done, and a restart spawns the new process only
+  hands its children to init), its process group and its tracked descendants: SIGHUP and
+  SIGTERM to the group, SIGTERM to every process, then one wait of up to the grace
+  period until all of it is gone. Survivors, including descendants forked meanwhile, and
+  the group get SIGKILL, followed by a short wait (500 ms). A survivor other than a tree
+  root gets SIGKILL only when a fresh reading still shows it with the start time it had
+  when it got SIGTERM, so a pid reused during the grace period is left alone. The grace
+  period is 1 s for one agent and 2 s shared by all agents on shutdown, which stops
+  every agent in that single pass. A failed process-table reading is retried once; if it
+  fails again, the pass signals only the tree roots and the groups, and logs an error.
+  If the reading before SIGKILL fails, only the tree roots and the groups get SIGKILL.
+  The tracked descendants a pass could not verify get no further signal from it; they
+  are kept and passed to a new pass at most once a second until a reading confirms
+  whether they still run, and every later stop covers them too. Any still unverified
+  when shutdown finishes are logged with their pid and start time and left alone. A
+  snapshot still running when the stop begins is waited for (up to 2 s) first when it
+  covers an agent being stopped, so the descendants it reports are part of that pass. A
+  stop of agents the snapshot does not cover leaves it running, and a snapshot that
+  takes longer than the wait stays running too; either way its results are applied, or
+  the descendants it reports for stopped agents are stopped as orphans, when it
+  finishes. Shutdown waits up to 10 s for any running snapshot and logs an error if it
+  is still running then, because the processes it would report cannot be checked. The
+  request is answered only once this is done, and a restart spawns the new process only
   afterwards.
 - **An agent that exits on its own.** When the agent's process exits, the daemon runs
   the same pass over its process group and tracked descendants, so background jobs it
@@ -109,9 +112,10 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
 - **The remembered group.** If members of an agent's process group outlive a stop or
   the agent's own exit, the daemon remembers the group and signals it again on the
   next kill, remove, restart or shutdown; it forgets the group once it is empty.
-- **Known limit.** A process that double-forks and calls `setsid` within one snapshot
-  interval leaves the agent's tree and group before any snapshot records it, and
-  escapes.
+- **Known limit.** A descendant escapes when it detaches (a double fork and `setsid`)
+  and its parent exits before a reading links it to the agent. That window is one
+  snapshot interval plus one `ps` run, since readings run one after another, and it
+  grows when `ps` is slow under load.
 - **Shutdown.** A `Shutdown` request, SIGTERM and SIGINT all take the same path:
   stop every agent as above, then remove the socket and release the lock.
 - **Unreachable daemon.** About once a second the daemon checks that `daemon.sock` is
@@ -177,12 +181,12 @@ the worktree is added, and only when `direnv` is on `PATH`, the daemon runs `dir
 <worktree path>` when the worktree's `.envrc` is byte-identical to the project's and
 `direnv status --json`, run in the project, reports the project's `.envrc` as allowed
 (ADR 0008). In every other case (different content, a project `.envrc` the user has not
-allowed, no project `.envrc`, or a direnv call that fails or prints something
-unparsable) it leaves direnv untouched, logs any error, and still creates the agent, which
-then exits at once on the blocked `.envrc`. When a worktree agent exits and its screen shows direnv's `.envrc is blocked`
-error, the daemon sets `last_error` to `direnv blocked the worktree's .envrc; run: direnv
-allow <worktree path>`, and the TUI shows it in the pane as `failed to start: …`; after
-the allow, `r` restarts the agent.
+allowed, no project `.envrc`, or a direnv call that fails or prints something unparsable)
+it leaves direnv untouched, logs any error, and still creates the agent, which then exits
+at once on the blocked `.envrc`. When a worktree agent exits and its screen shows direnv's
+`.envrc is blocked` error, the daemon sets `last_error` to `direnv blocked the worktree's
+.envrc; run: direnv allow <worktree path>`, and the TUI shows it in the pane as `failed to
+start: …`; after the allow, `r` restarts the agent.
 
 `GitStat` and `GitDiff` run on their own thread and answer when git finishes, so the event
 loop keeps serving. For a worktree agent they compare the working tree with `git

@@ -33,7 +33,8 @@ pub struct Config {
     pub exe: PathBuf,
     /// Exit after this long with no client connected and no agent running.
     pub idle_exit: Option<Duration>,
-    /// The direnv binary that wraps agents in a directory with an `.envrc`.
+    /// The direnv binary that wraps agents in a directory with an `.envrc` and decides
+    /// whether a new worktree's `.envrc` is allowed automatically.
     pub direnv: Option<PathBuf>,
 }
 
