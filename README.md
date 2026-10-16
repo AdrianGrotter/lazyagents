@@ -13,10 +13,12 @@ Early development. The daemon, the CLI and the TUI exist, with git worktrees per
 ## Usage
 
 ```sh
-nix develop -c cargo build -p lazyagents
+nix develop -c just install    # release build to ~/.local/bin/lazyagents
 cd ~/some-project
-~/git/lazyagents/target/debug/lazyagents    # open the TUI
+lazyagents                     # open the TUI
 ```
+
+`~/.local/bin` must be on your `PATH`. Run `just install` again after pulling to upgrade. The install path stays the same across upgrades, which matters: Claude agents call `lazyagents hook` through that path, so agents started before an upgrade keep reporting their status.
 
 The TUI starts the daemon if none is running. Quitting it leaves the agents running; run `lazyagents` again to reattach.
 

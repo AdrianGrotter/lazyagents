@@ -31,6 +31,9 @@ test-tui-hangup:
 
 check: fmt-check lint test test-hooks test-harness smoke-tui test-tui-hangup smoke-worktree
 
+install:
+    scripts/install.sh
+
 [no-cd]
 dev *args:
     cargo run --locked --manifest-path {{justfile_directory()}}/Cargo.toml -p lazyagents -- "$@"
