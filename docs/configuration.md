@@ -75,8 +75,8 @@ SHIFT; with `ctrl` or `alt`, SHIFT counts, so `ctrl-Q` is not `ctrl-q`.
 | `help` | `?` |
 | `down` | `j`, `down` |
 | `up` | `k`, `up` |
-| `focus_projects` | `h`, `left`, `backtab` |
-| `focus_agents` | `l`, `right` |
+| `focus_projects` | `h`, `left`, `backtab`, `1` |
+| `focus_agents` | `l`, `right`, `2` |
 | `toggle_focus` | `tab` |
 | `open` | `enter` |
 | `new_agent` | `n` |

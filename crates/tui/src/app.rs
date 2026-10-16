@@ -2388,6 +2388,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn number_keys_focus_the_sidebar_boxes() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('2'));
+        assert_eq!(app.focus, Focus::Agents);
+        let _ = app.on_key(key('1'));
+        assert_eq!(app.focus, Focus::Projects);
+    }
+
+    #[test]
+    fn number_keys_are_text_in_the_new_agent_name_field() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        let _ = app.on_key(key('1'));
+        let _ = app.on_key(key('2'));
+        assert_eq!(form(&app).name, "12");
+    }
+
+    #[test]
     fn rename_popup_edits_and_submits() {
         let (mut app, a, _) = two_agents();
         let _ = app.on_key(key('R'));

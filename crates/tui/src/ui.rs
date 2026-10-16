@@ -915,7 +915,7 @@ mod tests {
     }
 
     fn help_row(key: &str, action: &str) -> String {
-        format!("  {key:<16}{action}")
+        format!("  {key:<18}{action}")
     }
 
     #[test]
@@ -926,8 +926,8 @@ mod tests {
         for (key, action) in [
             ("j/down", "move down in the focused box"),
             ("k/up", "move up in the focused box"),
-            ("h/left/backtab", "focus Projects"),
-            ("l/right", "focus Agents"),
+            ("h/left/backtab/1", "focus Projects"),
+            ("l/right/2", "focus Agents"),
             ("tab", "switch between Projects and Agents"),
             ("enter", "open the agent's pane"),
             ("n", "new agent"),
@@ -1051,7 +1051,7 @@ mod tests {
         for (key, action) in [
             ("n ", "new agent"),
             ("ctrl-q ctrl-q", "send ctrl-q to the agent"),
-            ("h/left/backtab", "focus Projects"),
+            ("h/left/backtab/1", "focus Projects"),
         ] {
             assert_eq!(
                 column(line_with(&text, action), action),
