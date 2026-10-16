@@ -22,10 +22,16 @@ pub struct PresetDef {
     pub command: Vec<String>,
 }
 
+pub const IDLE_GREEN: Color = Color::Rgb(0x43, 0x84, 0x40);
+pub const NEEDS_PURPLE: Color = Color::Rgb(0x82, 0x59, 0xDD);
+pub const ERROR_RED: Color = Color::Rgb(0xC9, 0x45, 0x3C);
+pub const WORKING_YELLOW: Color = Color::Rgb(0xD2, 0x99, 0x22);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub accent: Color,
     pub attention: Color,
+    pub error: Color,
     pub working: Color,
     pub idle: Color,
     pub dim: Color,
@@ -40,9 +46,10 @@ impl Default for Theme {
     fn default() -> Self {
         Theme {
             accent: Color::Green,
-            attention: Color::Red,
-            working: Color::Yellow,
-            idle: Color::Green,
+            attention: NEEDS_PURPLE,
+            error: ERROR_RED,
+            working: WORKING_YELLOW,
+            idle: IDLE_GREEN,
             dim: Color::DarkGray,
             border: Color::DarkGray,
             scroll: Color::Yellow,
@@ -320,6 +327,7 @@ impl Config {
             let slot = match name.as_str() {
                 "accent" => &mut theme.accent,
                 "attention" => &mut theme.attention,
+                "error" => &mut theme.error,
                 "working" => &mut theme.working,
                 "idle" => &mut theme.idle,
                 "dim" => &mut theme.dim,

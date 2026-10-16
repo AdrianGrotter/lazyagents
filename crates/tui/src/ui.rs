@@ -17,7 +17,8 @@ use crate::app::{
 use crate::config::Theme;
 use crate::keymap::{Action, Keymap};
 
-pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub const PULSE_TICKS: u64 = 10;
+pub const WORKING_ORANGE: Color = Color::Rgb(0xDB, 0x6D, 0x28);
 
 const FORM_HINT: &str = "tab field · ←/→ change · enter start · esc cancel";
 const CONFIRM_HINT: &str = "y/enter confirm · n/esc cancel";
@@ -36,7 +37,7 @@ const SIDEBAR_HINT: [(Action, &str); 12] = [
     (Action::Rename, "rename"),
     (Action::AddProject, "add project"),
     (Action::ToggleAllAgents, "all"),
-    (Action::NextAttention, "next !"),
+    (Action::NextAttention, "next input"),
     (Action::Diff, "diff"),
 ];
 
@@ -133,24 +134,34 @@ pub fn row_at(area: Rect, selected: usize, len: usize, y: u16) -> Option<usize> 
 
 pub fn glyph(status: Status, tick: u64, theme: &Theme) -> (&'static str, Style) {
     match status {
-        Status::Starting => {
-            let symbol = if (tick / 5).is_multiple_of(2) {
-                "◌"
-            } else {
-                "○"
-            };
-            (symbol, Style::new().dim())
-        }
-        Status::Working => (
-            SPINNER[(tick % 10) as usize],
-            Style::new().fg(theme.working),
-        ),
-        Status::NeedsInput => ("!", Style::new().fg(theme.attention).bold()),
-        Status::Idle => ("✓", Style::new().fg(theme.idle)),
-        Status::Exited(0) => ("✗", Style::new().dim()),
-        Status::Exited(_) => ("✗", Style::new().fg(theme.attention)),
-        Status::Stopped => ("■", Style::new().fg(theme.dim)),
+        Status::Starting if (tick / 5).is_multiple_of(2) => ("○", Style::new().fg(theme.dim)),
+        Status::Starting => ("○", Style::new().fg(theme.dim).dim()),
+        Status::Working => ("●", Style::new().fg(working_colour(tick, theme))),
+        Status::NeedsInput => ("●", Style::new().fg(theme.attention)),
+        Status::Idle => ("●", Style::new().fg(theme.idle)),
+        Status::Exited(0) => ("●", Style::new().fg(theme.dim)),
+        Status::Exited(_) => ("●", Style::new().fg(theme.error)),
+        Status::Stopped => ("○", Style::new().fg(theme.dim)),
     }
+}
+
+/// The default working colour pulses to orange and back every `PULSE_TICKS`; a configured
+/// one stays steady, since blending it with orange could give any colour.
+fn working_colour(tick: u64, theme: &Theme) -> Color {
+    let (Color::Rgb(r0, g0, b0), Color::Rgb(r1, g1, b1)) = (theme.working, WORKING_ORANGE) else {
+        return theme.working;
+    };
+    if theme.working != Theme::default().working {
+        return theme.working;
+    }
+    let half = PULSE_TICKS / 2;
+    let phase = tick % PULSE_TICKS;
+    let step = phase.min(PULSE_TICKS - phase);
+    let blend = |from: u8, to: u8| {
+        let (from, to) = (i64::from(from), i64::from(to));
+        (from + (to - from) * step as i64 / half as i64) as u8
+    };
+    Color::Rgb(blend(r0, r1), blend(g0, g1), blend(b0, b1))
 }
 
 fn convert(color: ScreenColor) -> Color {
@@ -254,7 +265,7 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
             let mut spans = vec![Span::raw(project.name.clone())];
             if attention > 0 {
                 spans.push(Span::raw(" "));
-                spans.push(Span::raw(format!("{attention}!")).fg(app.theme.attention));
+                spans.push(Span::raw(format!("● {attention}")).fg(app.theme.attention));
             }
             ListItem::new(Line::from(spans))
         })
@@ -389,7 +400,7 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     {
         let retry = app.keymap.first_key(Action::Restart);
         let text = vec![
-            Line::from(format!("failed to start: {error}")).fg(app.theme.attention),
+            Line::from(format!("failed to start: {error}")).fg(app.theme.error),
             Line::from(format!("press {retry} to retry")).fg(app.theme.dim),
         ];
         frame.render_widget(
@@ -487,7 +498,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
     let mut spans = Vec::new();
     if let Some(message) = app.current_message(now) {
         let colour = match app.message_kind {
-            MessageKind::Error => theme.attention,
+            MessageKind::Error => theme.error,
             MessageKind::Info => theme.accent,
         };
         spans.push(Span::raw(message.to_string()).fg(colour));
@@ -773,6 +784,7 @@ mod tests {
     use crate::app::tests::{agent, loaded, loaded_with, project, worktree_agent};
     use crate::app::{App, Effect, Focus, MouseInput, MouseKind, Popup, ProjectField, ProjectForm};
     use crate::config::Config;
+    use crate::config::{ERROR_RED, IDLE_GREEN, NEEDS_PURPLE, WORKING_YELLOW};
     use crate::known::KnownProject;
     use protocol::{Cell, Color as ScreenColor, GitStat, Screen, Status, Style as ScreenStyle};
     use ratatui::Terminal;
@@ -824,11 +836,51 @@ mod tests {
             ],
         );
         let (text, _) = render(&app);
-        assert!(text.contains("alpha-repo 1!"), "{text}");
-        assert!(text.contains("! api  needs input"), "{text}");
-        assert!(text.contains("✓ docs  idle"), "{text}");
+        assert!(text.contains("alpha-repo ● 1"), "{text}");
+        assert!(text.contains("● api  needs input"), "{text}");
+        assert!(text.contains("● docs  idle"), "{text}");
         assert!(text.contains(" api · generic · needs input "), "{text}");
         assert!(text.contains("status: needs input"), "{text}");
+    }
+
+    #[test]
+    fn statuses_are_dots_in_github_colours() {
+        let theme = Theme::default();
+        let dot = |status| glyph(status, 0, &theme);
+        assert_eq!(dot(Status::Idle), ("●", Style::new().fg(IDLE_GREEN)));
+        assert_eq!(
+            dot(Status::NeedsInput),
+            ("●", Style::new().fg(NEEDS_PURPLE))
+        );
+        assert_eq!(dot(Status::Exited(1)), ("●", Style::new().fg(ERROR_RED)));
+        assert_eq!(dot(Status::Exited(0)), ("●", Style::new().fg(theme.dim)));
+        assert_eq!(dot(Status::Stopped), ("○", Style::new().fg(theme.dim)));
+        assert_eq!(dot(Status::Starting).0, "○");
+    }
+
+    #[test]
+    fn working_dot_pulses_from_yellow_to_orange_and_back() {
+        let theme = Theme::default();
+        let colour = |tick| glyph(Status::Working, tick, &theme).1.fg;
+        assert_eq!(glyph(Status::Working, 0, &theme).0, "●");
+        assert_eq!(colour(0), Some(WORKING_YELLOW));
+        assert_eq!(colour(PULSE_TICKS / 2), Some(WORKING_ORANGE));
+        assert_eq!(colour(PULSE_TICKS), Some(WORKING_YELLOW));
+        let steps: Vec<_> = (0..PULSE_TICKS).map(colour).collect();
+        assert!(
+            steps.windows(2).all(|w| w[0] != w[1]),
+            "every tick moves: {steps:?}"
+        );
+        let custom = Theme {
+            working: Color::Cyan,
+            ..Theme::default()
+        };
+        for tick in 0..PULSE_TICKS {
+            assert_eq!(
+                glyph(Status::Working, tick, &custom).1.fg,
+                Some(Color::Cyan)
+            );
+        }
     }
 
     #[test]
@@ -836,12 +888,9 @@ mod tests {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "busy", Status::Working)]);
         assert!(app.animating());
-        assert_eq!(glyph(Status::Working, 0, &Theme::default()).0, "⠋");
-        assert_eq!(glyph(Status::Working, 1, &Theme::default()).0, "⠙");
-        assert_eq!(glyph(Status::Working, 10, &Theme::default()).0, "⠋");
         let (text, _) = render(&app);
         assert!(
-            text.contains("⠋ busy  working") && text.contains(" Agents "),
+            text.contains("● busy  working") && text.contains(" Agents "),
             "{text}"
         );
         app.view = crate::app::AgentView::All;
@@ -882,10 +931,10 @@ mod tests {
             status.starts_with("boom happened │ ? help · q quit · enter open"),
             "{status}"
         );
-        assert!(!status.contains("g next !"), "{status}");
+        assert!(!status.contains("g next input"), "{status}");
         let y = buffer.area.height - 1;
-        assert_eq!(buffer[(0, y)].fg, Color::Red);
-        assert_eq!(buffer[(12, y)].fg, Color::Red);
+        assert_eq!(buffer[(0, y)].fg, ERROR_RED);
+        assert_eq!(buffer[(12, y)].fg, ERROR_RED);
         assert_eq!(buffer[(16, y)].fg, Color::DarkGray);
         app.focus = Focus::Pane;
         let (text, _) = render(&app);
@@ -1185,6 +1234,18 @@ mod tests {
         panic!("{symbol:?} not found in {area:?}");
     }
 
+    fn find_text(buffer: &Buffer, area: Rect, text: &str) -> (u16, u16) {
+        for y in area.top()..area.bottom() {
+            let row: String = (area.left()..area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if let Some(index) = row.find(text) {
+                return (area.x + row[..index].chars().count() as u16, y);
+            }
+        }
+        panic!("{text:?} not found in {area:?}");
+    }
+
     #[test]
     fn theme_colours_apply() {
         let config = configured(
@@ -1192,6 +1253,7 @@ mod tests {
             [theme]
             accent = "blue"
             attention = "magenta"
+            error = "light-red"
             working = "cyan"
             idle = "light-green"
             dim = "white"
@@ -1218,19 +1280,22 @@ mod tests {
         assert_eq!(fg((layout.pane.x, layout.pane.y)), Color::Gray);
         assert_eq!(fg((layout.info.x, layout.info.y)), Color::Gray);
 
-        let attention = find(&buffer, layout.agents, "!");
-        assert_eq!(fg(attention), Color::Magenta);
-        assert_eq!(fg((attention.0 + 2, attention.1)), Color::Magenta);
-        assert_eq!(fg(find(&buffer, layout.agents, SPINNER[0])), Color::Cyan);
-        assert_eq!(fg(find(&buffer, layout.agents, "✓")), Color::LightGreen);
-        assert_eq!(fg(find(&buffer, layout.agents, "■")), Color::White);
-        assert_eq!(fg(find(&buffer, layout.agents, "✗")), Color::Magenta);
+        let dot = |name: &str| {
+            let (x, y) = find_text(&buffer, layout.agents, name);
+            (x - 2, y)
+        };
+        assert_eq!(fg(dot("a1")), Color::Magenta);
+        assert_eq!(fg((dot("a1").0 + 2, dot("a1").1)), Color::Magenta);
+        assert_eq!(fg(dot("a2")), Color::Cyan);
+        assert_eq!(fg(dot("a3")), Color::LightGreen);
+        assert_eq!(fg(dot("a4")), Color::White);
+        assert_eq!(fg(dot("a5")), Color::LightRed);
         assert_eq!(fg(find(&buffer, layout.projects, "1")), Color::Magenta);
         assert_eq!(fg((0, layout.status.y)), Color::White);
 
         app.fail("boom");
         let (_, buffer) = render(&app);
-        assert_eq!(buffer[(0, layout.status.y)].fg, Color::Magenta);
+        assert_eq!(buffer[(0, layout.status.y)].fg, Color::LightRed);
         assert_eq!(buffer[(5, layout.status.y)].fg, Color::White);
 
         app.message = None;

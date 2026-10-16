@@ -187,12 +187,13 @@ changes them):
 
 | Icon | Status |
 |---|---|
-| `◌`/`○` (blinking, dim) | starting |
-| `⠋⠙⠹…` (animated spinner, yellow) | working |
-| `!` (red, bold; whole row red) | needs input |
-| `✓` (green) | idle |
-| `✗` (dim for exit 0, red otherwise) | exited |
-| `■` (grey) | stopped |
+| `○` (grey, blinking) | starting |
+| `●` (pulsing yellow to orange) | working |
+| `●` (purple; whole row purple) | needs input |
+| `●` (green) | idle |
+| `●` (grey for exit 0, red otherwise) | exited |
+| `○` (grey) | stopped |
 
-Attention: `NeedsInput` agents show `!`, are highlighted, sort first within their project,
-and their project row shows a count.
+The colours are GitHub's pull request colours, as lazygit shows them. Attention:
+`NeedsInput` agents are highlighted, sort first within their project, and their project
+row shows a count (`● 2`).

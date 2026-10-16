@@ -151,10 +151,11 @@ working = 208
 | Slot | Default | Used for |
 |---|---|---|
 | `accent` | green | the border of the focused box, the `copied N characters` message |
-| `attention` | red | agents that need input, exited agents, error messages |
-| `working` | yellow | the working spinner, the pending prefix |
-| `idle` | green | the idle check mark |
-| `dim` | dark gray | hints, secondary text, stopped agents |
+| `attention` | `#8259dd` (purple) | agents that need input and their project's count |
+| `error` | `#c9453c` (red) | agents that exited with an error, error messages |
+| `working` | `#d29922` (yellow) | the working dot, the pending prefix; the default pulses to orange, a configured colour stays steady |
+| `idle` | `#438440` (green) | the idle dot |
+| `dim` | dark gray | hints, secondary text, starting, stopped and cleanly exited agents |
 | `border` | dark gray | unfocused borders |
 | `scroll` | yellow | the pane border in scroll mode |
 | `diff_add` | green | added lines in the diff view |
