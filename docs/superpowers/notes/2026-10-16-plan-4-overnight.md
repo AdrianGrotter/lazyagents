@@ -14,15 +14,19 @@ without you, with what it costs if it was wrong.
    `.envrc` is byte-identical to the project's and the project's is already allowed. This
    was not done, because it writes your direnv allow list outside the repo. If you want
    it, it needs an ADR and about half a day.
+   Done in plan 5 (commit c7af15e; f29074d added direnv to the dev shell).
 2. **False "failed to start" hint.** The direnv hint fires for any exited worktree agent
    whose last screen contains direnv's "is blocked" text. That can happen after a normal
    run, for example a shell that hit a nested `.envrc`. Fix: fire only on an early
    non-zero exit. This is small; it waits on decision 1.
+   Done in plan 5 (commit 855d7d0).
 3. **Stops can pause the daemon for up to 2 s.** A kill, restart or remove now waits for
    any running `ps` snapshot, so processes found late are reaped too. This closed a real
    leak. The wait also applies when the snapshot doesn't involve the stopped agent, which
    pauses frames and hooks briefly. Fix: skip the wait when none of the stopped agents is
    running.
+   Done in plan 5 (commits 18f0e72 and dfbe0ad; dfbe0ad keeps a slow snapshot until its
+   results are applied).
 4. **Two rare process-tracking gaps remain.**
    - If `ps` fails twice in a row during a stop, that agent's tracked detached processes
      are neither signalled nor kept.
@@ -31,8 +35,11 @@ without you, with what it costs if it was wrong.
      pid. This predates plan 4.
 
    Both need very unlucky timing. Worth a small hardening task.
+   Done in plan 5 (commits 3047a4c, unverified leftovers; e5fd514, the lock-file start
+   time; 3a6e525, start times read in a fixed locale and time zone).
 5. **Status polling costs about 2–3% of a core** while agents run (a `ps` call once a
    second). This is carried from plan 3 and accepted so far.
+   Stays accepted.
 
 ## Before you use the new build
 
