@@ -21,7 +21,8 @@ pub struct Tracked {
 }
 
 /// One reading of `ps`: `(pid, ppid, start)` for every process, where `start` is the
-/// `lstart` text.
+/// `lstart` text in the C locale and UTC, so readings compare equal across a change of
+/// the system time zone.
 pub struct ProcessTable {
     rows: Vec<(u32, u32, String)>,
 }
@@ -30,8 +31,10 @@ impl ProcessTable {
     /// `None` when `ps` cannot run, fails or lists nothing, so a bad reading is never
     /// taken to mean that every process is gone.
     pub fn read() -> Option<Self> {
-        match Command::new("ps")
+        match Command::new("/bin/ps")
             .args(["-A", "-o", "pid=,ppid=,lstart="])
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC0")
             .output()
         {
             Ok(output) => Self::parse(output.status.success(), &output.stdout),
@@ -361,6 +364,24 @@ mod tests {
         assert!(ProcessTable::parse(false, output).is_none());
         assert!(ProcessTable::parse(true, b"").is_none());
         assert!(ProcessTable::parse(true, b"garbage\n").is_none());
+    }
+
+    #[test]
+    fn start_times_read_the_same_in_any_locale_and_time_zone() {
+        let pid = std::process::id();
+        let output = Command::new("/bin/ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC0")
+            .output()
+            .expect("ps");
+        let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let table = ProcessTable::read().expect("ps");
+        let ours = table.rows.iter().find(|(row, _, _)| *row == pid);
+        assert_eq!(
+            ours.map(|(_, _, start)| start.as_str()),
+            Some(expected.as_str())
+        );
     }
 
     #[test]

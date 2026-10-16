@@ -365,11 +365,12 @@ fn locked_sleeper(
         .stdin(std::process::Stdio::null())
         .spawn()
         .expect("sleep");
+    let pid = sleeper.id();
+    let fake = LockedSleeper(std::sync::Arc::new(std::sync::Mutex::new(sleeper)));
     let lock = paths.lock_file();
-    std::fs::write(&lock, contents(sleeper.id())).expect("lock file");
+    std::fs::write(&lock, contents(pid)).expect("lock file");
     let held = std::fs::File::open(&lock).expect("open lock file");
     held.lock().expect("hold the lock");
-    let fake = LockedSleeper(std::sync::Arc::new(std::sync::Mutex::new(sleeper)));
     let watched = LockedSleeper(std::sync::Arc::clone(&fake.0));
     let holder = std::thread::spawn(move || {
         while !watched.exited() {

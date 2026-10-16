@@ -28,10 +28,13 @@ pub fn parse(text: &str) -> Option<Holder> {
     Some(Holder { pid, start })
 }
 
-/// The start time of `pid` as `ps -o lstart=` prints it; `None` when `ps` cannot tell.
+/// The start time of `pid` as `ps -o lstart=` prints it in the C locale and UTC, so
+/// readers in any locale or time zone get the same text; `None` when `ps` cannot tell.
 pub fn process_start(pid: u32) -> Option<String> {
-    let output = Command::new("ps")
+    let output = Command::new("/bin/ps")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC0")
         .output()
         .ok()?;
     if !output.status.success() {
@@ -87,5 +90,18 @@ mod tests {
             start: Some("Mon Jan  1 00:00:00 1990".into())
         }));
         assert!(is_current(&Holder { pid, start: None }));
+    }
+
+    #[test]
+    fn the_start_reads_the_same_in_any_locale_and_time_zone() {
+        let pid = std::process::id();
+        let output = Command::new("/bin/ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC0")
+            .output()
+            .expect("ps");
+        let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(process_start(pid), Some(expected));
     }
 }

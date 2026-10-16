@@ -680,6 +680,36 @@ fn stop_daemon_stops_a_running_daemon() {
 }
 
 #[test]
+fn a_daemon_started_in_another_locale_and_time_zone_can_be_stopped() {
+    let env = TestEnv::new();
+    let mut daemon = DaemonChild(
+        Command::new(BIN)
+            .arg("daemon")
+            .env("LAZYAGENTS_STATE_DIR", env.state.path())
+            .env("TZ", "Asia/Tokyo")
+            .env("LC_ALL", "ja_JP.UTF-8")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start daemon"),
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || env.socket().exists()),
+        "daemon never listened"
+    );
+    let paths = protocol::StatePaths::new(env.state.path());
+    client::stop_daemon(&paths, Duration::from_secs(5)).expect("stop");
+    assert!(
+        wait_until(Duration::from_secs(5), || matches!(
+            daemon.0.try_wait(),
+            Ok(Some(_))
+        )),
+        "daemon still running"
+    );
+}
+
+#[test]
 fn daemon_that_dies_at_startup_fails_fast() {
     let parent = tempfile::tempdir().expect("parent");
     let state = parent.path().join("s".repeat(110));
