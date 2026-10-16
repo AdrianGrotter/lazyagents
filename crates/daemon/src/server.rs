@@ -281,6 +281,12 @@ impl Agent {
 /// Tracked descendants computed off the event loop for one agent generation.
 type Snapshot = Vec<(AgentId, u64, Vec<Tracked>)>;
 
+/// A snapshot running on its own thread, and the agents it reads.
+struct PendingSnapshot {
+    rx: std::sync::mpsc::Receiver<Snapshot>,
+    agents: Vec<AgentId>,
+}
+
 /// A reap running on its own thread. Its processes stay visible here until the thread
 /// finishes, so a stop of the same agent, or shutdown, covers them too.
 struct Reaper {
@@ -309,7 +315,7 @@ struct Daemon {
     clients: HashMap<ClientId, Client>,
     events: UnboundedSender<TerminalEvent>,
     last_snapshot: Instant,
-    snapshot: Option<std::sync::mpsc::Receiver<Snapshot>>,
+    snapshot: Option<PendingSnapshot>,
     reapers: Vec<Reaper>,
 }
 
@@ -768,10 +774,11 @@ impl Daemon {
     }
 
     /// Terminates the given agents' process trees, process groups and tracked
-    /// descendants, including those a snapshot still running reports, then drops their
-    /// terminals.
+    /// descendants, then drops their terminals. A snapshot still running is waited for
+    /// only when it covers an agent being stopped, so what it found is stopped too; its
+    /// results for other agents are applied, or reaped as orphans, when they arrive.
     fn stop(&mut self, ids: &[AgentId], grace: Duration) {
-        self.finish_snapshot();
+        self.finish_snapshot(Some(ids));
         let mut trees = Vec::new();
         let mut groups = Vec::new();
         let mut tracked = Vec::new();
@@ -802,16 +809,21 @@ impl Daemon {
     }
 
     fn stop_all(&mut self) {
+        self.finish_snapshot(None);
         let mut ids: Vec<AgentId> = self.agents.keys().copied().collect();
         ids.extend(self.reapers.iter().map(|r| r.agent));
         self.stop(&ids, SHUTDOWN_GRACE);
     }
 
-    fn finish_snapshot(&mut self) {
-        let Some(pending) = self.snapshot.take() else {
+    /// Waits for the running snapshot and applies it, unless `covering` names only
+    /// agents the snapshot does not read; `None` waits whatever it covers.
+    fn finish_snapshot(&mut self, covering: Option<&[AgentId]>) {
+        let Some(pending) = self.snapshot.take_if(|pending| {
+            covering.is_none_or(|ids| pending.agents.iter().any(|agent| ids.contains(agent)))
+        }) else {
             return;
         };
-        match pending.recv_timeout(SNAPSHOT_WAIT) {
+        match pending.rx.recv_timeout(SNAPSHOT_WAIT) {
             Ok(results) => self.apply_snapshot(results),
             Err(e) => tracing::warn!(error = %e, "stopping without the running snapshot"),
         }
@@ -1025,7 +1037,7 @@ impl Daemon {
     /// separate thread so `ps` never blocks the event loop.
     fn refresh_tracked(&mut self, now: Instant) {
         if let Some(pending) = &self.snapshot {
-            match pending.try_recv() {
+            match pending.rx.try_recv() {
                 Ok(results) => {
                     self.snapshot = None;
                     self.apply_snapshot(results);
@@ -1068,7 +1080,12 @@ impl Daemon {
                 let _ = tx.send(take_snapshot(ProcessTable::read(), job));
             });
         match spawned {
-            Ok(_) => self.snapshot = Some(rx),
+            Ok(_) => {
+                self.snapshot = Some(PendingSnapshot {
+                    rx,
+                    agents: requests.iter().map(|r| r.0).collect(),
+                })
+            }
             Err(e) => {
                 tracing::error!(error = %e, "spawning the snapshot thread failed; reading inline");
                 self.apply_snapshot(take_snapshot(ProcessTable::read(), requests));
@@ -1344,7 +1361,10 @@ mod tests {
         let id = add_agent(&mut daemon, Status::Exited(0));
         let (mut child, tracked) = Stubborn::spawn();
         let (tx, rx) = std::sync::mpsc::channel();
-        daemon.snapshot = Some(rx);
+        daemon.snapshot = Some(PendingSnapshot {
+            rx,
+            agents: vec![id],
+        });
         let late = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
             let _ = tx.send(vec![(id, 0, vec![tracked])]);
@@ -1352,6 +1372,94 @@ mod tests {
         daemon.kill_agent(id).expect("kill");
         late.join().expect("snapshot thread");
         assert!(child.exited(), "kill answered while the child still ran");
+    }
+
+    fn daemon_with_two_agents() -> (Daemon, AgentId, AgentId) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut daemon = test_daemon(dir.path());
+        let a = claude_agent();
+        let b = claude_agent();
+        let (a_id, b_id) = (a.record.id, b.record.id);
+        daemon.agents.insert(a_id, a);
+        daemon.agents.insert(b_id, b);
+        (daemon, a_id, b_id)
+    }
+
+    #[test]
+    fn stopping_an_uncovered_agent_does_not_wait_for_the_snapshot() {
+        let (mut daemon, a, b) = daemon_with_two_agents();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        daemon.snapshot = Some(PendingSnapshot {
+            rx,
+            agents: vec![a],
+        });
+        let started = Instant::now();
+        daemon.stop(&[b], STOP_GRACE);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            daemon.snapshot.is_some(),
+            "the snapshot for {a} must stay pending"
+        );
+    }
+
+    #[test]
+    fn stopping_a_covered_agent_waits_for_the_snapshot() {
+        let (mut daemon, a, _b) = daemon_with_two_agents();
+        let (tx, rx) = std::sync::mpsc::channel();
+        daemon.snapshot = Some(PendingSnapshot {
+            rx,
+            agents: vec![a],
+        });
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = tx.send(Vec::new());
+        });
+        let started = Instant::now();
+        daemon.stop(&[a], STOP_GRACE);
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert!(daemon.snapshot.is_none());
+    }
+
+    #[test]
+    fn shutdown_waits_for_any_snapshot() {
+        let (mut daemon, a, _b) = daemon_with_two_agents();
+        let (tx, rx) = std::sync::mpsc::channel();
+        daemon.snapshot = Some(PendingSnapshot {
+            rx,
+            agents: vec![a],
+        });
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = tx.send(Vec::new());
+        });
+        daemon.stop_all();
+        assert!(daemon.snapshot.is_none());
+    }
+
+    #[test]
+    fn shutdown_stops_what_a_snapshot_of_a_removed_agent_finds() {
+        let (mut daemon, _a, _b) = daemon_with_two_agents();
+        let removed = AgentId::random();
+        let (mut child, tracked) = Stubborn::spawn();
+        let (tx, rx) = std::sync::mpsc::channel();
+        daemon.snapshot = Some(PendingSnapshot {
+            rx,
+            agents: vec![removed],
+        });
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = tx.send(vec![(removed, 0, vec![tracked])]);
+        });
+        daemon.stop_all();
+        late.join().expect("snapshot thread");
+        assert!(
+            child.exited(),
+            "shutdown finished while the child still ran"
+        );
     }
 
     #[test]
