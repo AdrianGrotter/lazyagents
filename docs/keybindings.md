@@ -5,7 +5,9 @@ Status: implemented in crates/tui (app.rs, keymap.rs, keys.rs, config.rs).
 The keys below are the defaults. Every sidebar key, the pane prefix, the keys after it and
 the direct-leave keys can be changed in `config.toml` (`[keys.sidebar]` and `[keys.pane]`);
 the help popup, the status bar hints and the messages name the configured keys. Popup keys
-are fixed. The format is in [configuration.md](configuration.md).
+and the keys inside the diff view and scroll mode are fixed; there only the configured quit
+keys and, in the diff view, the configured diff key follow the config. The format is in
+[configuration.md](configuration.md).
 
 Two input modes:
 
@@ -35,7 +37,10 @@ Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the new ag
 `esc` cancels. The fields are Name, Preset (`←`/`→`/`space` change it), Command (only for the
 custom preset), Worktree (`space`/`←`/`→` toggle it) and Base (only while Worktree is on).
 With Worktree on, the agent runs in a new git worktree on branch `lazyagents/<name>`, made
-from Base; an empty Base means the project's current branch.
+from Base; an empty Base means the project's current branch. Removing an agent never
+deletes its branch, so a new worktree agent with a removed agent's name fails with git's
+`a branch named 'lazyagents/<name>' already exists` until that branch is deleted or
+renamed.
 
 Removing a worktree agent asks `Remove <name>? y: agent + worktree · k: keep worktree ·
 n: cancel`:
@@ -49,9 +54,11 @@ n: cancel`:
 If the worktree has uncommitted changes the daemon refuses, and a second prompt lists the
 changed files (up to 8, then `… and N more`) and asks `Remove anyway? y/n`: `y` removes the
 worktree with its changes, `n`/`esc` keeps everything. `enter` does nothing in these two
-prompts. The second prompt opens only while focus is still in the sidebar and no key or
-click came after the `y`; otherwise the status bar shows `<name>: worktree has uncommitted
-changes — d to try again` (with the configured remove key), and focus stays where it is.
+prompts. Ignored files (`.env.local`, build output) do not count as changes, so removing
+the worktree without force still deletes them. The second prompt opens only while focus is
+still in the sidebar and no key or click came after the `y`; otherwise the status bar shows
+`<name>: worktree has uncommitted changes — d to try again` (with the configured remove
+key), and focus stays where it is.
 
 **Protocol mismatch**: when the running daemon speaks another protocol version, the TUI
 opens on a full-screen prompt instead of the sidebar. `y` stops that daemon and its agents

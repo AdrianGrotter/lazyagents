@@ -18,20 +18,30 @@ file does not mention keeps its default.
 ## Warnings
 
 The loader never fails. Anything it cannot use stays at its default and becomes a
-warning, and all warnings are shown together in the status bar when the TUI starts:
+warning, and all warnings are shown together in the status bar when the TUI starts. The
+full list:
 
-- a syntax error, as `<path>: line N: <message>`; the whole file is then ignored;
-- an unknown table or setting (`unknown table [keybindings]`, `unknown setting theme.glow`);
-- an unknown action (`unknown action keys.sidebar.frobnicate`);
-- a key string that does not parse, or a value that is not a key or a list of keys;
+- a file that cannot be read, as `<path>: <error>`, or a syntax error, as `<path>: line N:
+  <message>`; the whole file is then ignored;
+- an unknown table or setting (`unknown table [keybindings]`, `unknown setting theme.glow`,
+  `unknown setting keys.extra`);
+- `keys`, `theme`, `keys.sidebar` or `keys.pane` that is not a table (`keys.pane: expected
+  a table`), or `presets` that is not a list of `[[presets]]` tables;
+- an unknown action (`unknown action keys.sidebar.frobnicate`), including a pane action
+  under `[keys.sidebar]` or a sidebar action under `[keys.pane]`;
+- a key string that does not parse (`keys.sidebar.quit: <reason>`), or a value that is not
+  a key or a list of keys (`keys.sidebar.quit: expected a key or a list of keys`);
+- a `prefix` that is not exactly one key (`keys.pane.prefix: expected one key`);
 - a key bound to two actions in one scope (`keys.sidebar: d is bound to both remove and
   stop; stop wins`); the later binding wins and the other action loses that key;
-- `keys.pane.direct_leave` containing the prefix; the prefix is dropped from it;
+- `keys.pane.direct_leave` containing the prefix (`keys.pane.direct_leave: ctrl-q is the
+  prefix`); the prefix is dropped from it;
 - no way left to leave the pane (`keys.pane: no way to leave the pane; leave restored to
   q/esc`); `leave` gets its defaults back;
-- a preset without a name and a command, or with a `kind` other than `claude` or
-  `generic`;
-- a colour that does not parse.
+- a preset that is not a table (`preset #2: expected a table`), has an unknown setting
+  (`unknown setting colour in preset #2`), lacks a name or a command (`preset #2: needs a
+  name and a command`), or has a `kind` other than `claude` or `generic`;
+- a colour that does not parse (`theme.accent: unknown colour "mauve"`).
 
 ## Keys
 
@@ -87,7 +97,7 @@ leave keys. The prefix is followed by one more key that picks an action.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `prefix` | `ctrl-q` | one key; takes the pane's attention |
+| `prefix` | `ctrl-q` | exactly one key; in the pane it is not sent to the agent but waits for one of the keys below |
 | `next` | `j` | next agent, staying in the pane |
 | `previous` | `k` | previous agent, staying in the pane |
 | `leave` | `q`, `esc` | back to the sidebar |
