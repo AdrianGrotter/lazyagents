@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use client::{Client, VersionMismatch};
-use protocol::{Request, StatePaths};
+use protocol::{Request, SHUTDOWN_WAIT, StatePaths};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -114,9 +114,8 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                 )
             })?;
             let stop = paths.clone();
-            let mut stopping = tokio::task::spawn_blocking(move || {
-                client::stop_daemon(&stop, Duration::from_secs(5))
-            });
+            let mut stopping =
+                tokio::task::spawn_blocking(move || client::stop_daemon(&stop, SHUTDOWN_WAIT));
             loop {
                 tokio::select! {
                     stopped = &mut stopping => {

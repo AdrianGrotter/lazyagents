@@ -1350,6 +1350,14 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(10);
 
+    #[test]
+    fn shutdown_fits_in_the_clients_wait() {
+        assert!(
+            SHUTDOWN_SNAPSHOT_WAIT + SHUTDOWN_GRACE + Duration::from_secs(5)
+                <= protocol::SHUTDOWN_WAIT
+        );
+    }
+
     fn claude_agent() -> Agent {
         Agent::new(AgentRecord {
             id: AgentId::random(),

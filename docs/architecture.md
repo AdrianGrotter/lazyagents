@@ -283,15 +283,15 @@ daemon last told it.
 
 - Protocol version mismatch → the client fails with `VersionMismatch`, which suggests
   `lazyagents shutdown`. A mismatched daemon cannot be asked to stop over the socket, so
-  `client::stop_daemon` sends SIGTERM to the pid in `daemon.lock` and waits up to 5 s
-  for the lock to be released. A daemon writes its pid just after taking the lock, so
+  `client::stop_daemon` sends SIGTERM to the pid in `daemon.lock` and waits up to
+  `protocol::SHUTDOWN_WAIT` (20 s) for the lock to be released. A daemon writes its pid just after taking the lock, so
   an empty pid, or one whose recorded start time does not match, is read again for up
   to 500 ms; the lock, the pid and its start time are checked once more right before
   the signal. An entry that still fails the check is never signalled: `stop_daemon`
   fails with `<lock> names pid <pid>, which is no longer the daemon; try again`. The
   daemon's SIGTERM handler stops every agent first.
   It never escalates to SIGKILL, which would orphan the agents' process trees; on
-  timeout it fails with `daemon <pid> did not stop within 5s`. A daemon that answers on
+  timeout it fails with `daemon <pid> did not stop within 20s`. A daemon that answers on
   the socket while nothing holds the lock cannot be identified, so `stop_daemon` fails
   and asks the user to stop it by hand, as it does when the lock stays without a pid.
   `shutdown` uses it, adds which daemon answered (version and protocol) to an error,
@@ -319,8 +319,10 @@ daemon last told it.
 - `lazyagents hook` never blocks or fails Claude: it checks its environment, reads stdin and
   talks to the daemon within one 200 ms budget, prints nothing and always exits 0.
 - Fatal errors while the daemon starts are written to `daemon.log`.
-- `lazyagents shutdown` waits up to 5 s for the daemon's reply, which comes after every
-  agent tree is gone, and up to 3 s for the socket to disappear.
+- `lazyagents shutdown` waits up to `protocol::SHUTDOWN_WAIT` (20 s) in all for the
+  daemon's reply, which comes after every agent tree is gone, and for the socket to
+  disappear. It stays above the daemon's slowest clean shutdown: up to 10 s for a
+  running process snapshot, the 2 s grace period and the `ps` readings after it.
 - All daemon errors logged with `tracing` to `daemon.log`; TUI shows the last error in
   the status line.
 

@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use client::{Client, VersionMismatch};
-use protocol::{AgentInfo, AgentKind, CreateAgent, Project, Request, Response, StatePaths};
+use protocol::{
+    AgentInfo, AgentKind, CreateAgent, Project, Request, Response, SHUTDOWN_WAIT, StatePaths,
+};
 
 use crate::{Command, Kind, ProjectCommand};
 
@@ -123,7 +125,7 @@ async fn shutdown(paths: &StatePaths) -> anyhow::Result<()> {
                 println!("daemon is not running");
                 return Ok(());
             };
-            client::stop_daemon(paths, Duration::from_secs(5)).with_context(|| {
+            client::stop_daemon(paths, SHUTDOWN_WAIT).with_context(|| {
                 format!(
                     "stopping daemon {} (protocol {})",
                     mismatch.daemon_version, mismatch.protocol_version
@@ -133,18 +135,21 @@ async fn shutdown(paths: &StatePaths) -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), client.request(Request::Shutdown))
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_WAIT;
+    tokio::time::timeout_at(deadline, client.request(Request::Shutdown))
         .await
-        .map_err(|_| anyhow!("daemon did not answer the shutdown request within 5s"))??;
+        .map_err(|_| {
+            anyhow!(
+                "daemon did not answer the shutdown request within {}s",
+                SHUTDOWN_WAIT.as_secs()
+            )
+        })??;
     let socket = paths.socket();
-    for _ in 0..60 {
-        if !socket.exists() {
-            break;
+    while socket.exists() {
+        if tokio::time::Instant::now() >= deadline {
+            bail!("daemon did not stop within {}s", SHUTDOWN_WAIT.as_secs());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    if socket.exists() {
-        bail!("daemon did not stop within 3s");
     }
     println!("daemon stopped");
     Ok(())
