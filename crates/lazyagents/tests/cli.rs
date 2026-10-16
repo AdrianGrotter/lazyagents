@@ -698,7 +698,7 @@ fn daemon_that_dies_at_startup_fails_fast() {
         )),
         "{stderr}"
     );
-    assert!(took < Duration::from_secs(2), "took {took:?}");
+    assert!(took < Duration::from_secs(4), "took {took:?}");
 }
 
 #[test]

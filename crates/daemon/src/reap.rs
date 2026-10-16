@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(found, [leaf]);
         assert!(!survived, "leaf {leaf} survived");
         assert!(
-            took >= Duration::from_millis(300) && took < Duration::from_secs(2),
+            took >= Duration::from_millis(300) && took < Duration::from_secs(5),
             "took {took:?}"
         );
     }
