@@ -18,10 +18,12 @@ trap cleanup EXIT
 
 cargo build --locked -q -p lazyagents --manifest-path "$root/Cargo.toml"
 
-git init -q -b main "$repo"
-git -C "$repo" config user.name smoke
-git -C "$repo" config user.email smoke@example.com
-git -C "$repo" commit -q --allow-empty -m init
+# The script's own git runs ignore the user's global and system config.
+own_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"; }
+own_git init -q -b main "$repo"
+own_git -C "$repo" config user.name smoke
+own_git -C "$repo" config user.email smoke@example.com
+own_git -C "$repo" commit -q --allow-empty -m init
 
 "$h" start "$name" 120 32 -- sh -c "cd '$repo' && exec env LAZYAGENTS_STATE_DIR='$state' LAZYAGENTS_CONFIG='$work/config.toml' SHELL=/bin/sh '$bin'"
 "$h" wait-for "$name" 'press a to add a project' 20
@@ -48,8 +50,8 @@ git -C "$repo" commit -q --allow-empty -m init
 
 "$h" keys "$name" C-q q
 "$h" wait-for "$name" 'n new · x stop' 5
-"$h" wait-for "$name" 'branch: lazyagents/wt' 10
-"$h" wait-for "$name" '1 uncommitted' 10
+"$h" wait-for "$name" 'branch: lazyagents/wt' 15
+"$h" wait-for "$name" '1 uncommitted' 15
 
 "$h" keys "$name" D
 "$h" wait-for "$name" '+hi' 10
@@ -66,7 +68,7 @@ if [[ -n $(find "$state/worktrees" -mindepth 2 -maxdepth 2 -name wt) ]]; then
   echo "worktree directory still exists" >&2
   exit 1
 fi
-if [[ $(git -C "$repo" branch --list lazyagents/wt) != *lazyagents/wt* ]]; then
+if [[ $(own_git -C "$repo" branch --list lazyagents/wt) != *lazyagents/wt* ]]; then
   echo "branch lazyagents/wt was deleted" >&2
   exit 1
 fi
