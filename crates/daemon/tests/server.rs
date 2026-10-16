@@ -1966,6 +1966,30 @@ async fn failed_worktree_add_leaves_nothing_and_the_name_stays_usable() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_branch_that_existed_before_survives_a_failed_add() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    common::git(repo.path(), &["checkout", "-q", "-b", "lazyagents/x"]);
+    std::fs::write(repo.path().join("mine.txt"), "mine\n").expect("write");
+    common::git(repo.path(), &["add", "mine.txt"]);
+    common::git(repo.path(), &["commit", "-q", "-m", "mine"]);
+    common::git(repo.path(), &["checkout", "-q", "main"]);
+    let commit = common::git(repo.path(), &["rev-parse", "lazyagents/x"]);
+
+    let err = create_in_worktree(&mut conn, &project, "x", &["sleep", "30"])
+        .await
+        .expect_err("the branch exists");
+    assert!(err.contains("lazyagents/x"), "{err}");
+    assert!(list_agents(&mut conn).await.is_empty());
+    assert_eq!(
+        common::git(repo.path(), &["rev-parse", "lazyagents/x"]),
+        commit
+    );
+    assert!(!worktree_path(&daemon, &project, "x").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_existing_worktree_path_is_left_alone() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;
