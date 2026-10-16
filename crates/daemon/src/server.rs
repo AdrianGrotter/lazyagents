@@ -1172,11 +1172,19 @@ impl Daemon {
     }
 }
 
+const EARLY_EXIT: Duration = Duration::from_secs(10);
+
+/// Whether the agent exited with an error within `EARLY_EXIT` of starting.
+fn failed_early(agent: &Agent) -> bool {
+    matches!(agent.status, Status::Exited(code) if code != 0)
+        && agent.status_since.duration_since(agent.started) < EARLY_EXIT
+}
+
 /// Records why a worktree agent that direnv refused to start exited; true when it did.
 /// The refusal can reach the screen after the exit, as the PTY is drained afterwards,
 /// so this runs again on output that follows the exit.
 fn note_blocked_envrc(agent: &mut Agent) -> bool {
-    if agent.status.is_running() || agent.last_error.is_some() {
+    if !failed_early(agent) || agent.last_error.is_some() {
         return false;
     }
     let (Some(worktree), Some(terminal)) = (&agent.record.worktree, &agent.terminal) else {
@@ -1244,6 +1252,30 @@ mod tests {
             resumable: false,
             worktree: None,
         })
+    }
+
+    #[test]
+    fn blocked_text_after_a_long_run_is_not_a_start_failure() {
+        let mut agent = claude_agent();
+        agent.started = Instant::now() - Duration::from_secs(120);
+        agent.set_status(Status::Exited(1));
+        assert!(!failed_early(&agent));
+    }
+
+    #[test]
+    fn a_clean_exit_is_never_a_start_failure() {
+        let mut agent = claude_agent();
+        agent.started = Instant::now() - Duration::from_secs(1);
+        agent.set_status(Status::Exited(0));
+        assert!(!failed_early(&agent));
+    }
+
+    #[test]
+    fn a_quick_error_exit_is_a_start_failure() {
+        let mut agent = claude_agent();
+        agent.started = Instant::now() - Duration::from_secs(1);
+        agent.set_status(Status::Exited(1));
+        assert!(failed_early(&agent));
     }
 
     struct Stubborn(std::process::Child);
