@@ -1245,6 +1245,22 @@ async fn second_daemon_refuses_to_start() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_lock_file_records_the_daemons_pid_and_start_time() {
+    let daemon = TestDaemon::start().await;
+    let contents =
+        std::fs::read_to_string(StatePaths::new(daemon.path()).lock_file()).expect("lock file");
+    let pid = std::process::id();
+    assert_eq!(
+        protocol::lockfile::parse(&contents),
+        Some(protocol::lockfile::Holder {
+            pid,
+            start: Some(protocol::lockfile::process_start(pid).expect("our start")),
+        }),
+        "{contents:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn removing_the_socket_stops_the_daemon_and_its_agents() {
     let mut daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;

@@ -2,6 +2,7 @@
 
 mod framing;
 mod input;
+pub mod lockfile;
 mod message;
 mod paths;
 mod screen;

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use protocol::lockfile::{self, Holder};
 use protocol::{
     ClientMessage, PROTOCOL_VERSION, Request, Response, ServerMessage, StatePaths, read_message,
     write_message,
@@ -229,7 +230,7 @@ fn other_daemon_running(paths: &StatePaths, ours: u32) -> bool {
 
 /// Who holds the daemon lock: `None` when nobody does, `Some(None)` while the holder
 /// has not written a readable pid yet.
-fn lock_holder(paths: &StatePaths) -> Option<Option<u32>> {
+fn lock_holder(paths: &StatePaths) -> Option<Option<Holder>> {
     use std::io::Read;
 
     let mut file = std::fs::File::open(paths.lock_file()).ok()?;
@@ -240,20 +241,21 @@ fn lock_holder(paths: &StatePaths) -> Option<Option<u32>> {
     Some(
         file.read_to_string(&mut holder)
             .ok()
-            .and_then(|_| holder.trim().parse().ok()),
+            .and_then(|_| lockfile::parse(&holder)),
     )
 }
 
 /// The pid the running daemon recorded in its lock file; `None` unless another process
-/// holds the lock. A daemon writes its pid just after taking the lock, so an empty or
-/// unreadable pid is read again for up to `PID_WAIT`.
+/// holds the lock and the recorded start time, if any, is still that pid's. A daemon
+/// writes its pid just after taking the lock, so an empty, unreadable or outdated entry
+/// is read again for up to `PID_WAIT`.
 pub fn daemon_pid(paths: &StatePaths) -> Option<u32> {
     let deadline = Instant::now() + PID_WAIT;
     loop {
         match lock_holder(paths)? {
-            Some(pid) => return Some(pid),
-            None if Instant::now() >= deadline => return None,
-            None => std::thread::sleep(Duration::from_millis(25)),
+            Some(holder) if lockfile::is_current(&holder) => return Some(holder.pid),
+            _ if Instant::now() >= deadline => return None,
+            _ => std::thread::sleep(Duration::from_millis(25)),
         }
     }
 }
@@ -268,26 +270,30 @@ pub fn stop_daemon(paths: &StatePaths, timeout: Duration) -> anyhow::Result<()> 
     use rustix::process::{Pid, Signal, kill_process};
 
     let lock = paths.lock_file();
+    let no_longer_the_daemon = |pid: u32| {
+        anyhow::anyhow!(
+            "{} names pid {pid}, which is no longer the daemon; try again",
+            lock.display()
+        )
+    };
     let Some(pid) = daemon_pid(paths) else {
-        if lock_holder(paths).is_some() {
-            anyhow::bail!(
+        return match lock_holder(paths) {
+            None => unlocked_daemon(paths),
+            Some(Some(holder)) => Err(no_longer_the_daemon(holder.pid)),
+            Some(None) => anyhow::bail!(
                 "{} is locked but names no daemon pid; stop the daemon by hand",
                 lock.display()
-            );
-        }
-        return unlocked_daemon(paths);
+            ),
+        };
     };
     let target = i32::try_from(pid)
         .ok()
         .and_then(Pid::from_raw)
         .ok_or_else(|| anyhow::anyhow!("daemon.lock names an invalid pid {pid}"))?;
     match lock_holder(paths) {
-        Some(Some(holder)) if holder == pid => {}
+        Some(Some(holder)) if holder.pid == pid && lockfile::is_current(&holder) => {}
         None => return unlocked_daemon(paths),
-        Some(_) => anyhow::bail!(
-            "{} changed hands while stopping daemon {pid}; try again",
-            lock.display()
-        ),
+        Some(_) => return Err(no_longer_the_daemon(pid)),
     }
     if let Err(e) = kill_process(target, Signal::TERM)
         && e != rustix::io::Errno::SRCH

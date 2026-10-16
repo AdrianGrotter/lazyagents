@@ -50,9 +50,14 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
 ### Daemon lifecycle
 
 - **One daemon per state dir.** The daemon takes an exclusive lock on `daemon.lock`
-  (and writes its pid into it) before it touches the socket, and holds it until it exits.
-  A second daemon fails with "a daemon is already running (pid N)". A leftover socket
-  nobody answers on is removed only while the lock is held.
+  before it touches the socket, and holds it until it exits. Right after taking it, the
+  daemon writes two lines into the file: its pid, then its start time as
+  `ps -o lstart=` prints it (just the pid when `ps` cannot tell). A client trusts the
+  pid only while the lock is held and, when a start time is recorded, `ps` still reports
+  that start time for the pid, so an entry outliving its daemon never names a recycled
+  pid. A pid-only file, as older daemons write, is trusted on the lock alone. A second
+  daemon fails with "a daemon is already running (pid N)". A leftover socket nobody
+  answers on is removed only while the lock is held.
 - **Tracking agent processes.** Each agent leads its own session and process group.
   About once a second the daemon reads the process table (`ps -A -o pid=,ppid=,lstart=`)
   on a separate thread, so `ps` never blocks the event loop, and records every
@@ -273,8 +278,11 @@ daemon last told it.
   `lazyagents shutdown`. A mismatched daemon cannot be asked to stop over the socket, so
   `client::stop_daemon` sends SIGTERM to the pid in `daemon.lock` and waits up to 5 s
   for the lock to be released. A daemon writes its pid just after taking the lock, so
-  an empty pid is read again for up to 500 ms; the pid and the lock are checked once
-  more right before the signal. The daemon's SIGTERM handler stops every agent first.
+  an empty pid, or one whose recorded start time does not match, is read again for up
+  to 500 ms; the lock, the pid and its start time are checked once more right before
+  the signal. An entry that still fails the check is never signalled: `stop_daemon`
+  fails with `<lock> names pid <pid>, which is no longer the daemon; try again`. The
+  daemon's SIGTERM handler stops every agent first.
   It never escalates to SIGKILL, which would orphan the agents' process trees; on
   timeout it fails with `daemon <pid> did not stop within 5s`. A daemon that answers on
   the socket while nothing holds the lock cannot be identified, so `stop_daemon` fails

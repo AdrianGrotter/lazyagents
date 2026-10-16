@@ -48,11 +48,14 @@ impl TestEnv {
     }
 
     fn daemon_pid(&self) -> i32 {
-        std::fs::read_to_string(self.state.path().join("daemon.lock"))
-            .expect("lock file")
-            .trim()
-            .parse()
-            .expect("pid in lock file")
+        let contents =
+            std::fs::read_to_string(self.state.path().join("daemon.lock")).expect("lock file");
+        let holder = protocol::lockfile::parse(&contents).expect("pid in lock file");
+        assert!(
+            protocol::lockfile::is_current(&holder),
+            "{contents:?} is not the running daemon"
+        );
+        i32::try_from(holder.pid).expect("pid fits i32")
     }
 }
 

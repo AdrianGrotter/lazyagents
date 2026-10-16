@@ -352,3 +352,82 @@ fn stop_daemon_waits_for_a_pid_written_after_the_lock() {
     result.expect("stop");
     assert!(stopped, "stop_daemon returned without stopping {pid}");
 }
+
+/// Starts a `sleep` stand-in and holds the daemon lock for it, with `contents(pid)` in the
+/// lock file, until the stand-in exits. Join the returned thread after dropping the
+/// stand-in.
+fn locked_sleeper(
+    paths: &StatePaths,
+    contents: impl FnOnce(u32) -> String,
+) -> (LockedSleeper, std::thread::JoinHandle<()>) {
+    let sleeper = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .expect("sleep");
+    let lock = paths.lock_file();
+    std::fs::write(&lock, contents(sleeper.id())).expect("lock file");
+    let held = std::fs::File::open(&lock).expect("open lock file");
+    held.lock().expect("hold the lock");
+    let fake = LockedSleeper(std::sync::Arc::new(std::sync::Mutex::new(sleeper)));
+    let watched = LockedSleeper(std::sync::Arc::clone(&fake.0));
+    let holder = std::thread::spawn(move || {
+        while !watched.exited() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(held);
+    });
+    (fake, holder)
+}
+
+#[test]
+fn stale_start_time_is_never_signalled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path());
+    let (fake, holder) = locked_sleeper(&paths, |pid| {
+        protocol::lockfile::format(pid, Some("Mon Jan  1 00:00:00 1990"))
+    });
+    let pid = fake.0.lock().expect("child").id();
+
+    let result = client::stop_daemon(&paths, Duration::from_secs(1));
+    let survived = !fake.exited();
+    drop(fake);
+    holder.join().expect("holder");
+    let err = result.expect_err("a stale start time names no daemon");
+    assert!(err.to_string().contains(&pid.to_string()), "{err:#}");
+    assert!(
+        survived,
+        "stop_daemon signalled {pid} despite a stale start time"
+    );
+}
+
+#[test]
+fn matching_start_time_is_stopped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path());
+    let (fake, holder) = locked_sleeper(&paths, |pid| {
+        let start = protocol::lockfile::process_start(pid).expect("start of sleep");
+        protocol::lockfile::format(pid, Some(&start))
+    });
+
+    let result = client::stop_daemon(&paths, Duration::from_secs(5));
+    let stopped = fake.exited();
+    drop(fake);
+    holder.join().expect("holder");
+    result.expect("stop");
+    assert!(stopped, "stop_daemon returned without stopping the daemon");
+}
+
+#[test]
+fn pid_only_lock_file_is_still_trusted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path());
+    let (fake, holder) = locked_sleeper(&paths, |pid| pid.to_string());
+
+    let result = client::stop_daemon(&paths, Duration::from_secs(5));
+    let stopped = fake.exited();
+    drop(fake);
+    holder.join().expect("holder");
+    result.expect("stop");
+    assert!(stopped, "stop_daemon returned without stopping the daemon");
+}

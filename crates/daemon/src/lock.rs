@@ -5,8 +5,10 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::Context;
+use protocol::lockfile;
 
-/// Holds the lock and keeps the holder's pid in the file; the file is emptied on drop.
+/// Holds the lock and keeps the holder's pid and start time in the file; the file is
+/// emptied on drop.
 pub struct InstanceLock {
     file: File,
 }
@@ -25,17 +27,21 @@ impl InstanceLock {
             Err(TryLockError::WouldBlock) => {
                 let mut holder = String::new();
                 let _ = file.read_to_string(&mut holder);
-                match holder.trim().parse::<u32>() {
-                    Ok(pid) => anyhow::bail!("a daemon is already running (pid {pid})"),
-                    Err(_) => anyhow::bail!("a daemon is already running"),
+                match lockfile::parse(&holder) {
+                    Some(holder) => {
+                        anyhow::bail!("a daemon is already running (pid {})", holder.pid)
+                    }
+                    None => anyhow::bail!("a daemon is already running"),
                 }
             }
             Err(TryLockError::Error(e)) => {
                 return Err(e).with_context(|| format!("locking {}", path.display()));
             }
         }
+        let pid = std::process::id();
+        let holder = lockfile::format(pid, lockfile::process_start(pid).as_deref());
         file.set_len(0)
-            .and_then(|()| write!(file, "{}", std::process::id()))
+            .and_then(|()| file.write_all(holder.as_bytes()))
             .with_context(|| format!("writing {}", path.display()))?;
         Ok(Self { file })
     }
