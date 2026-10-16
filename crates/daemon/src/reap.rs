@@ -109,6 +109,13 @@ impl ProcessTable {
             .collect()
     }
 
+    fn start(&self, pid: u32) -> Option<&str> {
+        self.rows
+            .iter()
+            .find(|(row, _, _)| *row == pid)
+            .map(|(_, _, start)| start.as_str())
+    }
+
     fn running(&self, tracked: &[Tracked]) -> Vec<u32> {
         tracked
             .iter()
@@ -148,10 +155,12 @@ pub fn terminate_tracked(tracked: &[Tracked], grace: Duration) {
 /// recorded start time. Sends SIGHUP to the groups and SIGTERM to everything, waits up
 /// to `grace` until all of it is gone, then SIGKILLs what is left, including
 /// descendants forked meanwhile, and waits briefly for it to go. The trees are captured
-/// before any signal is sent, because a dying parent hands its children to init.
+/// before any signal is sent, because a dying parent hands its children to init. A
+/// survivor other than a tree root is SIGKILLed only when a fresh reading still shows
+/// it with the start time it had when it was sent SIGTERM.
 ///
-/// Returns the `tracked` processes left unsignalled because no process table could be
-/// read to verify their start times; empty when a reading succeeded.
+/// Returns the `tracked` processes left unsignalled, or not SIGKILLed, because no
+/// process table could be read to verify their start times.
 pub fn terminate(
     trees: &[u32],
     groups: &[u32],
@@ -180,6 +189,7 @@ fn terminate_with(
         return Vec::new();
     }
     let mut pids = trees.clone();
+    let mut starts: HashMap<u32, String> = HashMap::new();
     let mut unverified = Vec::new();
     match read().or_else(|| {
         std::thread::sleep(POLL);
@@ -188,6 +198,10 @@ fn terminate_with(
         Some(table) => {
             pids.extend(table.descendants(&trees));
             pids.extend(table.running(tracked));
+            starts = pids
+                .iter()
+                .filter_map(|&pid| Some((pid, table.start(pid)?.to_string())))
+                .collect();
         }
         None => {
             tracing::error!(
@@ -214,14 +228,27 @@ fn terminate_with(
     if wait_gone(&mut pids, &groups, grace) {
         return unverified;
     }
-    let survivors: Vec<u32> = trees
-        .iter()
-        .copied()
-        .filter(|&pid| alive(pid))
-        .chain(pids.iter().copied())
-        .collect();
-    if let Some(table) = read() {
-        pids.extend(table.descendants(&survivors));
+    match read() {
+        Some(table) => {
+            pids.retain(|&pid| {
+                trees.contains(&pid) || table.start(pid) == starts.get(&pid).map(String::as_str)
+            });
+            let descendants = table.descendants(&pids);
+            pids.extend(descendants);
+        }
+        None => {
+            let unchecked: Vec<u32> = pids.extract_if(.., |pid| !trees.contains(pid)).collect();
+            unverified.extend(
+                tracked
+                    .iter()
+                    .filter(|t| unchecked.contains(&t.pid) && starts.get(&t.pid) == Some(&t.start))
+                    .cloned(),
+            );
+            tracing::error!(
+                ?unchecked,
+                "no process table; sending SIGKILL only to the trees' roots and the groups"
+            );
+        }
     }
     settle(&mut pids);
     groups.retain(|&leader| group_exists(leader));
@@ -481,6 +508,57 @@ mod tests {
             assert!(Instant::now() < deadline, "the verified process survived");
             std::thread::sleep(POLL);
         }
+    }
+
+    fn real_then(second: impl Fn() -> Option<ProcessTable>) -> impl Fn() -> Option<ProcessTable> {
+        let readings = std::cell::Cell::new(0);
+        move || {
+            readings.set(readings.get() + 1);
+            if readings.get() == 1 {
+                ProcessTable::read()
+            } else {
+                second()
+            }
+        }
+    }
+
+    #[test]
+    fn a_survivor_with_a_new_start_time_is_not_sigkilled() {
+        let (mut child, tracked) = tracked_child();
+        let pid = tracked.pid;
+        let left = terminate_with(
+            &real_then(|| {
+                Some(ProcessTable {
+                    rows: vec![(pid, 1, "Thu Jan  1 00:00:00 1970".into())],
+                })
+            }),
+            &[],
+            &[],
+            std::slice::from_ref(&tracked),
+            Duration::from_millis(200),
+        );
+        assert!(left.is_empty(), "{left:?}");
+        assert!(
+            child.0.try_wait().expect("try_wait").is_none(),
+            "a process with a new start time was sigkilled"
+        );
+    }
+
+    #[test]
+    fn a_failed_second_reading_keeps_the_tracked_survivors() {
+        let (mut child, tracked) = tracked_child();
+        let left = terminate_with(
+            &real_then(|| None),
+            &[],
+            &[],
+            std::slice::from_ref(&tracked),
+            Duration::from_millis(200),
+        );
+        assert!(
+            child.0.try_wait().expect("try_wait").is_none(),
+            "an unverified survivor was sigkilled"
+        );
+        assert_eq!(left, vec![tracked]);
     }
 
     #[test]
