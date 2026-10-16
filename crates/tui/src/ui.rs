@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::app::{
     AgentView, App, DiffView, Field, Focus, MIN_PANE, MessageKind, NewAgentForm, Popup, Preset,
-    Selection,
+    ProjectField, ProjectForm, Selection,
 };
 use crate::config::Theme;
 use crate::keymap::{Action, Keymap};
@@ -19,6 +19,9 @@ pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦"
 
 const FORM_HINT: &str = "tab field · ←/→ change · enter start · esc cancel";
 const CONFIRM_HINT: &str = "y/enter confirm · n/esc cancel";
+const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
+const PROJECT_FORM_HINT: &str = "tab field · enter add · esc cancel";
+const PICKER_ROWS: usize = 12;
 
 const SIDEBAR_HINT: [(Action, &str); 12] = [
     (Action::Help, "help"),
@@ -45,7 +48,7 @@ const SIDEBAR_HELP: [(Action, &str); 19] = [
     (Action::NewAgent, "new agent"),
     (Action::Stop, "stop agent"),
     (Action::Restart, "restart agent"),
-    (Action::Remove, "remove agent"),
+    (Action::Remove, "remove agent (in Projects: the project)"),
     (Action::Rename, "rename agent"),
     (Action::AddProject, "add project"),
     (Action::ToggleAllAgents, "all agents / this project"),
@@ -592,12 +595,20 @@ fn popup_content(popup: &Popup, app: &App) -> (&'static str, u16, u16, Vec<Line<
             5,
             vec![Line::from(format!("Name: {input}"))],
         ),
-        Popup::AddProject { input } => (
-            " Add project ",
-            60,
-            5,
-            vec![Line::from(format!("Path: {input}"))],
-        ),
+        Popup::ProjectPicker { index } => {
+            let lines = picker_lines(app, *index);
+            let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
+            (
+                " Add project ",
+                width.max(60),
+                lines.len() as u16 + 2,
+                lines,
+            )
+        }
+        Popup::AddProject(form) => {
+            let lines = project_form_lines(form, theme);
+            (" Add project ", 60, lines.len() as u16 + 2, lines)
+        }
         Popup::Confirm { prompt, action } => {
             let mut lines: Vec<Line> = prompt.lines().map(|l| Line::from(l.to_string())).collect();
             if !action.names_its_keys() {
@@ -668,6 +679,56 @@ fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
     lines
 }
 
+/// Shows at most `PICKER_ROWS` rows, scrolled so the highlighted one is visible.
+fn picker_lines(app: &App, index: usize) -> Vec<Line<'static>> {
+    let candidates = app.project_candidates();
+    let width = candidates
+        .iter()
+        .map(|k| k.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let rows = std::iter::once("+ new project…".to_string()).chain(
+        candidates
+            .iter()
+            .map(|k| format!("{:<width$}  {}", k.name, app.display_path(&k.path))),
+    );
+    let start = (index + 1).saturating_sub(PICKER_ROWS);
+    let mut lines: Vec<Line> = rows
+        .enumerate()
+        .skip(start)
+        .take(PICKER_ROWS)
+        .map(|(row, text)| {
+            let line = Line::from(text);
+            if row == index { line.reversed() } else { line }
+        })
+        .collect();
+    lines.push(Line::default());
+    lines.push(Line::from(PICKER_HINT).fg(app.theme.dim));
+    lines
+}
+
+fn project_form_lines(form: &ProjectForm, theme: &Theme) -> Vec<Line<'static>> {
+    let field = |focus: ProjectField, text: String| {
+        let line = Line::from(text);
+        if form.field == focus {
+            line.reversed()
+        } else {
+            line
+        }
+    };
+    let name = if form.name.is_empty() && form.field != ProjectField::Name {
+        "(directory name)"
+    } else {
+        form.name.as_str()
+    };
+    vec![
+        field(ProjectField::Path, format!("Path: {}", form.path)),
+        field(ProjectField::Name, format!("Name: {name}")),
+        Line::default(),
+        Line::from(PROJECT_FORM_HINT).fg(theme.dim),
+    ]
+}
+
 fn form_lines(form: &NewAgentForm, app: &App) -> Vec<Line<'static>> {
     let field = |focus: Field, text: String| {
         let line = Line::from(text);
@@ -706,8 +767,9 @@ fn form_lines(form: &NewAgentForm, app: &App) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
     use crate::app::tests::{agent, loaded, loaded_with, project, worktree_agent};
-    use crate::app::{App, Effect, Focus, MouseInput, MouseKind, Popup};
+    use crate::app::{App, Effect, Focus, MouseInput, MouseKind, Popup, ProjectField, ProjectForm};
     use crate::config::Config;
+    use crate::known::KnownProject;
     use protocol::{Cell, Color as ScreenColor, GitStat, Screen, Status, Style as ScreenStyle};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -888,6 +950,48 @@ mod tests {
         assert!(!status.contains("sidebar"), "{status}");
     }
 
+    fn known(name: &str, path: &str) -> KnownProject {
+        KnownProject {
+            name: name.into(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn picker_lists_known_projects_with_home_as_tilde() {
+        let (mut app, _) = loaded(Vec::new(), Vec::new());
+        app.known = vec![known("web", "/home/u/git/web"), known("old", "/srv/old")];
+        app.popup = Some(Popup::ProjectPicker { index: 1 });
+        let (text, buffer) = render(&app);
+        assert!(text.contains("+ new project"), "{text}");
+        assert!(text.contains("web  ~/git/web"), "{text}");
+        assert!(text.contains("old  /srv/old"), "{text}");
+        assert!(text.contains("x forget"), "{text}");
+        let row = text
+            .lines()
+            .position(|l| l.contains("web  ~/git/web"))
+            .expect("web row");
+        let col = text.lines().nth(row).unwrap().find("web").unwrap() as u16;
+        assert!(
+            buffer[(col, row as u16)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the highlighted row is reversed"
+        );
+    }
+
+    #[test]
+    fn picker_scrolls_to_keep_the_highlight_visible() {
+        let (mut app, _) = loaded(Vec::new(), Vec::new());
+        app.known = (0..40)
+            .map(|i| known(&format!("proj{i}"), &format!("/p/{i}")))
+            .collect();
+        app.popup = Some(Popup::ProjectPicker { index: 35 });
+        let (text, _) = render(&app);
+        assert!(text.contains("proj34"), "{text}");
+        assert!(!text.contains("+ new project"), "{text}");
+    }
+
     #[test]
     fn popups_render_their_content() {
         let p = project("p");
@@ -901,12 +1005,17 @@ mod tests {
             text.contains("Stop a?") && text.contains("y/enter confirm"),
             "{text}"
         );
-        app.popup = Some(Popup::AddProject {
-            input: "/x/repo".into(),
-        });
+        app.popup = Some(Popup::AddProject(ProjectForm {
+            path: "/x/repo".into(),
+            name: String::new(),
+            field: ProjectField::Path,
+        }));
         let (text, _) = render(&app);
         assert!(
-            text.contains(" Add project ") && text.contains("Path: /x/repo"),
+            text.contains(" Add project ")
+                && text.contains("Path: /x/repo")
+                && text.contains("Name: (directory name)")
+                && text.contains("enter add"),
             "{text}"
         );
         app.popup = Some(Popup::Help);

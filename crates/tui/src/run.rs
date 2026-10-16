@@ -1,6 +1,6 @@
 use std::io::{IsTerminal, stdout};
 use std::mem::ManuallyDrop;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -22,6 +22,7 @@ use crate::app::{App, Effect, MouseInput, MouseKind};
 use crate::clipboard;
 use crate::config;
 use crate::connection::{self, Incoming};
+use crate::known::{self, KnownProject};
 use crate::ui::{self, Mismatch};
 
 enum Term {
@@ -165,6 +166,11 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let config = config::load(config::default_path().as_deref());
     let mut app = App::new(cwd, shell, home, config);
+    let known_file = paths.known_projects();
+    match known::load(&known_file) {
+        Ok(list) => app.known = list,
+        Err(error) => app.fail(format!("{error:#}")),
+    }
 
     let mut layout = ui::areas(Rect::default(), 0, 0);
     let mut redraw = true;
@@ -226,6 +232,12 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                     let _ = requests.send(request);
                 }
                 Effect::Copy(text) => clipboard::copy(guard.terminal.backend_mut(), &text),
+                Effect::RememberProjects(added) => {
+                    update_known(&mut app, &known_file, |list| known::remember(list, &added))
+                }
+                Effect::ForgetProject(path) => {
+                    update_known(&mut app, &known_file, |list| known::forget(list, &path))
+                }
                 Effect::Quit => return Ok(()),
                 Effect::StopDaemonAndQuit => {
                     let _ = requests.send(Request::Shutdown);
@@ -241,6 +253,14 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                 }
             }
         }
+    }
+}
+
+/// Takes the merged list back, so projects another TUI remembered show up here too.
+fn update_known(app: &mut App, file: &Path, change: impl FnOnce(&mut Vec<KnownProject>) -> bool) {
+    match known::update(file, change) {
+        Ok(list) => app.known = list,
+        Err(error) => app.fail(format!("{error:#}")),
     }
 }
 

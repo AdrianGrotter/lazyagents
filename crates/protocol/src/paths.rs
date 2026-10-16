@@ -71,6 +71,11 @@ impl StatePaths {
         self.dir.join("state.toml")
     }
 
+    /// Written by the TUI, never by the daemon.
+    pub fn known_projects(&self) -> PathBuf {
+        self.dir.join("known-projects.toml")
+    }
+
     pub fn log_file(&self) -> PathBuf {
         self.dir.join("daemon.log")
     }

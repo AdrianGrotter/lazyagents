@@ -6,6 +6,7 @@ pub mod config;
 pub mod connection;
 pub mod keymap;
 pub mod keys;
+pub mod known;
 mod run;
 pub mod ui;
 

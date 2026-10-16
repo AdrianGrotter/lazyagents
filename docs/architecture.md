@@ -211,10 +211,11 @@ daemon last told it.
 - **Model** (`app.rs`): `App` holds projects, agents, selection, focus (projects, agents,
   pane, diff or scroll), the open popup, the subscribed agent's screen, the git stats and
   diff the daemon sent, and the pane's text selection. Key, paste and mouse events and
-  daemon messages go in; `Effect`s come out (`Send(Request)`, `Copy(String)`, `Quit`,
-  `StopDaemonAndQuit`). It does no I/O, so behaviour is tested without a terminal or a
-  daemon. Selection follows an agent's id across list changes. The TUI is subscribed to at
-  most one agent's screen, the selected one, and sizes a running agent's PTY to the pane.
+  daemon messages go in; `Effect`s come out (`Send(Request)`, `Copy(String)`,
+  `RememberProjects`, `ForgetProject`, `Quit`, `StopDaemonAndQuit`). It does no I/O, so
+  behaviour is tested without a terminal or a daemon. Selection follows an agent's id
+  across list changes. The TUI is subscribed to at most one agent's screen, the selected
+  one, and sizes a running agent's PTY to the pane.
   It asks for the selected agent's `GitStat` when the selection changes and then every
   five seconds, with at most one request per agent in flight.
 - **Focus rule**: keys reach an agent only while the pane has focus, and focus moves into
@@ -276,7 +277,9 @@ daemon last told it.
 - State dir: `$LAZYAGENTS_STATE_DIR` (a relative path is taken from the current
   directory), default `~/.local/state/lazyagents/`, created with mode 0700: `state.toml`
   (projects, agents, session ids, worktree info), `daemon.sock`, `daemon.lock`,
-  `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`.
+  `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`, and `known-projects.toml`, which
+  only the TUI writes: every project it has seen, kept after removal for the add picker
+  (`known.rs`, ADR 0009).
 - Config: `$LAZYAGENTS_CONFIG`, else `$XDG_CONFIG_HOME/lazyagents/config.toml`, else
   `~/.config/lazyagents/config.toml`: keybindings, agent presets, theme colours. A missing
   file gives the built-in defaults; anything unusable becomes a warning in the TUI status

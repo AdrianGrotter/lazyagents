@@ -22,9 +22,9 @@ Two input modes:
 | `n` | new agent popup: name, preset (`claude`, `shell`, custom command), worktree toggle and base branch |
 | `x` | stop agent (confirm) |
 | `r` | restart agent (confirm while it is running; Claude: resume session) |
-| `d` | remove agent (confirm; for a worktree agent, choose whether the worktree goes too) |
+| `d` | remove agent (confirm; for a worktree agent, choose whether the worktree goes too); with Projects focused, remove the project (confirm; refused while it has agents) |
 | `R` | rename agent |
-| `a` | add project (path input, defaults to cwd; relative paths resolve against the cwd, a leading `~` is the home directory) |
+| `a` | add project: a picker of projects added before, or the new project form when there are none |
 | `A` | toggle between the selected project's agents and all agents |
 | `g` | jump to next agent with `NeedsInput` |
 | `D` | diff view of the agent's changes in the main pane |
@@ -32,6 +32,14 @@ Two input modes:
 | `?` | help popup |
 | `q`, `ctrl-c` | quit TUI (agents keep running) |
 | `Q` | quit and stop daemon (confirm) |
+
+The add project picker lists `+ new project…` and then every known project that is not in
+the sidebar, most recently added first. `j`/`k` (or `↓`/`↑`) move, `enter` adds the
+highlighted project with its old name or opens the new project form, `x` forgets the
+highlighted project, and `esc`/`q` closes. A project removed with `d` stays known. The new
+project form has Path (starts at the cwd; relative paths resolve against the cwd, a
+leading `~` is the home directory) and Name (empty means the directory name); `tab` moves
+between them, `enter` adds and `esc` cancels.
 
 Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the new agent form,
 `tab`/`shift-tab` (or `↓`/`↑`) move between the visible fields, `enter` starts the agent and

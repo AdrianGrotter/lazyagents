@@ -13,6 +13,7 @@ use ratatui::layout::{Position, Rect};
 use crate::config::{Config, PresetDef, Theme};
 use crate::keymap::{Action, Keymap};
 use crate::keys;
+use crate::known::{self, KnownProject};
 use crate::ui::Areas;
 
 pub const MESSAGE_TTL: Duration = Duration::from_secs(5);
@@ -136,6 +137,29 @@ impl NewAgentForm {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectField {
+    Path,
+    Name,
+}
+
+/// An empty name leaves it to the daemon, which names the project after its directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectForm {
+    pub path: String,
+    pub name: String,
+    pub field: ProjectField,
+}
+
+impl ProjectForm {
+    fn focused(&mut self) -> &mut String {
+        match self.field {
+            ProjectField::Path => &mut self.path,
+            ProjectField::Name => &mut self.name,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirmed {
     Kill(AgentId),
@@ -143,6 +167,7 @@ pub enum Confirmed {
     Remove(AgentId),
     RemoveWorktree(AgentId),
     ForceRemove(AgentId),
+    RemoveProject(ProjectId),
     StopDaemon,
 }
 
@@ -174,15 +199,27 @@ pub struct ScrollMode {
 pub enum Popup {
     Help,
     NewAgent(NewAgentForm),
-    Rename { agent: AgentId, input: String },
-    AddProject { input: String },
-    Confirm { prompt: String, action: Confirmed },
+    Rename {
+        agent: AgentId,
+        input: String,
+    },
+    /// Row 0 is "new project"; row `i` is `App::project_candidates()[i - 1]`.
+    ProjectPicker {
+        index: usize,
+    },
+    AddProject(ProjectForm),
+    Confirm {
+        prompt: String,
+        action: Confirmed,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     Send(Request),
     Copy(String),
+    RememberProjects(Vec<KnownProject>),
+    ForgetProject(PathBuf),
     Quit,
     StopDaemonAndQuit,
 }
@@ -302,6 +339,7 @@ pub struct App {
     pub diff: Option<DiffView>,
     pub scroll: Option<ScrollMode>,
     pub selection: Option<Selection>,
+    pub known: Vec<KnownProject>,
     stats_in_flight: HashMap<AgentId, Instant>,
     diffs_in_flight: HashMap<AgentId, Instant>,
     stat_polled: Option<(AgentId, Instant)>,
@@ -340,6 +378,7 @@ impl App {
             diff: None,
             scroll: None,
             selection: None,
+            known: Vec::new(),
             stats_in_flight: HashMap::new(),
             diffs_in_flight: HashMap::new(),
             stat_polled: None,
@@ -360,6 +399,43 @@ impl App {
 
     pub fn selected_project(&self) -> Option<&Project> {
         self.projects.get(self.project_index)
+    }
+
+    /// The path with the home directory shown as `~`.
+    pub fn display_path(&self, path: &std::path::Path) -> String {
+        match self
+            .home
+            .as_ref()
+            .and_then(|home| path.strip_prefix(home).ok())
+        {
+            Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+            Some(rest) => format!("~/{}", rest.display()),
+            None => path.display().to_string(),
+        }
+    }
+
+    /// Known projects that are not in the sidebar.
+    pub fn project_candidates(&self) -> Vec<&KnownProject> {
+        self.known
+            .iter()
+            .filter(|k| !self.projects.iter().any(|p| p.path == k.path))
+            .collect()
+    }
+
+    fn remember_new(&mut self, projects: &[Project]) -> Vec<Effect> {
+        let added: Vec<KnownProject> = projects
+            .iter()
+            .filter(|p| !self.projects.iter().any(|old| old.id == p.id))
+            .map(|p| KnownProject {
+                name: p.name.clone(),
+                path: p.path.clone(),
+            })
+            .collect();
+        if known::remember(&mut self.known, &added) {
+            vec![Effect::RememberProjects(added)]
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn visible_agents(&self) -> Vec<&AgentInfo> {
@@ -527,6 +603,7 @@ impl App {
 
     pub fn apply_server(&mut self, message: ServerMessage) -> Vec<Effect> {
         let before = self.selected_agent().map(|a| a.id);
+        let mut effects = Vec::new();
         match message {
             ServerMessage::AgentUpdated(info) => self.upsert_agent(info),
             ServerMessage::AgentRemoved(id) => {
@@ -536,6 +613,7 @@ impl App {
             }
             ServerMessage::ProjectsChanged(projects) => {
                 let selected = self.selected_agent().map(|a| a.id);
+                effects = self.remember_new(&projects);
                 self.replace_projects(projects);
                 self.reselect(selected);
             }
@@ -547,16 +625,19 @@ impl App {
             }
             ServerMessage::Welcome { .. } | ServerMessage::Response { .. } => {}
         }
-        self.sync_after_server(before, None)
+        effects.extend(self.sync_after_server(before, None));
+        effects
     }
 
     pub fn apply_response(&mut self, response: Response) -> Vec<Effect> {
         let before = self.selected_agent().map(|a| a.id);
         self.pending_remove = None;
         let mut created = None;
+        let mut effects = Vec::new();
         match response {
             Response::Projects(projects) => {
                 let selected = self.selected_agent().map(|a| a.id);
+                effects = self.remember_new(&projects);
                 self.replace_projects(projects);
                 self.reselect(selected);
             }
@@ -566,6 +647,7 @@ impl App {
                 self.reselect(selected);
             }
             Response::Project(project) => {
+                effects = self.remember_new(std::slice::from_ref(&project));
                 if !self.projects.iter().any(|p| p.id == project.id) {
                     self.projects.push(project.clone());
                 }
@@ -586,7 +668,8 @@ impl App {
             }
             Response::Ok | Response::GitStat(_) | Response::Diff(_) => {}
         }
-        self.sync_after_server(before, created)
+        effects.extend(self.sync_after_server(before, created));
+        effects
     }
 
     /// Focus enters the pane only through an explicit user action, so a selection
@@ -1008,16 +1091,15 @@ impl App {
             .unwrap_or_default()
             .to_string();
         match &mut self.popup {
-            Some(Popup::Rename { input, .. } | Popup::AddProject { input }) => {
-                input.push_str(&line)
-            }
+            Some(Popup::Rename { input, .. }) => input.push_str(&line),
+            Some(Popup::AddProject(form)) => form.focused().push_str(&line),
             Some(Popup::NewAgent(form)) => match form.field {
                 Field::Name => form.name.push_str(&line),
                 Field::Command => form.command.push_str(&line),
                 Field::Base => form.base.push_str(&line),
                 Field::Preset | Field::Worktree => {}
             },
-            Some(Popup::Help | Popup::Confirm { .. }) | None => {}
+            Some(Popup::Help | Popup::ProjectPicker { .. } | Popup::Confirm { .. }) | None => {}
         }
         Vec::new()
     }
@@ -1278,11 +1360,14 @@ impl App {
             },
             Action::NewAgent => self.open_new_agent(),
             Action::AddProject => {
-                self.popup = Some(Popup::AddProject {
-                    input: self.cwd.display().to_string(),
+                self.popup = Some(if self.project_candidates().is_empty() {
+                    self.project_form()
+                } else {
+                    Popup::ProjectPicker { index: 0 }
                 });
             }
             Action::Stop => self.confirm_for_selected("Stop", Confirmed::Kill),
+            Action::Remove if self.focus == Focus::Projects => self.confirm_remove_project(),
             Action::Remove => match self.selected_agent() {
                 Some(agent) if agent.worktree.is_some() => {
                     self.popup = Some(Popup::Confirm {
@@ -1350,6 +1435,32 @@ impl App {
     fn restart(&self, id: AgentId) -> Effect {
         let (cols, rows) = self.pane_size.unwrap_or(DEFAULT_SIZE);
         Effect::Send(Request::RestartAgent { id, cols, rows })
+    }
+
+    fn project_form(&self) -> Popup {
+        Popup::AddProject(ProjectForm {
+            path: self.cwd.display().to_string(),
+            name: String::new(),
+            field: ProjectField::Path,
+        })
+    }
+
+    fn confirm_remove_project(&mut self) {
+        let Some(project) = self.selected_project() else {
+            return;
+        };
+        if self.agents.iter().any(|a| a.project == project.id) {
+            let message = format!("remove {}'s agents first", project.name);
+            self.fail(message);
+            return;
+        }
+        let prompt = format!(
+            "Remove project {}? It stays in the add list ({}).",
+            project.name,
+            self.keymap.first_key(Action::AddProject)
+        );
+        let action = Confirmed::RemoveProject(project.id);
+        self.popup = Some(Popup::Confirm { prompt, action });
     }
 
     fn confirm_for_selected(&mut self, verb: &str, action: fn(AgentId) -> Confirmed) {
@@ -1444,17 +1555,8 @@ impl App {
                     Vec::new()
                 }
             },
-            Popup::AddProject { mut input } => match edit(&mut input, &key) {
-                Edit::Submit => vec![Effect::Send(Request::AddProject {
-                    path: self.project_path(input.trim()),
-                    name: None,
-                })],
-                Edit::Cancel => Vec::new(),
-                Edit::Continue => {
-                    self.popup = Some(Popup::AddProject { input });
-                    Vec::new()
-                }
-            },
+            Popup::ProjectPicker { index } => self.on_picker_key(index, &key),
+            Popup::AddProject(form) => self.on_project_form_key(form, &key),
             Popup::NewAgent(form) => self.on_form_key(form, key),
         }
     }
@@ -1476,6 +1578,9 @@ impl App {
             (Confirmed::Remove(id), KeyCode::Char('y') | KeyCode::Enter) => {
                 self.remove(*id, false, false)
             }
+            (Confirmed::RemoveProject(id), KeyCode::Char('y') | KeyCode::Enter) => {
+                vec![Effect::Send(Request::RemoveProject { id: *id })]
+            }
             (Confirmed::StopDaemon, KeyCode::Char('y') | KeyCode::Enter) => {
                 vec![Effect::StopDaemonAndQuit]
             }
@@ -1496,6 +1601,67 @@ impl App {
             remove_worktree,
             force,
         })]
+    }
+
+    fn on_picker_key(&mut self, index: usize, key: &KeyEvent) -> Vec<Effect> {
+        let rows = self.project_candidates().len() + 1;
+        let picked = index
+            .checked_sub(1)
+            .and_then(|i| self.project_candidates().get(i).map(|k| (*k).clone()));
+        let index = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return Vec::new(),
+            KeyCode::Enter => {
+                return match picked {
+                    Some(project) => vec![Effect::Send(Request::AddProject {
+                        path: project.path,
+                        name: Some(project.name),
+                    })],
+                    None => {
+                        self.popup = Some(self.project_form());
+                        Vec::new()
+                    }
+                };
+            }
+            KeyCode::Char('j') | KeyCode::Down => wrap(index, 1, rows),
+            KeyCode::Char('k') | KeyCode::Up => wrap(index, -1, rows),
+            KeyCode::Char('x') => match picked {
+                Some(project) => {
+                    known::forget(&mut self.known, &project.path);
+                    self.popup = Some(Popup::ProjectPicker {
+                        index: index.min(rows - 2),
+                    });
+                    return vec![Effect::ForgetProject(project.path)];
+                }
+                None => index,
+            },
+            _ => index,
+        };
+        self.popup = Some(Popup::ProjectPicker { index });
+        Vec::new()
+    }
+
+    fn on_project_form_key(&mut self, mut form: ProjectForm, key: &KeyEvent) -> Vec<Effect> {
+        match key.code {
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Down | KeyCode::Up => {
+                form.field = match form.field {
+                    ProjectField::Path => ProjectField::Name,
+                    ProjectField::Name => ProjectField::Path,
+                };
+            }
+            _ => match edit(form.focused(), key) {
+                Edit::Submit => {
+                    let name = form.name.trim();
+                    return vec![Effect::Send(Request::AddProject {
+                        path: self.project_path(form.path.trim()),
+                        name: (!name.is_empty()).then(|| name.to_string()),
+                    })];
+                }
+                Edit::Cancel => return Vec::new(),
+                Edit::Continue => {}
+            },
+        }
+        self.popup = Some(Popup::AddProject(form));
+        Vec::new()
     }
 
     fn project_path(&self, input: &str) -> PathBuf {
@@ -1711,9 +1877,15 @@ pub(crate) mod tests {
     fn loading_selects_and_subscribes_to_the_first_agent() {
         let p = project("p");
         let a = agent(&p, "alpha", Status::Idle);
-        let (app, effects) = loaded(vec![p], vec![a.clone()]);
+        let (app, effects) = loaded(vec![p.clone()], vec![a.clone()]);
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
-        assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: a.id })]);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::RememberProjects(vec![known_of(&p)]),
+                Effect::Send(Request::Subscribe { id: a.id })
+            ]
+        );
         assert_eq!(app.subscribed, Some(a.id));
     }
 
@@ -2551,10 +2723,199 @@ pub(crate) mod tests {
         let _ = app.on_key(ctrl('u'));
         let _ = app.on_paste("/tmp/x\r\n/tmp/y".into());
         assert!(
-            matches!(&app.popup, Some(Popup::AddProject { input }) if input == "/tmp/x"),
+            matches!(&app.popup, Some(Popup::AddProject(form)) if form.path == "/tmp/x"),
             "{:?}",
             app.popup
         );
+        let _ = app.on_key(code(KeyCode::Tab));
+        let _ = app.on_paste("My repo\nnext".into());
+        assert!(
+            matches!(&app.popup, Some(Popup::AddProject(form)) if form.name == "My repo"),
+            "{:?}",
+            app.popup
+        );
+    }
+
+    fn known_of(project: &Project) -> KnownProject {
+        KnownProject {
+            name: project.name.clone(),
+            path: project.path.clone(),
+        }
+    }
+
+    /// One open project `p` with an agent, and `old`, added in an earlier session.
+    fn with_known_old() -> (App, Project, KnownProject) {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let (mut app, _) = loaded(vec![p.clone()], vec![a]);
+        let old = KnownProject {
+            name: "old".into(),
+            path: "/p/old".into(),
+        };
+        app.known.push(old.clone());
+        (app, p, old)
+    }
+
+    #[test]
+    fn loading_remembers_the_daemons_projects_in_order() {
+        let (p, q) = (project("p"), project("q"));
+        let (app, effects) = loaded(vec![p.clone(), q.clone()], Vec::new());
+        let expected = vec![known_of(&p), known_of(&q)];
+        assert_eq!(effects, vec![Effect::RememberProjects(expected.clone())]);
+        assert_eq!(app.known, expected);
+    }
+
+    #[test]
+    fn a_project_removed_from_the_sidebar_stays_known() {
+        let (p, q) = (project("p"), project("q"));
+        let (mut app, _) = loaded(vec![p.clone(), q.clone()], Vec::new());
+        let effects = app.apply_server(ServerMessage::ProjectsChanged(vec![p.clone()]));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::RememberProjects(_))),
+            "{effects:?}"
+        );
+        assert_eq!(app.known, vec![known_of(&p), known_of(&q)]);
+        assert_eq!(app.project_candidates(), vec![&known_of(&q)]);
+    }
+
+    #[test]
+    fn a_newly_added_project_moves_to_the_front() {
+        let (mut app, p, old) = with_known_old();
+        let readded = Project {
+            id: ProjectId::random(),
+            name: old.name.clone(),
+            path: old.path.clone(),
+        };
+        let effects = app.apply_server(ServerMessage::ProjectsChanged(vec![
+            p.clone(),
+            readded.clone(),
+        ]));
+        assert!(
+            effects.contains(&Effect::RememberProjects(vec![old.clone()])),
+            "{effects:?}"
+        );
+        assert_eq!(app.known, vec![old, known_of(&p)]);
+        assert!(app.project_candidates().is_empty());
+    }
+
+    #[test]
+    fn add_opens_the_form_when_no_other_project_is_known() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('a'));
+        assert_eq!(
+            app.popup,
+            Some(Popup::AddProject(ProjectForm {
+                path: "/work".into(),
+                name: String::new(),
+                field: ProjectField::Path,
+            }))
+        );
+    }
+
+    #[test]
+    fn add_opens_the_picker_on_new_project() {
+        let (mut app, _, old) = with_known_old();
+        let _ = app.on_key(key('a'));
+        assert_eq!(app.popup, Some(Popup::ProjectPicker { index: 0 }));
+        assert_eq!(app.project_candidates(), vec![&old]);
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert!(
+            matches!(&app.popup, Some(Popup::AddProject(form)) if form.path == "/work"),
+            "{:?}",
+            app.popup
+        );
+    }
+
+    #[test]
+    fn picker_adds_a_known_project_with_its_name() {
+        let (mut app, _, old) = with_known_old();
+        let _ = app.on_key(key('a'));
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.popup, Some(Popup::ProjectPicker { index: 1 }));
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            vec![Effect::Send(Request::AddProject {
+                path: old.path,
+                name: Some(old.name),
+            })]
+        );
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn picker_moves_with_wrapping_and_closes_on_esc() {
+        let (mut app, _, _) = with_known_old();
+        let _ = app.on_key(key('a'));
+        let _ = app.on_key(key('k'));
+        assert_eq!(app.popup, Some(Popup::ProjectPicker { index: 1 }));
+        let _ = app.on_key(code(KeyCode::Down));
+        assert_eq!(app.popup, Some(Popup::ProjectPicker { index: 0 }));
+        let _ = app.on_key(code(KeyCode::Esc));
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn x_in_the_picker_forgets_the_highlighted_project() {
+        let (mut app, p, old) = with_known_old();
+        let _ = app.on_key(key('a'));
+        assert!(app.on_key(key('x')).is_empty());
+        assert_eq!(app.known.len(), 2);
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.on_key(key('x')), vec![Effect::ForgetProject(old.path)]);
+        assert_eq!(app.known, vec![known_of(&p)]);
+        assert_eq!(app.popup, Some(Popup::ProjectPicker { index: 0 }));
+    }
+
+    #[test]
+    fn project_form_sends_the_name_and_path() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('a'));
+        let _ = app.on_key(ctrl('u'));
+        type_text(&mut app, "~/repo");
+        let _ = app.on_key(code(KeyCode::Tab));
+        type_text(&mut app, " My repo ");
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            vec![Effect::Send(Request::AddProject {
+                path: "/home/u/repo".into(),
+                name: Some("My repo".into()),
+            })]
+        );
+    }
+
+    #[test]
+    fn d_on_a_project_without_agents_confirms_removing_it() {
+        let (p, q) = (project("p"), project("q"));
+        let a = agent(&p, "alpha", Status::Idle);
+        let (mut app, _) = loaded(vec![p, q.clone()], vec![a]);
+        let _ = app.on_key(key('1'));
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(key('d'));
+        assert!(
+            matches!(
+                &app.popup,
+                Some(Popup::Confirm { prompt, action: Confirmed::RemoveProject(id) })
+                    if *id == q.id && prompt.contains('q')
+            ),
+            "{:?}",
+            app.popup
+        );
+        assert_eq!(
+            app.on_key(key('y')),
+            vec![Effect::Send(Request::RemoveProject { id: q.id })]
+        );
+    }
+
+    #[test]
+    fn d_on_a_project_with_agents_refuses() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('1'));
+        let _ = app.on_key(key('d'));
+        assert_eq!(app.popup, None);
+        let message = app.current_message(Instant::now()).unwrap_or_default();
+        assert!(message.contains("agents first"), "{message}");
     }
 
     fn created(effects: Vec<Effect>) -> CreateAgent {
@@ -2997,7 +3358,7 @@ pub(crate) mod tests {
         let effects = app.apply_response(Response::Project(s.clone()));
         assert_eq!(app.selected_project().map(|x| x.id), Some(s.id));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
-        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(effects, vec![Effect::RememberProjects(vec![known_of(&s)])]);
         let _ = app.apply_response(Response::Project(projects[0].clone()));
         assert_eq!(app.selected_project().map(|x| x.id), Some(projects[0].id));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
