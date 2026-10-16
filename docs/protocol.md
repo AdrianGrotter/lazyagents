@@ -16,7 +16,9 @@ is rejected.
    fails with `client::VersionMismatch` without sending Hello. The fix is to stop that
    daemon: `lazyagents shutdown`, or `y` in the TUI's mismatch popup, sends it SIGTERM,
    and the next command starts a matching daemon. On a match it sends
-   `Hello { protocol_version }`.
+   `Hello { protocol_version }`. The daemon closes a connection whose `Hello` names
+   another protocol version, without reading or answering anything after it, because
+   the variant indices of `Request` differ between versions.
 3. The client then sends `Request { id, request }`. The daemon answers each request with
    exactly one `Response { id, result }`, where `result` is `Ok(Response)` or
    `Err(message)`. Most answers come in request order; `GitStat` and `GitDiff` are

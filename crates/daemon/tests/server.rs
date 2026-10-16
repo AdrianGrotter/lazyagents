@@ -359,6 +359,35 @@ async fn welcome_then_empty_lists() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_client_of_another_protocol_is_closed_unanswered() {
+    let daemon = TestDaemon::start().await;
+    let stream = UnixStream::connect(daemon.socket()).await.expect("connect");
+    let (mut read, mut write) = stream.into_split();
+    let welcome: Option<ServerMessage> = read_message(&mut read).await.expect("welcome");
+    assert!(matches!(welcome, Some(ServerMessage::Welcome { .. })));
+    write_message(
+        &mut write,
+        &ClientMessage::Hello {
+            protocol_version: 1,
+        },
+    )
+    .await
+    .expect("hello");
+    let _ = write_message(
+        &mut write,
+        &ClientMessage::Request {
+            id: 1,
+            request: Request::ListAgents,
+        },
+    )
+    .await;
+    let next = tokio::time::timeout(WAIT, read_message::<_, ServerMessage>(&mut read))
+        .await
+        .expect("the daemon kept the connection open");
+    assert!(matches!(next, Ok(None) | Err(_)), "{next:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn adding_the_same_project_twice_returns_it() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;

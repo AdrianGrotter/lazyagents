@@ -206,7 +206,16 @@ async fn read_loop(client: ClientId, mut read: OwnedReadHalf, commands: Unbounde
                     break;
                 }
             }
-            Ok(Some(ClientMessage::Hello { .. })) => {}
+            Ok(Some(ClientMessage::Hello { protocol_version }))
+                if protocol_version == PROTOCOL_VERSION => {}
+            Ok(Some(ClientMessage::Hello { protocol_version })) => {
+                tracing::warn!(
+                    client,
+                    protocol_version,
+                    "client speaks another protocol; closing"
+                );
+                break;
+            }
             Ok(None) | Err(_) => break,
         }
     }
