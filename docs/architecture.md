@@ -223,7 +223,8 @@ daemon last told it.
   any exit path, ignoring errors from a vanished terminal.
 - **Clipboard** (`clipboard.rs`): the runtime handles `Copy` between draws, writing OSC 52
   to the terminal and flushing it, and piping the text to `pbcopy` or `wl-copy` when one
-  is on `PATH`. The copier runs on a short-lived thread that writes its stdin, closes it
+  is on `PATH`, with `LC_CTYPE=UTF-8` and no `LC_ALL`, so pbcopy never reads the text
+  as MacRoman under a C locale. The copier runs on a short-lived thread that writes its stdin, closes it
   and waits for it, so it never blocks the UI or lingers as a zombie.
 
 ### Persistence and config

@@ -20,8 +20,16 @@ pub fn copy(out: &mut impl Write, text: &str) {
     let _ = out.write_all(osc52(text).as_bytes());
     let _ = out.flush();
     if let Some(program) = std::env::var_os("PATH").and_then(|path| native_copier(&path)) {
-        let _ = pipe_to(Command::new(program), text.to_string());
+        let _ = pipe_to(copier(program.as_os_str()), text.to_string());
     }
+}
+
+/// pbcopy decodes its input by the locale, and under C or POSIX it would read UTF-8 as
+/// MacRoman; `LC_ALL` would override `LC_CTYPE`.
+fn copier(program: &OsStr) -> Command {
+    let mut command = Command::new(program);
+    command.env("LC_CTYPE", "UTF-8").env_remove("LC_ALL");
+    command
 }
 
 fn native_copier(path: &OsStr) -> Option<PathBuf> {
@@ -72,6 +80,33 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("copied file"),
             "copied text"
+        );
+    }
+
+    #[test]
+    fn the_copier_reads_its_input_as_utf8() {
+        let command = copier("pbcopy".as_ref());
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.contains(&("LC_CTYPE".as_ref(), Some("UTF-8".as_ref()))),
+            "{command:?}"
+        );
+        assert!(envs.contains(&("LC_ALL".as_ref(), None)), "{command:?}");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("locale");
+        let mut command = copier("sh".as_ref());
+        command
+            .args([
+                "-c",
+                "printf %s \"$LC_CTYPE\" > \"$1\"; cat > /dev/null",
+                "sh",
+            ])
+            .arg(&path);
+        pipe_to(command, "æøå".into()).join().expect("copy thread");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("recorded locale"),
+            "UTF-8"
         );
     }
 
