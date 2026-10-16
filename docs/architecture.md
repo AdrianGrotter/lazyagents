@@ -37,7 +37,9 @@ Subcommands:
   unregister a project.
 - `lazyagents new <name> [--project p] [--kind claude|generic] [-- cmd...]` — start an
   agent.
-- `lazyagents kill|restart|rm <agent>`, `lazyagents rename <agent> <name>`.
+- `lazyagents kill|restart|rm <agent>`, `lazyagents rename <agent> <name>`. `rm` keeps
+  a worktree agent's worktree and branch and says so: `removed <name>; kept worktree
+  <path> (branch <branch>)`.
 - `lazyagents shutdown` — stop the daemon and every agent.
 
 Commands that talk to the daemon start it if its socket is missing or dead, except

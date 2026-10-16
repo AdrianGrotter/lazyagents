@@ -97,7 +97,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
                     force: false,
                 })
                 .await?;
-            println!("removed {}", info.name);
+            println!("{}", removed_message(&info));
         }
         Command::Rename { agent, name } => {
             let info = find_agent(&mut client, &agent).await?;
@@ -237,6 +237,19 @@ fn resolve_agent(
     bail!("no agent matches {query}")
 }
 
+/// `rm` keeps an agent's worktree and branch, so the message says where they are.
+fn removed_message(info: &AgentInfo) -> String {
+    match &info.worktree {
+        Some(worktree) => format!(
+            "removed {}; kept worktree {} (branch {})",
+            info.name,
+            worktree.path.display(),
+            worktree.branch
+        ),
+        None => format!("removed {}", info.name),
+    }
+}
+
 fn format_ls(projects: &[Project], agents: &[AgentInfo]) -> String {
     if projects.is_empty() {
         return "no projects yet; run lazyagents new <name> inside a repo\n".to_string();
@@ -328,6 +341,23 @@ mod tests {
             Some(inner)
         );
         assert_eq!(containing_project(&projects, Path::new("/elsewhere")), None);
+    }
+
+    #[test]
+    fn removing_a_worktree_agent_names_the_kept_worktree() {
+        let p = project("p", "/git/p");
+        let plain = agent(&p, "plain");
+        assert_eq!(removed_message(&plain), "removed plain");
+        let mut wt = agent(&p, "wt");
+        wt.worktree = Some(protocol::WorktreeInfo {
+            path: "/s/worktrees/p-1234abcd/wt".into(),
+            branch: "lazyagents/wt".into(),
+            base: "main".into(),
+        });
+        assert_eq!(
+            removed_message(&wt),
+            "removed wt; kept worktree /s/worktrees/p-1234abcd/wt (branch lazyagents/wt)"
+        );
     }
 
     #[test]
