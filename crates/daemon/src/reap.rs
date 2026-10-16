@@ -2,7 +2,6 @@
 //! process group or session.
 
 use std::collections::{HashMap, HashSet};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use rustix::process::{
@@ -31,10 +30,8 @@ impl ProcessTable {
     /// `None` when `ps` cannot run, fails or lists nothing, so a bad reading is never
     /// taken to mean that every process is gone.
     pub fn read() -> Option<Self> {
-        match Command::new("/bin/ps")
+        match protocol::lockfile::ps()
             .args(["-A", "-o", "pid=,ppid=,lstart="])
-            .env("LC_ALL", "C")
-            .env("TZ", "UTC0")
             .output()
         {
             Ok(output) => Self::parse(output.status.success(), &output.stdout),
@@ -340,6 +337,8 @@ pub fn group_exists(leader: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     #[test]
@@ -396,10 +395,8 @@ mod tests {
     #[test]
     fn start_times_read_the_same_in_any_locale_and_time_zone() {
         let pid = std::process::id();
-        let output = Command::new("/bin/ps")
+        let output = protocol::lockfile::ps()
             .args(["-o", "lstart=", "-p", &pid.to_string()])
-            .env("LC_ALL", "C")
-            .env("TZ", "UTC0")
             .output()
             .expect("ps");
         let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();

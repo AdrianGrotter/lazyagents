@@ -59,9 +59,12 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   daemon fails with "a daemon is already running (pid N)". A leftover socket nobody
   answers on is removed only while the lock is held.
 - **Reading start times.** Every start time, in the lock file and in process tracking,
-  comes from `/bin/ps` run with `LC_ALL=C` and `TZ=UTC0`. `lstart` is otherwise printed
-  in the caller's locale and time zone, so a client in another locale, or a change of
-  the system time zone, would make a live process look recycled.
+  comes from one `ps` command (`protocol::lockfile::ps`): `/bin/ps` when it exists, else
+  `ps` on `PATH` (NixOS has no `/bin/ps`), run with `LC_ALL=C` and `TZ=UTC0`. `lstart`
+  is otherwise printed in the caller's locale and time zone, so a client in another
+  locale, or a change of the system time zone, would make a live process look recycled.
+  Debug builds run `$LAZYAGENTS_PS` in place of `ps` when it is set, so tests can
+  substitute a slow `ps`; release builds ignore it.
 - **Tracking agent processes.** Each agent leads its own session and process group.
   About once a second the daemon reads the process table (`ps -A -o pid=,ppid=,lstart=`)
   on a separate thread, so `ps` never blocks the event loop, and records every

@@ -1,5 +1,6 @@
 //! The contents of `daemon.lock`: the holder's pid and, when known, its start time.
 
+use std::path::Path;
 use std::process::Command;
 
 /// Who wrote the lock file. `start` is the `ps -o lstart=` text of `pid`, or `None` in
@@ -28,13 +29,30 @@ pub fn parse(text: &str) -> Option<Holder> {
     Some(Holder { pid, start })
 }
 
+/// A `ps` command in the C locale and UTC, so every reader of a start time gets the
+/// same text whatever its own locale or time zone. Debug builds run `$LAZYAGENTS_PS`
+/// in its place when that is set.
+pub fn ps() -> Command {
+    let mut command = if cfg!(debug_assertions)
+        && let Some(program) = std::env::var_os("LAZYAGENTS_PS")
+    {
+        Command::new(program)
+    } else {
+        Command::new(ps_program(Path::new("/bin/ps").exists()))
+    };
+    command.env("LC_ALL", "C").env("TZ", "UTC0");
+    command
+}
+
+fn ps_program(bin_ps_exists: bool) -> &'static str {
+    if bin_ps_exists { "/bin/ps" } else { "ps" }
+}
+
 /// The start time of `pid` as `ps -o lstart=` prints it in the C locale and UTC, so
 /// readers in any locale or time zone get the same text; `None` when `ps` cannot tell.
 pub fn process_start(pid: u32) -> Option<String> {
-    let output = Command::new("/bin/ps")
+    let output = ps()
         .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .env("LC_ALL", "C")
-        .env("TZ", "UTC0")
         .output()
         .ok()?;
     if !output.status.success() {
@@ -93,12 +111,30 @@ mod tests {
     }
 
     #[test]
+    fn ps_program_falls_back_to_path_without_bin_ps() {
+        assert_eq!(ps_program(true), "/bin/ps");
+        assert_eq!(ps_program(false), "ps");
+    }
+
+    #[test]
+    fn ps_runs_in_the_c_locale_and_utc() {
+        let command = ps();
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.contains(&("LC_ALL".as_ref(), Some("C".as_ref()))),
+            "{envs:?}"
+        );
+        assert!(
+            envs.contains(&("TZ".as_ref(), Some("UTC0".as_ref()))),
+            "{envs:?}"
+        );
+    }
+
+    #[test]
     fn the_start_reads_the_same_in_any_locale_and_time_zone() {
         let pid = std::process::id();
-        let output = Command::new("/bin/ps")
+        let output = ps()
             .args(["-o", "lstart=", "-p", &pid.to_string()])
-            .env("LC_ALL", "C")
-            .env("TZ", "UTC0")
             .output()
             .expect("ps");
         let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();
