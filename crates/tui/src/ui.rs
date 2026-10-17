@@ -296,7 +296,11 @@ fn label(agent: &AgentInfo) -> &str {
 }
 
 fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
-    let (symbol, style) = glyph(agent.status, tick, &app.theme);
+    let unseen = app.is_unseen(agent.id);
+    let (symbol, style) = match unseen {
+        true => ("●", Style::new().fg(app.theme.done)),
+        false => glyph(agent.status, tick, &app.theme),
+    };
     let name = match app.view {
         AgentView::All => {
             let project = app.projects.iter().find(|p| p.id == agent.project);
@@ -308,7 +312,11 @@ fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
         }
         AgentView::Project => label(agent).to_string(),
     };
-    let rest = format!(" {name}  {}", agent.status.label());
+    let status = match unseen {
+        true => "done".to_string(),
+        false => agent.status.label(),
+    };
+    let rest = format!(" {name}  {status}");
     let line = Line::from(vec![Span::styled(symbol, style), Span::raw(rest)]);
     ListItem::new(if agent.status == Status::NeedsInput {
         line.fg(app.theme.attention)
@@ -855,7 +863,7 @@ mod tests {
     use crate::app::tests::{agent, loaded, loaded_with, project, worktree_agent};
     use crate::app::{App, Effect, Focus, MouseInput, MouseKind, Popup, ProjectField, ProjectForm};
     use crate::config::Config;
-    use crate::config::{ERROR_RED, IDLE_GREEN, NEEDS_PURPLE, WORKING_YELLOW};
+    use crate::config::{DONE_BLUE, ERROR_RED, IDLE_GREEN, NEEDS_PURPLE, WORKING_YELLOW};
     use crate::known::KnownProject;
     use protocol::{Cell, Color as ScreenColor, GitStat, Screen, Status, Style as ScreenStyle};
     use ratatui::Terminal;
@@ -940,6 +948,23 @@ mod tests {
         assert!(text.contains("● docs  idle"), "{text}");
         assert!(text.contains(" api · generic · needs input "), "{text}");
         assert!(text.contains("status: needs input"), "{text}");
+    }
+
+    #[test]
+    fn an_unseen_finished_agent_is_listed_as_done() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Working);
+        let (mut app, _) = loaded(vec![p], vec![a, b.clone()]);
+        let _ = app.apply_server(protocol::ServerMessage::AgentUpdated(AgentInfo {
+            status: Status::Idle,
+            ..b
+        }));
+        let (text, buffer) = render(&app);
+        assert!(text.contains("● beta  done"), "{text}");
+        let dot = find_text(&buffer, buffer.area, "● beta");
+        assert_eq!(buffer[dot].fg, DONE_BLUE);
+        assert!(text.contains("● alpha  idle"), "{text}");
     }
 
     #[test]

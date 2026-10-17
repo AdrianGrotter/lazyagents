@@ -171,6 +171,7 @@ working = 208
 | `error` | `#c9453c` (red) | agents that exited with an error, error messages |
 | `working` | `#d29922` (yellow) | the working dot, the pending prefix; the default pulses to orange, a configured colour stays steady |
 | `idle` | `#438440` (green) | the idle dot |
+| `done` | `#2f81f7` (blue) | the dot of an agent listed as `done` |
 | `dim` | dark gray | hints, secondary text, starting, stopped and cleanly exited agents |
 | `border` | dark gray | unfocused borders |
 | `scroll` | yellow | the pane border in scroll mode |

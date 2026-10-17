@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -343,6 +343,9 @@ pub struct App {
     pub scroll: Option<ScrollMode>,
     pub selection: Option<Selection>,
     pub known: Vec<KnownProject>,
+    /// Agents whose turn ended while they were out of view, until they are viewed.
+    unseen: HashSet<AgentId>,
+    terminal_focused: bool,
     stats_in_flight: HashMap<AgentId, Instant>,
     diffs_in_flight: HashMap<AgentId, Instant>,
     stat_polled: Option<(AgentId, Instant)>,
@@ -382,6 +385,8 @@ impl App {
             scroll: None,
             selection: None,
             known: Vec::new(),
+            unseen: HashSet::new(),
+            terminal_focused: true,
             stats_in_flight: HashMap::new(),
             diffs_in_flight: HashMap::new(),
             stat_polled: None,
@@ -602,6 +607,7 @@ impl App {
         self.git_stats.retain(|id, _| exists(id));
         self.stats_in_flight.retain(|id, _| exists(id));
         self.diffs_in_flight.retain(|id, _| exists(id));
+        self.unseen.retain(|id| exists(id));
     }
 
     pub fn apply_server(&mut self, message: ServerMessage) -> Vec<Effect> {
@@ -769,11 +775,32 @@ impl App {
 
     fn upsert_agent(&mut self, info: AgentInfo) {
         let selected = self.selected_agent().map(|a| a.id);
-        match self.agents.iter_mut().find(|a| a.id == info.id) {
-            Some(existing) => *existing = info,
-            None => self.agents.push(info),
+        let in_view = selected == Some(info.id) && self.terminal_focused;
+        let (id, status) = (info.id, info.status);
+        let before = match self.agents.iter_mut().find(|a| a.id == info.id) {
+            Some(existing) => Some(std::mem::replace(existing, info).status),
+            None => {
+                self.agents.push(info);
+                None
+            }
+        };
+        let ended_turn =
+            matches!(before, Some(Status::Working | Status::NeedsInput)) && status == Status::Idle;
+        if ended_turn && !in_view {
+            self.unseen.insert(id);
+        } else if status != Status::Idle {
+            self.unseen.remove(&id);
         }
         self.reselect(selected);
+    }
+
+    pub fn is_unseen(&self, id: AgentId) -> bool {
+        self.unseen.contains(&id)
+    }
+
+    pub fn on_focus(&mut self, focused: bool) -> Vec<Effect> {
+        self.terminal_focused = focused;
+        self.sync()
     }
 
     /// Keeps `selected` selected. In the all-agents view the project highlight stays
@@ -836,6 +863,9 @@ impl App {
     fn sync(&mut self) -> Vec<Effect> {
         self.clamp();
         let wanted = self.selected_agent().map(|a| (a.id, a.status.is_running()));
+        if let (Some((id, _)), true) = (wanted, self.terminal_focused) {
+            self.unseen.remove(&id);
+        }
         let running = wanted.is_some_and(|(_, running)| running);
         if !running && self.focus == Focus::Pane {
             self.leave_pane();
@@ -1532,13 +1562,22 @@ impl App {
         let start = current
             .and_then(|id| ordered.iter().position(|a| a.id == id))
             .map_or(0, |i| i + 1);
-        let next = (0..ordered.len())
+        let others: Vec<&AgentInfo> = (0..ordered.len())
             .map(|offset| ordered[(start + offset) % ordered.len()])
+            .filter(|a| Some(a.id) != current)
+            .collect();
+        let next = others
+            .iter()
             .find(|a| a.status == Status::NeedsInput)
+            .or_else(|| others.iter().find(|a| self.unseen.contains(&a.id)))
             .map(|a| a.id);
+        let current_needs_input = self
+            .selected_agent()
+            .is_some_and(|a| a.status == Status::NeedsInput);
         match next {
             Some(id) => self.select_agent(id),
-            None => self.fail("no agent needs input"),
+            None if current_needs_input => self.fail("no other agent needs attention"),
+            None => self.fail("no agent needs attention"),
         }
     }
 
@@ -3293,6 +3332,76 @@ pub(crate) mod tests {
         let _ = app.on_key(key('g'));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(waiting.id));
         assert_eq!(app.selected_project().map(|x| x.id), Some(q.id));
+    }
+
+    fn update(app: &mut App, info: &AgentInfo, status: Status) {
+        let _ = app.apply_server(ServerMessage::AgentUpdated(AgentInfo {
+            status,
+            ..info.clone()
+        }));
+    }
+
+    fn finish_turn(app: &mut App, info: &AgentInfo) {
+        update(app, info, Status::Working);
+        update(app, info, Status::Idle);
+    }
+
+    #[test]
+    fn a_turn_that_ends_out_of_view_is_unseen_until_selected() {
+        let (mut app, a, b) = two_agents();
+        finish_turn(&mut app, &b);
+        assert!(app.is_unseen(b.id));
+        finish_turn(&mut app, &a);
+        assert!(!app.is_unseen(a.id));
+        let _ = app.on_key(key('j'));
+        assert!(!app.is_unseen(b.id));
+    }
+
+    #[test]
+    fn an_unseen_agent_that_works_again_is_no_longer_unseen() {
+        let (mut app, _, b) = two_agents();
+        finish_turn(&mut app, &b);
+        update(&mut app, &b, Status::Working);
+        assert!(!app.is_unseen(b.id));
+        update(&mut app, &b, Status::NeedsInput);
+        update(&mut app, &b, Status::Idle);
+        assert!(app.is_unseen(b.id));
+        update(&mut app, &b, Status::Exited(0));
+        assert!(!app.is_unseen(b.id));
+    }
+
+    #[test]
+    fn the_selected_agent_ending_a_turn_unfocused_is_unseen_until_focus_returns() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_focus(false);
+        finish_turn(&mut app, &a);
+        assert!(app.is_unseen(a.id));
+        let _ = app.on_focus(true);
+        assert!(!app.is_unseen(a.id));
+    }
+
+    #[test]
+    fn g_visits_agents_needing_input_before_unseen_ones() {
+        let p = project("p");
+        let a = agent(&p, "a", Status::Idle);
+        let b = agent(&p, "b", Status::Idle);
+        let c = agent(&p, "c", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a.clone(), b.clone(), c.clone()]);
+        finish_turn(&mut app, &b);
+        update(&mut app, &c, Status::NeedsInput);
+        let selected = |app: &App| app.selected_agent().map(|x| x.id);
+        let _ = app.on_key(key('g'));
+        assert_eq!(selected(&app), Some(c.id));
+        let _ = app.on_key(key('g'));
+        assert_eq!(selected(&app), Some(b.id));
+        let _ = app.on_key(key('g'));
+        assert_eq!(selected(&app), Some(c.id));
+        let _ = app.on_key(key('g'));
+        assert_eq!(selected(&app), Some(c.id));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("no other agent needs attention")
+        );
     }
 
     #[test]

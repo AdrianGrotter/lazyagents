@@ -26,6 +26,7 @@ pub const IDLE_GREEN: Color = Color::Rgb(0x43, 0x84, 0x40);
 pub const NEEDS_PURPLE: Color = Color::Rgb(0x82, 0x59, 0xDD);
 pub const ERROR_RED: Color = Color::Rgb(0xC9, 0x45, 0x3C);
 pub const WORKING_YELLOW: Color = Color::Rgb(0xD2, 0x99, 0x22);
+pub const DONE_BLUE: Color = Color::Rgb(0x2F, 0x81, 0xF7);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
@@ -34,6 +35,7 @@ pub struct Theme {
     pub error: Color,
     pub working: Color,
     pub idle: Color,
+    pub done: Color,
     pub dim: Color,
     pub border: Color,
     pub scroll: Color,
@@ -51,6 +53,7 @@ impl Default for Theme {
             error: ERROR_RED,
             working: WORKING_YELLOW,
             idle: IDLE_GREEN,
+            done: DONE_BLUE,
             dim: Color::DarkGray,
             border: Color::DarkGray,
             scroll: Color::Yellow,
@@ -347,6 +350,7 @@ impl Config {
                 "error" => &mut theme.error,
                 "working" => &mut theme.working,
                 "idle" => &mut theme.idle,
+                "done" => &mut theme.done,
                 "dim" => &mut theme.dim,
                 "border" => &mut theme.border,
                 "scroll" => &mut theme.scroll,

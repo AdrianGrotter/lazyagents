@@ -8,9 +8,10 @@ use client::{Client, VersionMismatch};
 use protocol::{Request, SHUTDOWN_WAIT, StatePaths};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
-    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::{execute, terminal};
 use ratatui::layout::Rect;
@@ -30,6 +31,7 @@ enum Term {
     Paste(String),
     Mouse(MouseInput),
     Resize,
+    Focus(bool),
     Gone,
 }
 
@@ -55,7 +57,12 @@ impl TerminalGuard {
             terminal: ManuallyDrop::new(terminal),
             enhanced,
         };
-        execute!(stdout(), EnableBracketedPaste, EnableMouseCapture)?;
+        execute!(
+            stdout(),
+            EnableBracketedPaste,
+            EnableMouseCapture,
+            EnableFocusChange
+        )?;
         if enhanced {
             execute!(
                 stdout(),
@@ -78,7 +85,12 @@ fn restore_terminal(enhanced: bool) {
     if enhanced {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     }
-    let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
+    let _ = execute!(
+        stdout(),
+        DisableFocusChange,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
     let _ = ratatui::try_restore();
 }
 
@@ -196,6 +208,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                 Some(Term::Paste(text)) => app.on_paste(text),
                 Some(Term::Mouse(mouse)) => app.on_mouse(mouse, &layout),
                 Some(Term::Resize) => Vec::new(),
+                Some(Term::Focus(focused)) => app.on_focus(focused),
                 Some(Term::Gone) | None => return Ok(()),
             },
             message = incoming.recv() => match message {
@@ -363,6 +376,8 @@ fn read_terminal(tx: &UnboundedSender<Term>) {
                 })
             }
             Ok(Event::Resize(..)) => Term::Resize,
+            Ok(Event::FocusGained) => Term::Focus(true),
+            Ok(Event::FocusLost) => Term::Focus(false),
             Ok(_) => continue,
             Err(_) => {
                 let _ = tx.send(Term::Gone);

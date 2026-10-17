@@ -26,12 +26,19 @@ Two input modes:
 | `R` | rename agent |
 | `a` | add project: a picker of projects added before, or the new project form when there are none |
 | `A` | toggle between the selected project's agents and all agents |
-| `g` | jump to next agent with `NeedsInput` |
+| `g` | jump to the next agent that needs input; when no other agent does, to the next one listed as `done` |
 | `D` | diff view of the agent's changes in the main pane |
 | `s` | scroll mode: browse the agent's terminal history (running or exited agents) |
 | `?` | help popup |
 | `q`, `ctrl-c` | quit TUI (agents keep running) |
 | `Q` | quit and stop daemon (confirm) |
+
+An agent whose turn ends (working or needs input → idle) while it is out of view is
+listed as `done`, with a blue dot, until you view it: select it, or, for the agent already
+selected, bring the terminal back into focus. Out of view means not selected, or selected
+while the terminal lacks focus; terminals that report no focus changes (tmux without
+`focus-events on`) always count as focused. An agent that works again, or stops, is no
+longer `done`. The marks live in the TUI and start empty when it starts.
 
 The add project picker lists `+ new project…` and then every known project that is not in
 the sidebar, most recently added first. `j`/`k` (or `↓`/`↑`) move, `enter` adds the
