@@ -145,11 +145,11 @@ which ends with it.
 
 While such work is in flight the daemon keeps its state consistent (ADR 0018):
 
-- **Kill, restart and remove** mark the agent busy until they are answered. Another kill,
-  restart or remove of it is refused with `<name> is stopping; try again once that is
-  done` (`restarting` or `being removed` in place of `stopping`). Everything else (input, resize, scroll,
-  subscribe, hooks, usage, rename, merge, git queries) is served meanwhile against the
-  agent as it is; a removal's checks (merged branch, uncommitted changes) run on its thread
+- **Kill, restart and remove** mark the agent busy until they are answered. A kill,
+  restart, remove, merge or rename of it is refused meanwhile with `<name> is stopping; try
+  again once that is done` (`restarting` or `being removed` in place of `stopping`).
+  Everything else (input, resize, scroll, subscribe, hooks, usage, git queries) is served
+  against the agent as it is; a removal's checks (merged branch, uncommitted changes) run on its thread
   before the stop, and a refusal leaves the agent as it was.
 - **A worktree create** reserves its name in the project until it is answered: a create of
   the same name, or a rename to it, is refused with `an agent named <name> is being created

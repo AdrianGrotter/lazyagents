@@ -13,7 +13,7 @@ Moving the work to threads lets several requests touch the same agent, or the sa
 
 The connection's own task sends `Welcome`. Kill, restart, remove and worktree creates run their slow part on a thread of their own and continue on the loop, from its 33 ms tick, when it finishes; only then are they answered. The loop keeps all state; a thread gets copies and returns results.
 
-- An agent with a kill, restart or remove in flight is busy: another of the three is refused with `<name> is stopping; try again once that is done` (or `restarting`, `being removed`). Other requests are served against the agent as it is.
+- An agent with a kill, restart or remove in flight is busy: another of the three, a merge or a rename of it is refused with `<name> is stopping; try again once that is done` (or `restarting`, `being removed`). Other requests are served against the agent as it is.
 - A worktree create reserves its name in its project; a second create of that name, a rename to it and removing the project are refused until it is answered. The agent is added, and started, only when its worktree is ready.
 - A stop that a running process snapshot covers waits, on its thread, for what the loop forwards from that snapshot, as the inline stop did.
 - Shutdown stays on the loop, which ends with it: it stops every agent, then waits for every job and finishes it without starting anything, removing a worktree whose agent never started, then stops what turned up meanwhile.

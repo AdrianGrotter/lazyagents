@@ -124,7 +124,8 @@ does not compile in the test until its sample is added.
 
 `KillAgent`, `RemoveAgent` and `RestartAgent` stop the agent's whole process tree (see
 [architecture.md](architecture.md#daemon-lifecycle)) before they are answered.
-While one of them runs, another of the three for the same agent is rejected with
+While one of them runs, any of the three, `MergeAgent` or `RenameAgent` for the same agent
+is rejected with
 `<name> is stopping; try again once that is done` (`restarting` or `being removed` in
 place of `stopping`). While a worktree `CreateAgent` runs, its name is reserved: a create
 of the same name in the project, or a `RenameAgent` to it, is rejected with `an agent named

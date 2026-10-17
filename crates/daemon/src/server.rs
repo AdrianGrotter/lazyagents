@@ -287,7 +287,7 @@ struct Agent {
     at_trust_dialog: bool,
     usage: Option<Usage>,
     /// What a stop or removal running off the event loop is doing to the agent; while set,
-    /// kill, restart and remove are refused.
+    /// kill, restart, remove, merge and rename are refused.
     busy: Option<&'static str>,
 }
 
@@ -1330,7 +1330,7 @@ impl Daemon {
     /// Merges on its own thread, like a git query, since the user's merge hooks may take
     /// their time.
     fn merge_agent(&self, client: ClientId, request_id: u64, id: AgentId) -> Reply {
-        let agent = match self.agent(id) {
+        let agent = match self.idle(id) {
             Ok(agent) => agent,
             Err(e) => return Reply::Now(Box::new(Err(e))),
         };
@@ -1395,7 +1395,7 @@ impl Daemon {
     }
 
     fn rename_agent(&mut self, id: AgentId, name: String) -> Result<AgentInfo, String> {
-        let project = self.agent(id)?.record.project;
+        let project = self.idle(id)?.record.project;
         self.validate_name(project, &name, Some(id))?;
         if let Some(agent) = self.agents.get_mut(&id) {
             agent.record.name = name;

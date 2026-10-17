@@ -3236,6 +3236,11 @@ async fn an_agent_being_removed_refuses_other_lifecycle_requests() {
             force: false,
             delete_branch: false,
         },
+        Request::MergeAgent { id: agent.id },
+        Request::RenameAgent {
+            id: agent.id,
+            name: "renamed".into(),
+        },
     ] {
         let err = other.request(request).await.expect_err("busy");
         assert!(err.contains("doomed is being removed"), "{err}");
