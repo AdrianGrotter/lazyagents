@@ -21,14 +21,14 @@ trap cleanup EXIT
 
 cargo build --locked -q -p lazyagents --manifest-path "$root/Cargo.toml"
 
-# The script's own git runs ignore the user's global and system config.
+# Git, here and in the daemon and agent below, ignores the global and system config.
 own_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"; }
 own_git init -q -b main "$repo"
 own_git -C "$repo" config user.name smoke
 own_git -C "$repo" config user.email smoke@example.com
 own_git -C "$repo" commit -q --allow-empty -m init
 
-"$h" start "$name" 120 32 -- sh -c "cd '$repo' && exec env LAZYAGENTS_STATE_DIR='$state' LAZYAGENTS_CONFIG='$work/config.toml' SHELL=/bin/sh '$bin'"
+"$h" start "$name" 120 32 -- sh -c "cd '$repo' && exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 LAZYAGENTS_STATE_DIR='$state' LAZYAGENTS_CONFIG='$work/config.toml' SHELL=/bin/sh '$bin'"
 "$h" wait-for "$name" 'press a to add a project' 20
 "$h" keys "$name" a
 "$h" wait-for "$name" ' Add project ' 5

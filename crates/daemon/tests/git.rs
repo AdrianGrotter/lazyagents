@@ -399,3 +399,22 @@ fn without_a_worktree_include_nothing_is_copied() {
             .is_empty()
     );
 }
+
+/// The daemon's git calls inherit the test process's environment, which the setup script
+/// in `.config/nextest.toml` points away from the developer's global and system config.
+#[test]
+fn tests_read_no_global_or_system_git_config() {
+    let outside = tempfile::tempdir().expect("dir outside any repo");
+    let output = std::process::Command::new("git")
+        .args(["config", "--list", "--show-scope"])
+        .current_dir(outside.path())
+        .output()
+        .expect("git config");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    let leaked: Vec<&str> = listed
+        .lines()
+        .filter(|line| line.starts_with("global") || line.starts_with("system"))
+        .map(|line| line.split('=').next().unwrap_or(line))
+        .collect();
+    assert!(leaked.is_empty(), "{leaked:?}");
+}
