@@ -82,7 +82,7 @@ const KEY_CODE_VARIANTS: usize = 17;
 const COLOR_VARIANTS: usize = 3;
 const SCOPE_VARIANTS: usize = 3;
 const AGENT_KIND_VARIANTS: usize = 2;
-const INPUT_EVENT_VARIANTS: usize = 3;
+const INPUT_EVENT_VARIANTS: usize = 4;
 const HOOK_KIND_VARIANTS: usize = 8;
 
 fn status_slot(status: &Status) -> usize {
@@ -146,6 +146,7 @@ fn input_event_slot(event: &InputEvent) -> usize {
         InputEvent::Key(_) => 0,
         InputEvent::Paste(_) => 1,
         InputEvent::Wheel { .. } => 2,
+        InputEvent::Click { .. } => 3,
     }
 }
 
@@ -380,6 +381,13 @@ fn requests() -> Vec<(String, Request)> {
                     col: 300,
                     row: 400,
                 },
+            },
+        ),
+        (
+            "Input click",
+            Request::Input {
+                id,
+                event: InputEvent::Click { col: 301, row: 401 },
             },
         ),
         (
