@@ -35,7 +35,7 @@ Two input modes:
 | `i` | reply: type a line and `enter` sends it to the selected agent with `enter` after it, as if typed in its pane; `esc` cancels. A pasted newline becomes a space |
 | `J`/`K`, `pagedown`/`pageup` | scroll the selected agent's pane half a page down / up without leaving the sidebar |
 | `+` | screen mode: the pane beside a narrow sidebar, then the pane alone, then back. The sidebar keys keep working while it is hidden |
-| `F` | finish a worktree agent: a menu to merge its branch into its base, push it and open a pull request (with `gh` on `PATH`), remove the agent and worktree but keep the branch, or remove them with the branch (only once it is merged). Picking an entry does it; `j`/`k` move, `esc` closes |
+| `F` | finish a worktree agent: a menu to merge its branch into its base, push it and open a pull request against its base branch (with `gh` on `PATH`), remove the agent and worktree but keep the branch, or remove them with the branch (only once it is merged). Picking an entry does it; `j`/`k` move, `esc` closes |
 | `?` | help popup: typing filters it by key or description (`backspace` deletes), `esc`, `enter` or `?` closes it |
 | `q`, `ctrl-c` | quit TUI (agents keep running) |
 | `Q` | quit and stop daemon (confirm) |

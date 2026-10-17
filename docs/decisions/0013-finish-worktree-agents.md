@@ -21,8 +21,9 @@ each entry naming what it does and to which branch:
 - merge the branch into its base, done by the daemon in the project's own checkout with
   `git merge --no-edit`, refused unless that checkout is on the base with no tracked
   changes and the agent's worktree has nothing uncommitted; a failed merge is aborted;
-- push the branch and open a pull request with `gh pr create --fill`, run in the terminal
-  so `gh` can ask what it needs, shown only when `gh` is on `PATH`;
+- push the branch and open a pull request with `gh pr create --fill --base <base>`, run in
+  the terminal so `gh` can ask what it needs, shown only when `gh` is on `PATH`; a base
+  that is a commit rather than a branch leaves `--base` off, so `gh` uses the default branch;
 - remove the agent and its worktree and keep the branch, as `d` does;
 - remove the agent, its worktree and its branch, refused unless the base already contains
   every commit of the branch.
