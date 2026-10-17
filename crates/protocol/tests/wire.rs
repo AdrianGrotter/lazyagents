@@ -77,6 +77,154 @@ fn server_slot(message: &ServerMessage) -> usize {
     }
 }
 
+const STATUS_VARIANTS: usize = 6;
+const KEY_CODE_VARIANTS: usize = 17;
+const COLOR_VARIANTS: usize = 3;
+const SCOPE_VARIANTS: usize = 3;
+const AGENT_KIND_VARIANTS: usize = 2;
+const INPUT_EVENT_VARIANTS: usize = 3;
+const HOOK_KIND_VARIANTS: usize = 8;
+
+fn status_slot(status: &Status) -> usize {
+    match status {
+        Status::Starting => 0,
+        Status::Working => 1,
+        Status::NeedsInput => 2,
+        Status::Idle => 3,
+        Status::Exited(_) => 4,
+        Status::Stopped => 5,
+    }
+}
+
+fn key_code_slot(code: &KeyCode) -> usize {
+    match code {
+        KeyCode::Char(_) => 0,
+        KeyCode::Enter => 1,
+        KeyCode::Tab => 2,
+        KeyCode::BackTab => 3,
+        KeyCode::Backspace => 4,
+        KeyCode::Esc => 5,
+        KeyCode::Up => 6,
+        KeyCode::Down => 7,
+        KeyCode::Left => 8,
+        KeyCode::Right => 9,
+        KeyCode::Home => 10,
+        KeyCode::End => 11,
+        KeyCode::Insert => 12,
+        KeyCode::Delete => 13,
+        KeyCode::PageUp => 14,
+        KeyCode::PageDown => 15,
+        KeyCode::F(_) => 16,
+    }
+}
+
+fn color_slot(color: &Color) -> usize {
+    match color {
+        Color::Default => 0,
+        Color::Indexed(_) => 1,
+        Color::Rgb(..) => 2,
+    }
+}
+
+fn scope_slot(scope: &DiffScope) -> usize {
+    match scope {
+        DiffScope::All => 0,
+        DiffScope::Uncommitted => 1,
+        DiffScope::Committed => 2,
+    }
+}
+
+fn agent_kind_slot(kind: &AgentKind) -> usize {
+    match kind {
+        AgentKind::Claude => 0,
+        AgentKind::Generic => 1,
+    }
+}
+
+fn input_event_slot(event: &InputEvent) -> usize {
+    match event {
+        InputEvent::Key(_) => 0,
+        InputEvent::Paste(_) => 1,
+        InputEvent::Wheel { .. } => 2,
+    }
+}
+
+fn hook_kind_slot(kind: &HookKind) -> usize {
+    match kind {
+        HookKind::SessionStart => 0,
+        HookKind::UserPromptSubmit => 1,
+        HookKind::PreToolUse => 2,
+        HookKind::PostToolUse => 3,
+        HookKind::Notification => 4,
+        HookKind::Stop => 5,
+        HookKind::PermissionRequest => 6,
+        HookKind::StopFailure => 7,
+    }
+}
+
+fn all_statuses() -> Vec<Status> {
+    vec![
+        Status::Starting,
+        Status::Working,
+        Status::NeedsInput,
+        Status::Idle,
+        Status::Exited(-1),
+        Status::Exited(i32::MIN),
+        Status::Stopped,
+    ]
+}
+
+fn all_key_codes() -> Vec<KeyCode> {
+    vec![
+        KeyCode::Char('é'),
+        KeyCode::Enter,
+        KeyCode::Tab,
+        KeyCode::BackTab,
+        KeyCode::Backspace,
+        KeyCode::Esc,
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::Insert,
+        KeyCode::Delete,
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::F(200),
+    ]
+}
+
+fn all_colors() -> Vec<Color> {
+    vec![
+        Color::Default,
+        Color::Indexed(200),
+        Color::Rgb(255, 128, 200),
+    ]
+}
+
+fn all_scopes() -> Vec<DiffScope> {
+    vec![DiffScope::All, DiffScope::Uncommitted, DiffScope::Committed]
+}
+
+fn all_agent_kinds() -> Vec<AgentKind> {
+    vec![AgentKind::Claude, AgentKind::Generic]
+}
+
+fn all_hook_kinds() -> Vec<HookKind> {
+    vec![
+        HookKind::SessionStart,
+        HookKind::UserPromptSubmit,
+        HookKind::PreToolUse,
+        HookKind::PostToolUse,
+        HookKind::Notification,
+        HookKind::Stop,
+        HookKind::PermissionRequest,
+        HookKind::StopFailure,
+    ]
+}
+
 fn agent(n: u128) -> AgentId {
     AgentId(Uuid::from_u128(n))
 }
@@ -93,7 +241,7 @@ fn full_info() -> AgentInfo {
         kind: AgentKind::Claude,
         command: vec!["claude".into(), "--resume".into()],
         cwd: "/tmp/p".into(),
-        status: Status::Exited(2),
+        status: Status::Exited(i32::MIN),
         worktree: Some(Box::new(WorktreeInfo {
             path: "/tmp/p/.worktrees/api".into(),
             branch: "agent/api".into(),
@@ -104,11 +252,11 @@ fn full_info() -> AgentInfo {
         waiting_for: Some("Bash: ls".into()),
         usage: Some(Box::new(Usage {
             model: Some("Opus".into()),
-            cost_micros: Some(420_000),
-            context_percent: Some(23),
-            five_hour_percent: Some(24),
-            seven_day_percent: Some(25),
-            pr_number: Some(7),
+            cost_micros: Some(5_000_000_000),
+            context_percent: Some(200),
+            five_hour_percent: Some(201),
+            seven_day_percent: Some(202),
+            pr_number: Some(70_000),
             pr_review: Some("approved".into()),
         })),
     }
@@ -137,17 +285,17 @@ fn create_agent(worktree: Option<WorktreeRequest>, with_options: bool) -> Create
         name: "a".into(),
         kind: AgentKind::Claude,
         command: vec!["sh".into()],
-        cols: 80,
-        rows: 24,
+        cols: 300,
+        rows: 200,
         worktree,
         prompt: with_options.then(|| "fix the parser".into()),
         setup: with_options.then(|| "just build".into()),
     }
 }
 
-fn requests() -> Vec<(&'static str, Request)> {
+fn requests() -> Vec<(String, Request)> {
     let id = agent(1);
-    let mut out = vec![
+    let mut out: Vec<(String, Request)> = vec![
         ("ListProjects", Request::ListProjects),
         (
             "AddProject",
@@ -190,8 +338,8 @@ fn requests() -> Vec<(&'static str, Request)> {
             "RestartAgent",
             Request::RestartAgent {
                 id,
-                cols: 80,
-                rows: 24,
+                cols: 300,
+                rows: 200,
             },
         ),
         (
@@ -229,8 +377,8 @@ fn requests() -> Vec<(&'static str, Request)> {
                 id,
                 event: InputEvent::Wheel {
                     up: true,
-                    col: 3,
-                    row: 4,
+                    col: 300,
+                    row: 400,
                 },
             },
         ),
@@ -245,11 +393,17 @@ fn requests() -> Vec<(&'static str, Request)> {
             "Resize",
             Request::Resize {
                 id,
-                cols: 100,
-                rows: 30,
+                cols: 301,
+                rows: 201,
             },
         ),
-        ("Scroll", Request::Scroll { id, lines: -3 }),
+        (
+            "Scroll",
+            Request::Scroll {
+                id,
+                lines: i32::MIN,
+            },
+        ),
         (
             "Hook",
             Request::Hook {
@@ -286,54 +440,31 @@ fn requests() -> Vec<(&'static str, Request)> {
         ),
         ("Shutdown", Request::Shutdown),
         ("Approve", Request::Approve { id }),
-    ];
-    for scope in [DiffScope::All, DiffScope::Uncommitted, DiffScope::Committed] {
-        out.push((
-            match scope {
-                DiffScope::All => "GitDiff all",
-                DiffScope::Uncommitted => "GitDiff uncommitted",
-                DiffScope::Committed => "GitDiff committed",
-            },
-            Request::GitDiff { id, scope },
-        ));
+    ]
+    .into_iter()
+    .map(|(label, request)| (label.to_string(), request))
+    .collect();
+    for scope in all_scopes() {
+        out.push((format!("GitDiff {scope:?}"), Request::GitDiff { id, scope }));
     }
-    let keys = [
-        KeyCode::Char('é'),
-        KeyCode::Enter,
-        KeyCode::Tab,
-        KeyCode::BackTab,
-        KeyCode::Backspace,
-        KeyCode::Esc,
-        KeyCode::Up,
-        KeyCode::Down,
-        KeyCode::Left,
-        KeyCode::Right,
-        KeyCode::Home,
-        KeyCode::End,
-        KeyCode::Insert,
-        KeyCode::Delete,
-        KeyCode::PageUp,
-        KeyCode::PageDown,
-        KeyCode::F(5),
-    ];
     let mods = [
         Modifiers::NONE,
         Modifiers::SHIFT,
         Modifiers::ALT,
         Modifiers::CTRL,
     ];
-    for (i, code) in keys.into_iter().enumerate() {
+    for (i, code) in all_key_codes().into_iter().enumerate() {
         out.push((
-            "Input key",
+            format!("Input key {code:?}"),
             Request::Input {
                 id,
                 event: InputEvent::Key(Key::new(code, mods[i % mods.len()])),
             },
         ));
     }
-    for kind in HookKind::ALL {
+    for kind in all_hook_kinds() {
         out.push((
-            "Hook kind",
+            format!("Hook {kind:?}"),
             Request::Hook {
                 id,
                 kind,
@@ -359,10 +490,10 @@ fn responses() -> Vec<Response> {
         Response::Agents(vec![full_info(), bare_info()]),
         Response::Agent(full_info()),
         Response::GitStat(GitStat {
-            insertions: 3,
-            deletions: 2,
-            files: 1,
-            uncommitted: 4,
+            insertions: 70_000,
+            deletions: 70_001,
+            files: 70_002,
+            uncommitted: 70_003,
         }),
         Response::Diff("diff --git a b\n".into()),
         Response::Done("merged".into()),
@@ -380,22 +511,26 @@ fn frame() -> Frame {
     };
     Frame {
         agent: agent(1),
-        cols: 4,
-        rows: 2,
+        cols: 301,
+        rows: 201,
         full: true,
         lines: vec![Row {
-            index: 1,
-            cells: vec![
-                Cell::default(),
-                Cell {
-                    text: "é".into(),
-                    fg: Color::Indexed(9),
-                    bg: Color::Rgb(1, 2, 3),
-                    style: styled,
-                },
-            ],
+            index: 300,
+            cells: std::iter::once(Cell::default())
+                .chain(
+                    all_colors()
+                        .into_iter()
+                        .zip(all_colors().into_iter().rev())
+                        .map(|(fg, bg)| Cell {
+                            text: "é".into(),
+                            fg,
+                            bg,
+                            style: styled,
+                        }),
+                )
+                .collect(),
         }],
-        cursor: Some((1, 0)),
+        cursor: Some((300, 200)),
     }
 }
 
@@ -411,7 +546,7 @@ fn server_messages() -> Vec<ServerMessage> {
             daemon_version: "0.1.0".into(),
         },
         ServerMessage::Response {
-            id: 2,
+            id: 5_000_000_001,
             result: Err("nope".into()),
         },
         ServerMessage::AgentUpdated(full_info()),
@@ -429,19 +564,19 @@ fn server_messages() -> Vec<ServerMessage> {
     ];
     for (i, response) in responses().into_iter().enumerate() {
         out.push(ServerMessage::Response {
-            id: i as u64,
+            id: 5_000_000_000 + i as u64,
             result: Ok(response),
         });
     }
-    for status in [
-        Status::Working,
-        Status::NeedsInput,
-        Status::Idle,
-        Status::Stopped,
-        Status::Exited(-1),
-    ] {
+    for status in all_statuses() {
         out.push(ServerMessage::AgentUpdated(AgentInfo {
             status,
+            ..bare_info()
+        }));
+    }
+    for kind in all_agent_kinds() {
+        out.push(ServerMessage::AgentUpdated(AgentInfo {
+            kind,
             ..bare_info()
         }));
     }
@@ -475,7 +610,10 @@ fn render() -> String {
     for (label, request) in requests() {
         line(
             &format!("Request {label}"),
-            encode(&ClientMessage::Request { id: 7, request }),
+            encode(&ClientMessage::Request {
+                id: 5_000_000_000,
+                request,
+            }),
         );
     }
     for message in server_messages() {
@@ -563,4 +701,83 @@ fn samples_cover_every_server_message_variant() {
         SERVER_VARIANTS,
         server_messages().iter().map(server_slot),
     );
+}
+
+#[test]
+fn samples_cover_every_nested_enum_variant() {
+    let messages = server_messages();
+    let requests = requests();
+    let frames: Vec<&Frame> = messages
+        .iter()
+        .filter_map(|message| match message {
+            ServerMessage::Frame(frame) => Some(frame),
+            _ => None,
+        })
+        .collect();
+    let cells: Vec<&Cell> = frames
+        .iter()
+        .flat_map(|frame| frame.lines.iter().flat_map(|row| row.cells.iter()))
+        .collect();
+    let events: Vec<&InputEvent> = requests
+        .iter()
+        .filter_map(|(_, request)| match request {
+            Request::Input { event, .. } => Some(event),
+            _ => None,
+        })
+        .collect();
+    let key_codes = events.iter().filter_map(|event| match event {
+        InputEvent::Key(key) => Some(&key.code),
+        _ => None,
+    });
+    let infos: Vec<&AgentInfo> = messages
+        .iter()
+        .filter_map(|message| match message {
+            ServerMessage::AgentUpdated(info) => Some(info),
+            _ => None,
+        })
+        .collect();
+    let scopes = requests.iter().filter_map(|(_, request)| match request {
+        Request::GitDiff { scope, .. } => Some(scope),
+        _ => None,
+    });
+    let hooks = requests.iter().filter_map(|(_, request)| match request {
+        Request::Hook { kind, .. } => Some(kind),
+        _ => None,
+    });
+
+    assert_covers(
+        "Status",
+        STATUS_VARIANTS,
+        infos.iter().map(|info| status_slot(&info.status)),
+    );
+    assert_covers(
+        "AgentKind",
+        AGENT_KIND_VARIANTS,
+        infos.iter().map(|info| agent_kind_slot(&info.kind)),
+    );
+    assert_covers("KeyCode", KEY_CODE_VARIANTS, key_codes.map(key_code_slot));
+    assert_covers(
+        "Color",
+        COLOR_VARIANTS,
+        cells
+            .iter()
+            .flat_map(|cell| [color_slot(&cell.fg), color_slot(&cell.bg)]),
+    );
+    assert_covers("DiffScope", SCOPE_VARIANTS, scopes.map(scope_slot));
+    assert_covers(
+        "InputEvent",
+        INPUT_EVENT_VARIANTS,
+        events.iter().map(|event| input_event_slot(event)),
+    );
+    assert_covers("HookKind", HOOK_KIND_VARIANTS, hooks.map(hook_kind_slot));
+}
+
+#[test]
+fn hook_kind_all_lists_every_variant() {
+    assert_covers(
+        "HookKind::ALL",
+        HOOK_KIND_VARIANTS,
+        HookKind::ALL.iter().map(hook_kind_slot),
+    );
+    assert_eq!(HookKind::ALL.len(), HOOK_KIND_VARIANTS);
 }
