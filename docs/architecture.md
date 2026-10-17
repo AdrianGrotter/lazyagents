@@ -252,10 +252,12 @@ daemon last told it.
 - **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane or
   the diff view, the status line and popups from `App`; the pane copies the daemon's cell
   grid into the ratatui buffer, with the text selection drawn reversed on top. Colours
-  come from the theme. The Info box is sized to its content (status, what a waiting agent
-  waits for, the model, context, cost, plan limits and PR its status line reported, worktree
-  branch, git stat, cwd): it grows as long as the Agents box keeps 8 rows, and keeps 6
-  rows while the content fits. The status line shows a transient message in red, then `│`
+  come from the theme. The Info box lists one fact per row, a dim label with its value
+  aligned after it: what a waiting agent waits for, worktree branch, git stat, then the PR,
+  model, context (a bar where it fits), cost and plan limits its status line reported, and
+  cwd. Context and limits turn yellow from 60 % and red from 80 %; paths and branches too
+  long for the box are cut on the left. The box is sized to its rows: it grows as long as
+  the Agents box keeps 8 rows, and keeps 6 rows while the content fits. The status line shows a transient message in red, then `│`
   and the key hint, cut off on the right. Below a 20×5 pane only "terminal too small" is
   drawn, and keys do nothing except quitting from the sidebar and leaving the pane. Status
   glyphs animate from a frame counter the runtime ticks every 100 ms while an agent is

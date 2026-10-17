@@ -128,18 +128,6 @@ impl Usage {
         .collect::<Vec<_>>()
         .join(" · ")
     }
-
-    /// `5h 24% · 7d 41%` of the plan's limits, or `None` when neither is known.
-    pub fn plan(&self) -> Option<String> {
-        let parts: Vec<String> = [
-            ("5h", self.five_hour_percent),
-            ("7d", self.seven_day_percent),
-        ]
-        .into_iter()
-        .filter_map(|(window, used)| Some(format!("{window} {}%", used?)))
-        .collect();
-        (!parts.is_empty()).then(|| parts.join(" · "))
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,9 +268,7 @@ mod tests {
             ..Usage::default()
         };
         assert_eq!(usage.summary(), "Opus · 23% context · $0.42");
-        assert_eq!(usage.plan().as_deref(), Some("5h 24%"));
         assert_eq!(Usage::default().summary(), "");
-        assert_eq!(Usage::default().plan(), None);
     }
 
     #[test]

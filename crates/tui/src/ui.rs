@@ -120,7 +120,7 @@ pub fn layout(area: Rect, app: &App) -> Areas {
     areas_in(
         area,
         app.projects.len(),
-        info_lines(app).len(),
+        info_rows(app).len(),
         app.screen_mode,
     )
 }
@@ -419,52 +419,201 @@ fn kind_label(kind: AgentKind) -> &'static str {
     }
 }
 
-/// Git lines come right after the status, so they stay visible when a short terminal
-/// clips the panel.
-pub fn info_lines(app: &App) -> Vec<String> {
+const INFO_LABEL_WIDTH: usize = 8;
+const METER_WIDTH: usize = 8;
+
+/// One Info box row: a dim label, and a value that starts in the same column on every row.
+pub struct InfoRow {
+    label: &'static str,
+    value: InfoValue,
+}
+
+enum InfoValue {
+    /// Cut on the right when it does not fit.
+    Text(Vec<Span<'static>>),
+    /// Cut on the left, keeping the end that tells paths and branches apart.
+    Tail(String),
+    /// A percentage, drawn with a bar when there is room for one.
+    Meter(u8),
+}
+
+impl InfoRow {
+    fn text(label: &'static str, value: impl Into<String>) -> Self {
+        Self::spans(label, vec![Span::raw(value.into())])
+    }
+
+    fn spans(label: &'static str, spans: Vec<Span<'static>>) -> Self {
+        InfoRow {
+            label,
+            value: InfoValue::Text(spans),
+        }
+    }
+
+    fn tail(label: &'static str, value: String) -> Self {
+        InfoRow {
+            label,
+            value: InfoValue::Tail(value),
+        }
+    }
+}
+
+/// Git rows come right after what the agent waits for, so they stay visible when a short
+/// terminal clips the box.
+pub fn info_rows(app: &App) -> Vec<InfoRow> {
+    let theme = &app.theme;
     match (app.selected_agent(), app.selected_project()) {
         (Some(agent), _) => {
-            let mut lines = vec![format!("status: {}", agent.status.label())];
+            let mut rows = Vec::new();
             if let Some(waiting) = agent
                 .waiting_for
                 .as_ref()
                 .filter(|_| agent.status == Status::NeedsInput)
             {
-                lines.push(format!("waiting: {waiting}"));
-            }
-            if let Some(usage) = &agent.usage {
-                let summary = usage.summary();
-                if !summary.is_empty() {
-                    lines.push(summary);
-                }
-                lines.extend(usage.plan().map(|plan| format!("plan: {plan}")));
-                if let Some(number) = usage.pr_number {
-                    lines.push(match &usage.pr_review {
-                        Some(review) => format!("PR #{number} · {}", review.replace('_', " ")),
-                        None => format!("PR #{number}"),
-                    });
-                }
+                let waiting = Span::raw(waiting.clone()).fg(theme.attention);
+                rows.push(InfoRow::spans("waiting", vec![waiting]));
             }
             if let Some(worktree) = &agent.worktree {
-                lines.push(format!("branch: {}", worktree.branch));
+                rows.push(InfoRow::tail("branch", worktree.branch.clone()));
             }
             if let Some(stat) = app.git_stats.get(&agent.id) {
-                lines.push(format!(
-                    "+{} −{} · {} files",
-                    stat.insertions, stat.deletions, stat.files
+                let changes = vec![
+                    Span::raw(format!("+{}", stat.insertions)).fg(theme.diff_add),
+                    Span::raw(" "),
+                    Span::raw(format!("−{}", stat.deletions)).fg(theme.diff_remove),
+                ];
+                rows.push(InfoRow::spans("changes", changes));
+                rows.push(InfoRow::text("files", format!("{} changed", stat.files)));
+                rows.push(InfoRow::text(
+                    "",
+                    format!("{} uncommitted", stat.uncommitted),
                 ));
-                lines.push(format!("{} uncommitted", stat.uncommitted));
             }
-            lines.push(format!("cwd: {}", agent.cwd.display()));
-            lines
+            if let Some(usage) = &agent.usage {
+                if let Some(number) = usage.pr_number {
+                    let review = usage.pr_review.as_ref();
+                    let text = match review {
+                        Some(review) => format!("#{number} {}", review.replace('_', " ")),
+                        None => format!("#{number}"),
+                    };
+                    rows.push(InfoRow::text("PR", text));
+                }
+                rows.extend(
+                    usage
+                        .model
+                        .clone()
+                        .map(|model| InfoRow::text("model", model)),
+                );
+                rows.extend(usage.context_percent.map(|percent| InfoRow {
+                    label: "context",
+                    value: InfoValue::Meter(percent),
+                }));
+                rows.extend(
+                    usage
+                        .cost_micros
+                        .map(|micros| format!("${:.2}", micros as f64 / 1_000_000.0))
+                        .map(|cost| InfoRow::text("cost", cost)),
+                );
+                let limits = limit_spans(usage, theme);
+                if !limits.is_empty() {
+                    rows.push(InfoRow::spans("limits", limits));
+                }
+            }
+            rows.push(InfoRow::tail("cwd", app.display_path(&agent.cwd)));
+            rows
         }
-        (None, Some(project)) => vec![format!("path: {}", project.path.display())],
+        (None, Some(project)) => vec![InfoRow::tail("path", app.display_path(&project.path))],
         (None, None) => Vec::new(),
     }
 }
 
+/// `5h 24% · 7d 41%`, each percentage in its usage level's colour.
+fn limit_spans(usage: &protocol::Usage, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (window, used) in [
+        ("5h", usage.five_hour_percent),
+        ("7d", usage.seven_day_percent),
+    ] {
+        let Some(used) = used else { continue };
+        if !spans.is_empty() {
+            spans.push(Span::raw(" · "));
+        }
+        spans.push(Span::raw(format!("{window} ")));
+        spans.push(Span::styled(format!("{used}%"), usage_style(used, theme)));
+    }
+    spans
+}
+
+/// Yellow from 60 % used, red from 80 %.
+fn usage_style(percent: u8, theme: &Theme) -> Style {
+    match percent {
+        80.. => Style::new().fg(theme.error),
+        60.. => Style::new().fg(theme.working),
+        _ => Style::new(),
+    }
+}
+
+fn info_line(row: InfoRow, width: usize, theme: &Theme) -> Line<'static> {
+    let label = format!("{:<INFO_LABEL_WIDTH$}", row.label);
+    let room = width.saturating_sub(INFO_LABEL_WIDTH);
+    let mut spans = vec![Span::raw(label).fg(theme.dim)];
+    match row.value {
+        InfoValue::Text(value) => spans.extend(clip_right(value, room)),
+        InfoValue::Tail(value) => spans.push(Span::raw(clip_left(&value, room))),
+        InfoValue::Meter(percent) => spans.extend(meter(percent, room, theme)),
+    }
+    Line::from(spans)
+}
+
+fn clip_right(spans: Vec<Span<'static>>, room: usize) -> Vec<Span<'static>> {
+    let total: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    if total <= room {
+        return spans;
+    }
+    let mut left = room.saturating_sub(1);
+    let mut clipped = Vec::new();
+    for span in spans {
+        let text: String = span.content.chars().take(left).collect();
+        left -= text.chars().count();
+        clipped.push(Span::styled(text, span.style));
+        if left == 0 {
+            break;
+        }
+    }
+    clipped.push(Span::raw("…"));
+    clipped
+}
+
+fn clip_left(text: &str, room: usize) -> String {
+    let count = text.chars().count();
+    if count <= room {
+        return text.to_string();
+    }
+    let kept: String = text.chars().skip(count + 1 - room.max(1)).collect();
+    format!("…{kept}")
+}
+
+/// `██░░░░░░ 42%`, or just `42%` where the bar does not fit.
+fn meter(percent: u8, room: usize, theme: &Theme) -> Vec<Span<'static>> {
+    let style = usage_style(percent, theme);
+    let number = format!("{percent}%");
+    if room < METER_WIDTH + 1 + number.len() {
+        return vec![Span::styled(number, style)];
+    }
+    let filled = (usize::from(percent.min(100)) * METER_WIDTH + 50) / 100;
+    vec![
+        Span::styled("█".repeat(filled), style),
+        Span::raw("░".repeat(METER_WIDTH - filled)).fg(theme.dim),
+        Span::raw(" "),
+        Span::styled(number, style),
+    ]
+}
+
 fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
-    let text: Vec<Line> = info_lines(app).into_iter().map(Line::from).collect();
+    let width = usize::from(area.width.saturating_sub(2));
+    let text: Vec<Line> = info_rows(app)
+        .into_iter()
+        .map(|row| info_line(row, width, &app.theme))
+        .collect();
     let block = block(" Info ", false, &app.theme);
     frame.render_widget(Paragraph::new(text).block(block), area);
 }
@@ -1330,7 +1479,7 @@ mod tests {
         assert!(text.contains("● sh  idle"), "{text}");
         assert!(!text.contains("~/git/x"), "{text}");
         assert!(text.contains(" Fix it · claude · idle "), "{text}");
-        let info = info_lines(&app);
+        let info = info_box(&app);
         assert!(
             !info.iter().any(|line| line.contains("claude-1")),
             "{info:?}"
@@ -1356,7 +1505,6 @@ mod tests {
         assert!(text.contains("● api  needs input"), "{text}");
         assert!(text.contains("● docs  idle"), "{text}");
         assert!(text.contains(" api · generic · needs input "), "{text}");
-        assert!(text.contains("status: needs input"), "{text}");
     }
 
     #[test]
@@ -1433,30 +1581,116 @@ mod tests {
         assert!(!text.contains("enter restart"), "{text}");
     }
 
+    fn usage(context: u8, five_hour: u8, seven_day: u8) -> protocol::Usage {
+        protocol::Usage {
+            model: Some("Opus".into()),
+            cost_micros: Some(420_000),
+            context_percent: Some(context),
+            five_hour_percent: Some(five_hour),
+            seven_day_percent: Some(seven_day),
+            pr_number: Some(7),
+            pr_review: Some("changes_requested".into()),
+        }
+    }
+
+    fn info_box(app: &App) -> Vec<String> {
+        let (text, _) = render(app);
+        let info = layout(Rect::new(0, 0, 100, 30), app).info;
+        text.lines()
+            .skip(usize::from(info.y + 1))
+            .take(usize::from(info.height.saturating_sub(2)))
+            .map(|line| {
+                let inner: String = line
+                    .chars()
+                    .skip(usize::from(info.x + 1))
+                    .take(usize::from(info.width.saturating_sub(2)))
+                    .collect();
+                inner.trim_end().to_string()
+            })
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
     #[test]
-    fn the_info_box_shows_what_the_status_line_reported() {
+    fn the_info_box_lists_one_aligned_fact_per_row() {
         let p = project("p");
         let reported = AgentInfo {
-            usage: Some(Box::new(protocol::Usage {
-                model: Some("Opus".into()),
-                cost_micros: Some(420_000),
-                context_percent: Some(23),
-                five_hour_percent: Some(24),
-                seven_day_percent: Some(41),
-                pr_number: Some(7),
-                pr_review: Some("approved".into()),
-            })),
+            usage: Some(Box::new(usage(23, 24, 41))),
+            cwd: "/home/u/git/a-very-long-project-name".into(),
+            ..worktree_agent(&p, "api")
+        };
+        let id = reported.id;
+        let (mut app, _) = loaded(vec![p], vec![reported]);
+        app.git_stats.insert(
+            id,
+            GitStat {
+                insertions: 12,
+                deletions: 3,
+                files: 4,
+                uncommitted: 2,
+            },
+        );
+        assert_eq!(
+            info_box(&app),
+            [
+                "branch  lazyagents/api",
+                "changes +12 −3",
+                "files   4 changed",
+                "        2 uncommitted",
+                "PR      #7 changes req…",
+                "model   Opus",
+                "context ██░░░░░░ 23%",
+                "cost    $0.42",
+                "limits  5h 24% · 7d 41%",
+                "cwd     …g-project-name",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_selected_project_shows_its_path_from_home() {
+        let mut p = project("p");
+        p.path = "/home/u/git/p".into();
+        let (mut app, _) = loaded(vec![p], vec![]);
+        app.focus = Focus::Projects;
+        assert_eq!(info_box(&app), ["path    ~/git/p"]);
+    }
+
+    #[test]
+    fn usage_turns_yellow_then_red_as_it_nears_its_limit() {
+        let p = project("p");
+        let theme = Theme::default();
+        for (context, colour) in [(23, Color::Reset), (65, theme.working), (85, theme.error)] {
+            let reported = AgentInfo {
+                usage: Some(Box::new(usage(context, 24, 90))),
+                ..agent(&p, "api", Status::Idle)
+            };
+            let (app, _) = loaded(vec![p.clone()], vec![reported]);
+            let (_, buffer) = render(&app);
+            let info = layout(Rect::new(0, 0, 100, 30), &app).info;
+            let bar = find_text(&buffer, info, "█");
+            assert_eq!(buffer[bar].fg, colour, "{context}%");
+            let percent = find_text(&buffer, info, &format!(" {context}%"));
+            assert_eq!(buffer[(percent.0 + 1, percent.1)].fg, colour, "{context}%");
+            let five_hour = find_text(&buffer, info, "24%");
+            assert_eq!(buffer[five_hour].fg, Color::Reset);
+            let seven_day = find_text(&buffer, info, "90%");
+            assert_eq!(buffer[seven_day].fg, theme.error);
+        }
+    }
+
+    #[test]
+    fn a_narrow_sidebar_shows_context_without_its_bar() {
+        let p = project("p");
+        let reported = AgentInfo {
+            usage: Some(Box::new(usage(23, 24, 41))),
             ..agent(&p, "api", Status::Idle)
         };
-        let (app, _) = loaded(vec![p], vec![reported]);
-        let lines = info_lines(&app);
-        for expected in [
-            "Opus · 23% context · $0.42",
-            "plan: 5h 24% · 7d 41%",
-            "PR #7 · approved",
-        ] {
-            assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
-        }
+        let (mut app, _) = loaded(vec![p], vec![reported]);
+        app.screen_mode = ScreenMode::Wide;
+        let rows = info_box(&app);
+        assert!(rows.iter().any(|row| row == "context 23%"), "{rows:?}");
+        assert!(!rows.iter().any(|row| row.contains('█')), "{rows:?}");
     }
 
     #[test]
@@ -1468,7 +1702,8 @@ mod tests {
         };
         let (mut app, _) = loaded(vec![p], vec![waiting.clone()]);
         let (text, _) = render(&app);
-        assert!(text.contains("waiting: Bash: npm test"), "{text}");
+        assert!(text.contains("waiting Bash: npm test"), "{text}");
+        assert!(!text.contains("status"), "{text}");
         let status = text.lines().last().expect("status line");
         assert!(
             status.starts_with("y approve · N deny · i reply · ? help"),
@@ -2226,18 +2461,18 @@ mod tests {
 
         let text = info(&app);
         assert!(
-            !text.contains("files") && !text.contains("branch:"),
+            !text.contains("files") && !text.contains("branch"),
             "{text}"
         );
         app.apply_git_stat(plain.id, Ok(stat(3, 4)));
         let text = info(&app);
-        assert!(text.contains("+3 −1 · 2 files"), "{text}");
+        assert!(text.contains("changes +3 −1"), "{text}");
         assert!(text.contains("4 uncommitted"), "{text}");
-        assert!(!text.contains("branch:"), "{text}");
+        assert!(!text.contains("branch"), "{text}");
 
         let _ = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         let text = info(&app);
-        assert!(text.contains("branch: lazyagents/wt"), "{text}");
+        assert!(text.contains("branch  lazyagents/wt"), "{text}");
         assert!(!text.contains("files"), "{text}");
         app.apply_git_stat(wt.id, Ok(stat(10, 1)));
         let text = info(&app);
@@ -2249,15 +2484,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("no {needle:?}\n{text}"))
         };
         assert!(
-            row("branch: lazyagents/wt") < row("+10 −1 · 2 files"),
+            row("branch  lazyagents/wt") < row("changes +10 −1"),
             "{text}"
         );
-        assert!(row("+10 −1 · 2 files") < row("1 uncommitted"), "{text}");
-        assert!(text.contains("status: idle"), "{text}");
+        assert!(row("changes +10 −1") < row("1 uncommitted"), "{text}");
 
         app.apply_git_stat(wt.id, Err("git failed".into()));
         let text = info(&app);
-        assert!(text.contains("branch: lazyagents/wt"), "{text}");
+        assert!(text.contains("branch  lazyagents/wt"), "{text}");
         assert!(!text.contains("files"), "{text}");
         let (text, _) = render(&app);
         assert!(!text.contains("git failed"), "{text}");
@@ -2499,11 +2733,11 @@ mod tests {
         assert_eq!(
             rows,
             [
-                "status: idle",
-                "branch: lazyagents/wt",
-                "+4 −2 · 3 files",
-                "1 uncommitted",
-                "cwd: /s/worktrees/wt",
+                "branch  lazyagents/wt",
+                "changes +4 −2",
+                "files   3 changed",
+                "        1 uncommitted",
+                "cwd     /s/worktrees/wt",
             ],
             "{text}"
         );
