@@ -1,4 +1,4 @@
-# 0016. The daemon picks the keys that approve an agent
+# 0017. The daemon picks the keys that approve an agent
 
 Date: 2026-10-17
 Status: Accepted

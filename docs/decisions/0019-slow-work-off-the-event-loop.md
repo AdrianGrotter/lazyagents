@@ -1,4 +1,4 @@
-# 0018. Run slow daemon work off the event loop and refuse overlapping lifecycle requests
+# 0019. Run slow daemon work off the event loop and refuse overlapping lifecycle requests
 
 Date: 2026-10-17
 Status: Accepted

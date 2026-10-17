@@ -1,4 +1,4 @@
-# 0017. Search only the ignored directories `.worktreeinclude` names
+# 0018. Search only the ignored directories `.worktreeinclude` names
 
 Date: 2026-10-17
 Status: Accepted

@@ -1,4 +1,4 @@
-# 0015. Revert an inherited direnv environment by running agents under `direnv exec /`
+# 0016. Revert an inherited direnv environment by running agents under `direnv exec /`
 
 Date: 2026-10-17
 Status: Accepted
