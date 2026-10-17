@@ -54,6 +54,8 @@ pub enum Command {
     Rm { agent: String },
     /// Rename an agent
     Rename { agent: String, name: String },
+    /// Type a line into an agent and press enter, as if in its pane
+    Send { agent: String, text: String },
     /// Stop the daemon and every agent
     Shutdown,
 }

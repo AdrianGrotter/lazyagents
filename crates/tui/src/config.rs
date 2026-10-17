@@ -514,7 +514,7 @@ mod tests {
         let config = load_text(
             r#"
             [keys.sidebar]
-            new_agent = "N"
+            new_agent = "M"
             quit = ["ctrl-x", "f10"]
 
             [keys.pane]
@@ -525,7 +525,7 @@ mod tests {
         );
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         let keymap = &config.keymap;
-        assert_eq!(keymap.sidebar(&key('N')), Some(Action::NewAgent));
+        assert_eq!(keymap.sidebar(&key('M')), Some(Action::NewAgent));
         assert_eq!(keymap.sidebar(&key('n')), None);
         assert_eq!(keymap.sidebar(&ctrl('x')), Some(Action::Quit));
         assert_eq!(

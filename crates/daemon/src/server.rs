@@ -251,6 +251,8 @@ struct Agent {
     /// The create request's prompt until it is delivered: a Claude agent gets it as an
     /// argument when it starts, a generic one has it typed once it first prints.
     pending_prompt: Option<String>,
+    /// What the agent waits for while it needs input; see `AgentInfo::waiting_for`.
+    waiting_for: Option<String>,
 }
 
 impl Agent {
@@ -268,6 +270,7 @@ impl Agent {
             tracked: Vec::new(),
             group: None,
             pending_prompt: None,
+            waiting_for: None,
         }
     }
 
@@ -276,12 +279,22 @@ impl Agent {
             self.status = status;
             self.status_since = Instant::now();
         }
+        if status != Status::NeedsInput {
+            self.waiting_for = None;
+        }
     }
 
-    /// A hook counts as activity even when it leaves the status unchanged.
-    fn hooked(&mut self, kind: HookKind, now: Instant) {
+    /// A hook counts as activity even when it leaves the status unchanged. A
+    /// `PermissionRequest` names the tool call, which beats the generic message of the
+    /// `Notification` that follows it.
+    fn hooked(&mut self, kind: HookKind, detail: Option<String>, now: Instant) {
         self.status = on_hook(kind);
         self.status_since = now;
+        self.waiting_for = match (self.status, kind) {
+            (Status::NeedsInput, HookKind::PermissionRequest) => detail,
+            (Status::NeedsInput, _) => self.waiting_for.take().or(detail),
+            _ => None,
+        };
     }
 }
 
@@ -454,8 +467,9 @@ impl Daemon {
                 kind,
                 session_id,
                 source,
+                detail,
             } => self
-                .hook(id, kind, session_id, source.as_deref())
+                .hook(id, kind, session_id, source.as_deref(), detail)
                 .map(|()| Response::Ok),
             Request::Shutdown => {
                 self.stop_all();
@@ -534,6 +548,7 @@ impl Daemon {
             worktree: agent.record.worktree.clone(),
             last_error: agent.last_error.clone(),
             title: agent.record.title.clone(),
+            waiting_for: agent.waiting_for.clone(),
         }
     }
 
@@ -1038,6 +1053,7 @@ impl Daemon {
         kind: HookKind,
         session_id: Option<String>,
         source: Option<&str>,
+        detail: Option<String>,
     ) -> Result<(), String> {
         let agent = self
             .agents
@@ -1065,7 +1081,7 @@ impl Daemon {
             }
             changed_record = true;
         }
-        agent.hooked(kind, Instant::now());
+        agent.hooked(kind, detail, Instant::now());
         if changed_record {
             self.persist();
         }
@@ -1096,6 +1112,7 @@ impl Daemon {
                     && awaits_trust(&terminal.screen().text())
                 {
                     agent.set_status(Status::NeedsInput);
+                    agent.waiting_for = Some("trusting this folder".into());
                     self.announce(event.agent);
                 } else if note_blocked_envrc(agent) {
                     self.announce(event.agent);
@@ -1714,9 +1731,9 @@ mod tests {
     fn a_hook_that_keeps_the_status_still_counts_as_activity() {
         let mut agent = claude_agent();
         let started = agent.started;
-        agent.hooked(HookKind::PreToolUse, started);
+        agent.hooked(HookKind::PreToolUse, None, started);
         let again = started + Duration::from_secs(9);
-        agent.hooked(HookKind::PreToolUse, again);
+        agent.hooked(HookKind::PreToolUse, None, again);
         assert_eq!(agent.status, Status::Working);
         let after_first_silence = started + CLAUDE_SILENCE + Duration::from_secs(1);
         assert_eq!(

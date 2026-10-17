@@ -61,10 +61,50 @@ async fn deliver(kind: HookKind, agent: Uuid, socket: PathBuf, mut input: impl A
             kind,
             session_id: field("session_id"),
             source: field("source"),
+            detail: detail(kind, payload.as_ref()),
         };
         send(socket, request).await
     })
     .await;
+}
+
+const DETAIL_CHARS: usize = 120;
+
+/// What a hook is about, on one line of at most `DETAIL_CHARS`: a `PermissionRequest`'s tool
+/// and its main input, or a `Notification`'s message.
+fn detail(kind: HookKind, payload: Option<&serde_json::Value>) -> Option<String> {
+    let payload = payload?;
+    let text = |value: &serde_json::Value, name: &str| value.get(name)?.as_str().map(str::to_owned);
+    let raw = match kind {
+        HookKind::PermissionRequest => {
+            let tool = text(payload, "tool_name")?;
+            let input = payload.get("tool_input");
+            let main = [
+                "command",
+                "file_path",
+                "path",
+                "url",
+                "pattern",
+                "query",
+                "description",
+                "prompt",
+            ]
+            .iter()
+            .find_map(|name| input.and_then(|i| text(i, name)));
+            match main {
+                Some(main) => format!("{tool}: {main}"),
+                None => tool,
+            }
+        }
+        HookKind::Notification => text(payload, "message")?,
+        _ => return None,
+    };
+    let line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= DETAIL_CHARS {
+        return Some(line);
+    }
+    let cut: String = line.chars().take(DETAIL_CHARS - 1).collect();
+    Some(format!("{cut}…"))
 }
 
 /// The hook to forward for a Claude hook event, or `None` for a notification that says
@@ -208,5 +248,53 @@ mod tests {
         ] {
             assert_eq!(effective_kind(kind, Some(&idle)), Some(kind));
         }
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_permission_request_names_the_tool_and_its_main_input() {
+        let payload = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "npm test\n  -- --watch", "description": "run the tests"}
+        });
+        assert_eq!(
+            detail(HookKind::PermissionRequest, Some(&payload)).as_deref(),
+            Some("Bash: npm test -- --watch")
+        );
+        let payload = json!({"tool_name": "Edit", "tool_input": {"file_path": "/w/a.rs"}});
+        assert_eq!(
+            detail(HookKind::PermissionRequest, Some(&payload)).as_deref(),
+            Some("Edit: /w/a.rs")
+        );
+        let payload = json!({"tool_name": "mcp__x__y", "tool_input": {"n": 3}});
+        assert_eq!(
+            detail(HookKind::PermissionRequest, Some(&payload)).as_deref(),
+            Some("mcp__x__y")
+        );
+    }
+
+    #[test]
+    fn a_long_detail_is_cut_short() {
+        let long = "x".repeat(300);
+        let payload = json!({"tool_name": "Bash", "tool_input": {"command": long}});
+        let text = detail(HookKind::PermissionRequest, Some(&payload)).expect("detail");
+        assert_eq!(text.chars().count(), 120);
+        assert!(text.ends_with('…'), "{text}");
+    }
+
+    #[test]
+    fn a_notification_gives_its_message_and_other_hooks_nothing() {
+        let payload = json!({"message": "Pick a colour"});
+        assert_eq!(
+            detail(HookKind::Notification, Some(&payload)).as_deref(),
+            Some("Pick a colour")
+        );
+        assert_eq!(detail(HookKind::Stop, Some(&payload)), None);
+        assert_eq!(detail(HookKind::PermissionRequest, None), None);
     }
 }

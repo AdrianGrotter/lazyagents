@@ -235,6 +235,11 @@ pub enum Popup {
         index: usize,
     },
     CommandPrompt(CommandRun),
+    /// A line to send to `agent`, as if typed into its pane and submitted.
+    Reply {
+        agent: AgentId,
+        input: String,
+    },
     /// A finished command's output.
     Output {
         title: String,
@@ -1062,6 +1067,13 @@ const WHEEL_LINES: i32 = 3;
 const SCROLL_TOP: i32 = i32::MAX / 2;
 const SCROLL_BOTTOM: i32 = i32::MIN / 2;
 
+fn press(id: AgentId, code: protocol::KeyCode) -> Effect {
+    Effect::Send(Request::Input {
+        id,
+        event: InputEvent::Key(protocol::Key::new(code, protocol::Modifiers::NONE)),
+    })
+}
+
 fn scroll_request(id: AgentId, lines: i32) -> Effect {
     Effect::Send(Request::Scroll { id, lines })
 }
@@ -1286,6 +1298,9 @@ impl App {
         match &mut self.popup {
             Some(Popup::Rename { input, .. }) => input.push_str(&line),
             Some(Popup::CommandPrompt(run)) => run.input.push_str(&line),
+            Some(Popup::Reply { input, .. }) => {
+                input.push_str(&text.replace("\r\n", " ").replace(['\r', '\n'], " "))
+            }
             Some(Popup::AddProject(form)) => form.focused().push_str(&line),
             Some(Popup::NewAgent(form)) => match form.field {
                 Field::Name => form.name.push_str(&line),
@@ -1643,6 +1658,37 @@ impl App {
             }
             Action::Scroll => self.enter_scroll(false),
             Action::Commands => self.popup = Some(Popup::Commands { index: 0 }),
+            Action::Approve | Action::Deny => {
+                let answer = if action == Action::Approve {
+                    protocol::KeyCode::Enter
+                } else {
+                    protocol::KeyCode::Esc
+                };
+                match self.selected_agent() {
+                    Some(agent) if agent.status == Status::NeedsInput => {
+                        return vec![press(agent.id, answer)];
+                    }
+                    Some(agent) => {
+                        let message =
+                            format!("{} is not waiting for an answer", crate::ui::label(agent));
+                        self.fail(message);
+                    }
+                    None => {}
+                }
+            }
+            Action::Reply => match self.selected_agent() {
+                Some(agent) if agent.status.is_running() => {
+                    self.popup = Some(Popup::Reply {
+                        agent: agent.id,
+                        input: String::new(),
+                    });
+                }
+                Some(agent) => {
+                    let message = format!("{} is not running", crate::ui::label(agent));
+                    self.fail(message);
+                }
+                None => {}
+            },
             Action::Filter => {
                 self.focus = Focus::Agents;
                 self.popup = Some(Popup::Filter);
@@ -1792,6 +1838,21 @@ impl App {
         match popup {
             Popup::Help => Vec::new(),
             Popup::Commands { index } => self.on_commands_key(index, key),
+            Popup::Reply { agent, mut input } => match edit(&mut input, &key) {
+                Edit::Submit if input.trim().is_empty() => Vec::new(),
+                Edit::Submit => vec![
+                    Effect::Send(Request::Input {
+                        id: agent,
+                        event: InputEvent::Paste(input),
+                    }),
+                    press(agent, protocol::KeyCode::Enter),
+                ],
+                Edit::Cancel => Vec::new(),
+                Edit::Continue => {
+                    self.popup = Some(Popup::Reply { agent, input });
+                    Vec::new()
+                }
+            },
             Popup::CommandPrompt(run) => self.on_command_prompt_key(run, key),
             Popup::Output {
                 title,
@@ -2424,6 +2485,7 @@ pub(crate) mod tests {
             worktree: None,
             last_error: None,
             title: None,
+            waiting_for: None,
         }
     }
 
@@ -3732,6 +3794,7 @@ pub(crate) mod tests {
             worktree: None,
             last_error: None,
             title: None,
+            waiting_for: None,
         }
     }
 
@@ -5570,6 +5633,99 @@ mod command_tests {
         assert_eq!(
             app.current_message(Instant::now()),
             Some("fmt failed: sh: not found")
+        );
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::tests::{agent, loaded, project};
+    use super::*;
+    use protocol::{InputEvent, Key as ProtoKey, KeyCode as ProtoCode, Modifiers};
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn code(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn input(id: AgentId, event: InputEvent) -> Effect {
+        Effect::Send(Request::Input { id, event })
+    }
+
+    fn pressed(id: AgentId, code: ProtoCode) -> Effect {
+        input(id, InputEvent::Key(ProtoKey::new(code, Modifiers::NONE)))
+    }
+
+    fn waiting() -> (App, AgentInfo) {
+        let p = project("p");
+        let a = AgentInfo {
+            waiting_for: Some("Bash: npm test".into()),
+            ..agent(&p, "api", Status::NeedsInput)
+        };
+        let (app, _) = loaded(vec![p], vec![a.clone()]);
+        (app, a)
+    }
+
+    #[test]
+    fn y_approves_and_capital_n_denies_a_waiting_agent() {
+        let (mut app, a) = waiting();
+        assert_eq!(app.on_key(key('y')), vec![pressed(a.id, ProtoCode::Enter)]);
+        assert_eq!(app.on_key(key('N')), vec![pressed(a.id, ProtoCode::Esc)]);
+        assert_eq!(app.focus, Focus::Agents);
+    }
+
+    #[test]
+    fn approving_an_agent_that_is_not_waiting_sends_nothing() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "api", Status::Working)]);
+        assert!(app.on_key(key('y')).is_empty());
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("api is not waiting for an answer")
+        );
+    }
+
+    #[test]
+    fn i_sends_a_typed_line_to_the_agent() {
+        let (mut app, a) = waiting();
+        assert!(app.on_key(key('i')).is_empty());
+        for c in "use pnpm".chars() {
+            let _ = app.on_key(key(c));
+        }
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            vec![
+                input(a.id, InputEvent::Paste("use pnpm".into())),
+                pressed(a.id, ProtoCode::Enter),
+            ]
+        );
+        assert_eq!(app.popup, None);
+        assert_eq!(app.focus, Focus::Agents);
+    }
+
+    #[test]
+    fn an_empty_reply_or_escape_sends_nothing() {
+        let (mut app, _) = waiting();
+        let _ = app.on_key(key('i'));
+        assert!(app.on_key(code(KeyCode::Enter)).is_empty());
+        let _ = app.on_key(key('i'));
+        let _ = app.on_key(key('x'));
+        assert!(app.on_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn a_stopped_agent_takes_no_reply() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "api", Status::Stopped)]);
+        assert!(app.on_key(key('i')).is_empty());
+        assert_eq!(app.popup, None);
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("api is not running")
         );
     }
 }

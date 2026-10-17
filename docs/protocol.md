@@ -1,6 +1,6 @@
 # Protocol
 
-Status: implemented in crates/protocol (version 4); that crate is the source of truth.
+Status: implemented in crates/protocol (version 5); that crate is the source of truth.
 
 ## Transport and framing
 
@@ -59,9 +59,12 @@ is rejected.
 - `Input { id, event }`
 - `Resize { id, cols, rows }`
 - `Scroll { id, lines }`
-- `Hook { id, kind, session_id, source }`: `session_id` and `source` come from the
-  Claude Code hook payload; `source` is `SessionStart`'s `startup`, `resume`, `clear`
-  or `compact`
+- `Hook { id, kind, session_id, source, detail }`: `session_id` and `source` come from
+  the Claude Code hook payload; `source` is `SessionStart`'s `startup`, `resume`, `clear`
+  or `compact`. `detail` is one line of at most 120 characters: a `PermissionRequest`'s
+  `tool_name` and the first of its `tool_input`'s `command`, `file_path`, `path`, `url`,
+  `pattern`, `query`, `description` or `prompt` (`Bash: npm test`), or a
+  `Notification`'s `message`
 - `Shutdown`: answered after every agent's process tree has exited
 
 `Response`:
@@ -91,6 +94,11 @@ is rejected.
 work for any agent that still has a terminal, including an exited one, and are rejected
 for a stopped agent, which has none. `Subscribe` succeeds for any known agent.
 A `Hook` for an agent that is not running, or is not a Claude agent, is ignored.
+
+`AgentInfo.waiting_for` says what a Claude agent in `NeedsInput` waits for: the `detail`
+of the `PermissionRequest` that made it wait, else of the `Notification`, or `trusting
+this folder` at the trust dialog. It is `None` whenever the agent does not need input, and
+is not persisted.
 
 `AgentInfo.title` is a Claude agent's session title: the terminal title Claude Code sets
 (OSC 0/2), without its leading status glyph. `Claude Code` and an empty title are not

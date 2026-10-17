@@ -209,6 +209,31 @@ fn new_types_the_prompt_into_a_generic_agent() {
 }
 
 #[test]
+fn send_types_a_line_into_an_agent() {
+    let env = TestEnv::new();
+    let typed = env.project.path().join("typed");
+    let script = format!(
+        "read line; echo \"$line\" > '{}'; sleep 30",
+        typed.display()
+    );
+    env.ok(&["new", "listener", "--", "sh", "-c", &script]);
+    assert!(
+        env.ok(&["send", "listener", "use pnpm"])
+            .contains("sent to listener")
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !typed.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(
+        std::fs::read_to_string(&typed).expect("typed").trim(),
+        "use pnpm"
+    );
+    env.ok(&["shutdown"]);
+}
+
+#[test]
 fn lifecycle_through_the_cli() {
     let env = TestEnv::new();
     assert!(env.ok(&["ls"]).contains("no projects yet"));

@@ -763,6 +763,7 @@ async fn claude_agents_get_sessions_hooks_and_resume() {
         kind: HookKind::UserPromptSubmit,
         session_id: None,
         source: None,
+        detail: None,
     })
     .await
     .expect("hook");
@@ -772,6 +773,7 @@ async fn claude_agents_get_sessions_hooks_and_resume() {
         kind: HookKind::Notification,
         session_id: None,
         source: None,
+        detail: None,
     })
     .await
     .expect("hook");
@@ -831,6 +833,7 @@ async fn session_start(conn: &mut Conn, id: AgentId, session: uuid::Uuid, source
         kind: HookKind::SessionStart,
         session_id: Some(session.to_string()),
         source: Some(source.into()),
+        detail: None,
     })
     .await
     .expect("hook");
@@ -857,6 +860,7 @@ async fn session_start_source_decides_whether_the_session_stays_resumable() {
         kind: HookKind::UserPromptSubmit,
         session_id: None,
         source: None,
+        detail: None,
     })
     .await
     .expect("prompt");
@@ -1075,6 +1079,83 @@ async fn a_generic_prompt_is_typed_once_the_agent_prints() {
         .expect("kill");
 }
 
+async fn hook(conn: &mut Conn, id: AgentId, kind: HookKind, detail: Option<&str>) {
+    conn.request(Request::Hook {
+        id,
+        kind,
+        session_id: None,
+        source: None,
+        detail: detail.map(str::to_string),
+    })
+    .await
+    .expect("hook");
+}
+
+async fn waiting_for(conn: &mut Conn, id: AgentId) -> Option<String> {
+    list_agents(conn)
+        .await
+        .into_iter()
+        .find(|a| a.id == id)
+        .and_then(|a| a.waiting_for)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_agent_says_what_it_waits_for_until_it_moves_on() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "asker",
+        AgentKind::Claude,
+        &["sh", "-c", "exec sleep 30"],
+    )
+    .await
+    .expect("create");
+    hook(
+        &mut conn,
+        agent.id,
+        HookKind::PermissionRequest,
+        Some("Bash: npm test"),
+    )
+    .await;
+    conn.wait_status(agent.id, Status::NeedsInput).await;
+    assert_eq!(
+        waiting_for(&mut conn, agent.id).await.as_deref(),
+        Some("Bash: npm test")
+    );
+    hook(
+        &mut conn,
+        agent.id,
+        HookKind::Notification,
+        Some("Claude needs your permission to use Bash"),
+    )
+    .await;
+    assert_eq!(
+        waiting_for(&mut conn, agent.id).await.as_deref(),
+        Some("Bash: npm test")
+    );
+    hook(&mut conn, agent.id, HookKind::PostToolUse, None).await;
+    conn.wait_status(agent.id, Status::Working).await;
+    assert_eq!(waiting_for(&mut conn, agent.id).await, None);
+    hook(
+        &mut conn,
+        agent.id,
+        HookKind::Notification,
+        Some("Pick a colour"),
+    )
+    .await;
+    conn.wait_status(agent.id, Status::NeedsInput).await;
+    assert_eq!(
+        waiting_for(&mut conn, agent.id).await.as_deref(),
+        Some("Pick a colour")
+    );
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agents_bell_reaches_every_client() {
     let daemon = TestDaemon::start().await;
@@ -1123,6 +1204,7 @@ async fn a_claude_agent_at_the_trust_dialog_needs_input() {
         kind: HookKind::SessionStart,
         session_id: None,
         source: Some("startup".into()),
+        detail: None,
     })
     .await
     .expect("hook");
@@ -1142,6 +1224,7 @@ async fn hook_for_unknown_agent_is_an_error() {
             kind: HookKind::Stop,
             session_id: None,
             source: None,
+            detail: None,
         })
         .await
         .expect_err("unknown");
@@ -1662,6 +1745,7 @@ async fn late_hook_does_not_revive_an_exited_agent() {
         kind: HookKind::UserPromptSubmit,
         session_id: None,
         source: None,
+        detail: None,
     })
     .await
     .expect("late hook");

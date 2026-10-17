@@ -26,6 +26,7 @@ const CONFIRM_HINT: &str = "y/enter confirm · n/esc cancel";
 const OUTPUT_HINT: &str = "j/k scroll · q close";
 const MENU_HINT: &str = "j/k move · enter run · esc cancel";
 const INPUT_HINT: &str = "enter ok · esc cancel";
+const REPLY_HINT: &str = "enter send · esc cancel";
 const CHOICE_HINT: &str = "j/k move · enter pick · esc cancel";
 const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
 const PROJECT_FORM_HINT: &str = "tab field · enter add · esc cancel";
@@ -69,6 +70,10 @@ const SIDEBAR_HELP: [(&[Action], &str); 19] = [
     ),
     (&[Action::Filter], "filter the agents (esc clears)"),
     (&[Action::Commands], "custom commands"),
+    (
+        &[Action::Approve, Action::Deny, Action::Reply],
+        "approve / deny / reply to the agent",
+    ),
     (&[Action::Diff], "diff of the agent's changes"),
     (&[Action::Scroll], "scroll the agent's history"),
     (
@@ -76,8 +81,10 @@ const SIDEBAR_HELP: [(&[Action], &str); 19] = [
         "scroll the agent's pane down / up from here",
     ),
     (&[Action::Help], "help"),
-    (&[Action::Quit], "quit (agents keep running)"),
-    (&[Action::StopDaemon], "stop the daemon and quit"),
+    (
+        &[Action::Quit, Action::StopDaemon],
+        "quit (agents keep running) / stop the daemon too",
+    ),
 ];
 const SCROLL_HINT: &str = "SCROLL · j/k ctrl-u/d g/G · q exit";
 const FILTER_HINT: &str = "enter keep · esc clear";
@@ -377,6 +384,13 @@ pub fn info_lines(app: &App) -> Vec<String> {
     match (app.selected_agent(), app.selected_project()) {
         (Some(agent), _) => {
             let mut lines = vec![format!("status: {}", agent.status.label())];
+            if let Some(waiting) = agent
+                .waiting_for
+                .as_ref()
+                .filter(|_| agent.status == Status::NeedsInput)
+            {
+                lines.push(format!("waiting: {waiting}"));
+            }
             if let Some(worktree) = &agent.worktree {
                 lines.push(format!("branch: {}", worktree.branch));
             }
@@ -534,6 +548,19 @@ fn sidebar_hint(keymap: &Keymap) -> String {
         .join(" · ")
 }
 
+/// The answers a waiting agent can be sent from the sidebar.
+fn answer_hint(keymap: &Keymap) -> String {
+    [
+        (Action::Approve, "approve"),
+        (Action::Deny, "deny"),
+        (Action::Reply, "reply"),
+    ]
+    .iter()
+    .filter_map(|(action, label)| Some(format!("{} {label}", keymap.keys(*action).first()?)))
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
     let theme = &app.theme;
     let mut spans = Vec::new();
@@ -564,7 +591,20 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
         Focus::Pane => Span::raw(pane_hint(&app.keymap)).fg(theme.dim),
         Focus::Diff => Span::raw(diff_hint(&app.keymap)).fg(theme.dim),
         Focus::Scroll => Span::raw(SCROLL_HINT).fg(theme.scroll),
-        Focus::Projects | Focus::Agents => Span::raw(sidebar_hint(&app.keymap)).fg(theme.dim),
+        Focus::Projects | Focus::Agents => {
+            let waiting = app
+                .selected_agent()
+                .is_some_and(|a| a.status == Status::NeedsInput);
+            let hint = match waiting {
+                true => format!(
+                    "{} · {}",
+                    answer_hint(&app.keymap),
+                    sidebar_hint(&app.keymap)
+                ),
+                false => sidebar_hint(&app.keymap),
+            };
+            Span::raw(hint).fg(theme.dim)
+        }
     });
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -685,6 +725,19 @@ fn popup_content(popup: &Popup, app: &App) -> PopupContent {
             PopupContent::fitting(" Commands ", 40, command_menu_lines(app, *index))
         }
         Popup::CommandPrompt(run) => command_prompt_content(app, run),
+        Popup::Reply { agent, input } => {
+            let name = app
+                .agents
+                .iter()
+                .find(|a| a.id == *agent)
+                .map_or("agent", label);
+            let lines = vec![
+                Line::from(input.clone()),
+                Line::default(),
+                Line::from(REPLY_HINT).fg(theme.dim),
+            ];
+            PopupContent::new(format!(" Reply to {name} "), 60, lines).cursor_at(Some(0))
+        }
         Popup::Output {
             title,
             lines,
@@ -1093,6 +1146,30 @@ mod tests {
         assert!(text.contains("● docs  idle"), "{text}");
         assert!(text.contains(" api · generic · needs input "), "{text}");
         assert!(text.contains("status: needs input"), "{text}");
+    }
+
+    #[test]
+    fn a_waiting_agent_shows_what_it_waits_for_and_how_to_answer() {
+        let p = project("p");
+        let waiting = AgentInfo {
+            waiting_for: Some("Bash: npm test".into()),
+            ..agent(&p, "api", Status::NeedsInput)
+        };
+        let (mut app, _) = loaded(vec![p], vec![waiting.clone()]);
+        let (text, _) = render(&app);
+        assert!(text.contains("waiting: Bash: npm test"), "{text}");
+        let status = text.lines().last().expect("status line");
+        assert!(
+            status.starts_with("y approve · N deny · i reply · ? help"),
+            "{status}"
+        );
+        app.popup = Some(Popup::Reply {
+            agent: waiting.id,
+            input: "use pnpm".into(),
+        });
+        let (text, _) = render(&app);
+        assert!(text.contains(" Reply to api "), "{text}");
+        assert!(text.contains("use pnpm"), "{text}");
     }
 
     #[test]
@@ -1511,8 +1588,11 @@ mod tests {
                 "scroll the agent's pane down / up from here",
             ),
             ("?", "help"),
-            ("q/ctrl-c", "quit (agents keep running)"),
-            ("Q", "stop the daemon and quit"),
+            (
+                "q/ctrl-c, Q",
+                "quit (agents keep running) / stop the daemon too",
+            ),
+            ("y, N, i", "approve / deny / reply to the agent"),
             ("ctrl-q q/esc", "back to the sidebar"),
             ("ctrl-]/ctrl-5", "back to the sidebar"),
             ("ctrl-q j", "next agent"),
@@ -1546,7 +1626,7 @@ mod tests {
         let config = configured(
             r#"
             [keys.sidebar]
-            new_agent = ["N", "ctrl-n"]
+            new_agent = ["M", "ctrl-n"]
             quit = "ctrl-x"
             add_project = "P"
 
@@ -1562,8 +1642,8 @@ mod tests {
         app.popup = Some(Popup::Help);
         let (text, _) = render_at(&app, 100, 40);
         for (key, action) in [
-            ("N/ctrl-n", "new agent"),
-            ("ctrl-x", "quit (agents keep running)"),
+            ("M/ctrl-n", "new agent"),
+            ("ctrl-x, Q", "quit (agents keep running)"),
             ("ctrl-a x", "back to the sidebar"),
             ("ctrl-a j", "next agent"),
             ("ctrl-j", "next agent"),
@@ -1581,7 +1661,7 @@ mod tests {
         let (text, _) = render(&app);
         let status = text.lines().last().expect("status line");
         assert!(
-            status.starts_with("? help · ctrl-x quit · enter open · N new · x stop"),
+            status.starts_with("? help · ctrl-x quit · enter open · M new · x stop"),
             "{status}"
         );
         assert!(status.contains("P add project"), "{status}");

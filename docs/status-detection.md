@@ -16,6 +16,9 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   - `UserPromptSubmit`, `PreToolUse`, `PostToolUse` → `Working` (`PostToolUse` moves an
     agent out of `NeedsInput` once an approved tool finishes)
   - `PermissionRequest` → `NeedsInput`, the moment Claude is about to ask
+  - While an agent needs input, `AgentInfo.waiting_for` names what for: the tool call
+    of the `PermissionRequest` (kept when the `Notification` that follows it arrives), else
+    the `Notification`'s message; it clears when the status changes
   - `Notification` → `NeedsInput` for a question: `notification_type`
     `permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog`,
     `agent_needs_input`, or a type lazyagents does not know. The hook forwards an

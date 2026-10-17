@@ -39,6 +39,8 @@ Subcommands:
   — start an agent. `--prompt` is the agent's first message: Claude gets it as its
   positional prompt argument (after `--`), any other command has it typed in, followed
   by Enter, when it first prints. Restarts never repeat it.
+- `lazyagents send <agent> <text>` — type `text` into the agent and press enter, as `i` does
+  in the TUI.
 - `lazyagents kill|restart|rm <agent>`, `lazyagents rename <agent> <name>`. `rm` keeps
   a worktree agent's worktree and branch and says so: `removed <name>; kept worktree
   <path> (branch <branch>)`.

@@ -70,6 +70,9 @@ pub enum Request {
         session_id: Option<String>,
         /// `SessionStart`'s `source`: `startup`, `resume`, `clear` or `compact`.
         source: Option<String>,
+        /// A summary of what the hook is about: the tool call of a `PermissionRequest`, the
+        /// message of a `Notification`.
+        detail: Option<String>,
     },
     Shutdown,
 }
@@ -136,6 +139,7 @@ mod tests {
             }),
             last_error: Some("no such file".into()),
             title: Some("Fix the parser".into()),
+            waiting_for: Some("Bash: ls".into()),
         }
     }
 
@@ -235,6 +239,7 @@ mod tests {
                 kind: HookKind::Notification,
                 session_id: Some("s".into()),
                 source: Some("resume".into()),
+                detail: Some("Bash: ls".into()),
             },
             Request::Shutdown,
         ];

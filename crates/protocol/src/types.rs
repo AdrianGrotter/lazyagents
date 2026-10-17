@@ -89,6 +89,9 @@ pub struct AgentInfo {
     pub last_error: Option<String>,
     /// The Claude session's title, from the terminal title Claude Code sets.
     pub title: Option<String>,
+    /// What a Claude agent that needs input is waiting for, such as the tool call it
+    /// asks permission for; `None` once it no longer needs input.
+    pub waiting_for: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -77,6 +77,19 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
             let info = expect_agent(client.request(request).await?)?;
             println!("started {}", info.name);
         }
+        Command::Send { agent, text } => {
+            let info = find_agent(&mut client, &agent).await?;
+            let enter = protocol::Key::new(protocol::KeyCode::Enter, protocol::Modifiers::NONE);
+            for event in [
+                protocol::InputEvent::Paste(text),
+                protocol::InputEvent::Key(enter),
+            ] {
+                client
+                    .request(Request::Input { id: info.id, event })
+                    .await?;
+            }
+            println!("sent to {}", info.name);
+        }
         Command::Kill { agent } => {
             let info = find_agent(&mut client, &agent).await?;
             client.request(Request::KillAgent { id: info.id }).await?;
@@ -306,6 +319,7 @@ mod tests {
             worktree: None,
             last_error: None,
             title: None,
+            waiting_for: None,
         }
     }
 
