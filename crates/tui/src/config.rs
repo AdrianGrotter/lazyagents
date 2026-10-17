@@ -27,11 +27,11 @@ pub struct PresetDef {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NotifyMethod {
-    #[default]
     Auto,
     Bel,
     Osc9,
     Osc777,
+    #[default]
     Off,
 }
 
@@ -45,7 +45,7 @@ pub struct Notifications {
 impl Default for Notifications {
     fn default() -> Self {
         Notifications {
-            method: NotifyMethod::Auto,
+            method: NotifyMethod::Off,
             title: true,
         }
     }
@@ -856,11 +856,11 @@ mod tests {
     }
 
     #[test]
-    fn notifications_default_to_auto_with_a_title() {
+    fn notifications_default_to_off_with_a_title() {
         assert_eq!(
             Config::default().notifications,
             Notifications {
-                method: NotifyMethod::Auto,
+                method: NotifyMethod::Off,
                 title: true
             }
         );

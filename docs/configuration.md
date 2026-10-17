@@ -313,16 +313,17 @@ method = "osc9"
 title = false
 ```
 
-The TUI tells the terminal it runs in when an agent out of view starts needing input, ends
-its turn (it is then listed as `done`, see [keybindings.md](keybindings.md)), or rings the
-terminal bell (generic agents only; a Claude agent's hooks already report what its bell
-would). Out of view means not selected, or selected while the terminal lacks focus. The
-status bar shows the same text, `<agent> needs input`, `<agent> is done` or `<agent> rang
+With a `method` other than `off`, the TUI tells the terminal it runs in when an agent out
+of view starts needing input, ends its turn (it is then listed as `done`, see
+[keybindings.md](keybindings.md)), or rings the terminal bell (generic agents only; a
+Claude agent's hooks already report what its bell would). Out of view means not selected,
+or selected while the terminal lacks focus. Whatever the method, the status bar shows the
+same text, `<agent> needs input`, `<agent> is done` or `<agent> rang
 the bell`, unless it is showing an error.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `method` | `auto` | `bel` rings the bell; `osc9` sends an OSC 9 desktop notification (iTerm2, WezTerm, Ghostty); `osc777` sends OSC 777 `notify` (Ghostty, foot, urxvt); `off` sends nothing. `auto` is `osc9` when `TERM_PROGRAM` is `iTerm.app`, `WezTerm` or `ghostty`, and `bel` otherwise, including inside tmux, which flags a bell on the window but drops OSC 9 |
+| `method` | `off` | `bel` rings the bell; `osc9` sends an OSC 9 desktop notification (iTerm2, WezTerm, Ghostty); `osc777` sends OSC 777 `notify` (Ghostty, foot, urxvt); `off` sends nothing. `auto` is `osc9` when `TERM_PROGRAM` is `iTerm.app`, `WezTerm` or `ghostty`, and `bel` otherwise, including inside tmux, which flags a bell on the window but drops OSC 9 |
 | `title` | `true` | set the window title to `lazyagents`, or `lazyagents · N need input` while agents wait; the terminal's own title is saved on start and restored on exit |
 
 ## Clipboard
