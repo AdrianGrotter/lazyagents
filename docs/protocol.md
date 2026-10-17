@@ -21,9 +21,10 @@ is rejected.
    the variant indices of `Request` differ between versions.
 3. The client then sends `Request { id, request }`. The daemon answers each request with
    exactly one `Response { id, result }`, where `result` is `Ok(Response)` or
-   `Err(message)`. Most answers come in request order; `GitStat` and `GitDiff` are
-   answered when git finishes, so their answers can follow later requests' answers and a
-   client matches them by `id`.
+   `Err(message)`. Requests that take time are answered when their work, done off the
+   daemon's event loop, finishes: `KillAgent`, `RestartAgent`, `RemoveAgent`, `MergeAgent`,
+   `GitStat`, `GitDiff`, and `CreateAgent` with a worktree. Their answers can follow later
+   requests' answers, so a client matches answers by `id`; the rest come in request order.
 4. Pushes (`AgentUpdated`, `AgentRemoved`, `AgentBell`, `ProjectsChanged`, `Frame`) can
    arrive at any time, between responses.
 
@@ -111,6 +112,14 @@ is rejected.
 
 `KillAgent`, `RemoveAgent` and `RestartAgent` stop the agent's whole process tree (see
 [architecture.md](architecture.md#daemon-lifecycle)) before they are answered.
+While one of them runs, another of the three for the same agent is rejected with
+`<name> is stopping; try again once that is done` (`restarting` or `being removed` in
+place of `stopping`). While a worktree `CreateAgent` runs, its name is reserved: a create
+of the same name in the project, or a `RenameAgent` to it, is rejected with `an agent named
+<name> is being created in this project`, and `RemoveProject` of its project is rejected.
+A `Shutdown` that arrives meanwhile answers such a create with `the daemon shut down before
+<name> started; its worktree was removed`, and a restart with `the daemon is shutting
+down` (see [architecture.md](architecture.md#nothing-slow-runs-on-the-event-loop)).
 `Input` is rejected with an error for agents that are not running. `Resize` and `Scroll`
 work for any agent that still has a terminal, including an exited one, and are rejected
 for a stopped agent, which has none. `Subscribe` succeeds for any known agent.

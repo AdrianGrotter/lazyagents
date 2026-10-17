@@ -111,6 +111,11 @@ pub fn add_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> anyho
     Ok(())
 }
 
+/// Removes a worktree `add_worktree` made, with the branch it created.
+pub fn discard_worktree(repo: &Path, path: &Path, branch: &str) {
+    undo_add(repo, path, branch, false);
+}
+
 fn undo_add(repo: &Path, path: &Path, branch: &str, branch_existed: bool) {
     let registered = git(Some(repo), ["worktree", "list", "--porcelain", "-z"])
         .map(|list| {

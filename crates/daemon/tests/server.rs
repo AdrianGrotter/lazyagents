@@ -2909,3 +2909,409 @@ async fn a_setup_script_runs_once_in_the_new_worktree_before_the_agent() {
         .await
         .expect("kill");
 }
+
+/// A git hook in the repo that, once armed, holds the git command running it until the
+/// release file appears. Dropping the gate releases it, and the hook also gives up when
+/// its directory is gone or after about a minute, so a failing test leaves nothing waiting.
+struct Gate {
+    _hooks: tempfile::TempDir,
+    armed: PathBuf,
+    entered: PathBuf,
+    left: PathBuf,
+    release: PathBuf,
+}
+
+impl Gate {
+    /// Holds every `git worktree add` in the repo.
+    fn post_checkout(repo: &Path) -> Self {
+        let gate = Self::install(repo, "core.hooksPath", "post-checkout", 0, None);
+        gate.arm();
+        gate
+    }
+
+    /// Holds every `git worktree add` until `release` exists.
+    fn post_checkout_until(repo: &Path, release: &Path) -> Self {
+        let gate = Self::install(repo, "core.hooksPath", "post-checkout", 0, Some(release));
+        gate.arm();
+        gate
+    }
+
+    /// Holds, once armed, every git command that reads the working tree's status.
+    fn fsmonitor(repo: &Path) -> Self {
+        Self::install(repo, "core.fsmonitor", "fsmonitor", 1, None)
+    }
+
+    fn install(repo: &Path, key: &str, name: &str, status: u8, release: Option<&Path>) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let hooks = tempfile::tempdir().expect("hooks dir");
+        let armed = hooks.path().join("armed");
+        let entered = hooks.path().join("entered");
+        let left = hooks.path().join("left");
+        let release = release.map_or_else(|| hooks.path().join("release"), Path::to_path_buf);
+        let hook = hooks.path().join(name);
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n[ -e '{armed}' ] || exit {status}\necho in > '{entered}'\ni=0\nuntil [ -e '{release}' ] || [ ! -e '{entered}' ] || [ $i -ge 1200 ]; do i=$((i+1)); sleep 0.05; done\necho out > '{left}'\nexit {status}\n",
+                armed = armed.display(),
+                entered = entered.display(),
+                left = left.display(),
+                release = release.display(),
+            ),
+        )
+        .expect("hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let value = if key == "core.hooksPath" {
+            hooks.path()
+        } else {
+            hook.as_path()
+        };
+        common::git(repo, &["config", key, value.to_str().expect("utf8")]);
+        Self {
+            _hooks: hooks,
+            armed,
+            entered,
+            left,
+            release,
+        }
+    }
+
+    fn arm(&self) {
+        std::fs::write(&self.armed, "").expect("arm");
+    }
+
+    /// Polls from the blocking pool, so a daemon that blocks the runtime cannot stall it.
+    async fn entered(&self) {
+        let entered = self.entered.clone();
+        tokio::task::spawn_blocking(move || {
+            let deadline = std::time::Instant::now() + WAIT;
+            while !entered.exists() {
+                assert!(std::time::Instant::now() < deadline, "the hook never ran");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+        .await
+        .expect("join");
+    }
+
+    /// Whether an armed hook that ran still holds its git command.
+    fn holding(&self) -> bool {
+        !self.left.exists()
+    }
+
+    fn open(&self) {
+        std::fs::write(&self.release, "").expect("release");
+    }
+}
+
+impl Drop for Gate {
+    fn drop(&mut self) {
+        self.open();
+    }
+}
+
+fn create_in_worktree_request(project: &Project, name: &str, command: &[&str]) -> Request {
+    Request::CreateAgent(CreateAgent {
+        project: project.id,
+        name: name.into(),
+        kind: AgentKind::Generic,
+        command: command.iter().map(|s| s.to_string()).collect(),
+        cols: 120,
+        rows: 24,
+        worktree: Some(WorktreeRequest { base: None }),
+        prompt: None,
+        setup: None,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_client_is_greeted_while_a_worktree_is_created() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let gate = Gate::post_checkout(repo.path());
+    let create = conn
+        .send(create_in_worktree_request(
+            &project,
+            "slow",
+            &["sleep", "30"],
+        ))
+        .await;
+    gate.entered().await;
+
+    let welcomed = greeted(daemon.path()).await;
+    gate.open();
+    assert!(welcomed, "no Welcome while a worktree is created");
+    let Ok(Response::Agent(agent)) = conn.response(create).await else {
+        panic!("create failed")
+    };
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+/// Whether a new connection gets its Welcome within `WAIT`, timed on a runtime of its own,
+/// so a daemon that blocks the test's runtime cannot stall the timeout.
+async fn greeted(dir: &Path) -> bool {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async { tokio::time::timeout(WAIT, Conn::open(&dir)).await.is_ok() })
+    })
+    .await
+    .expect("join")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hooks_and_panes_keep_flowing_while_a_worktree_is_created() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let signals = tempfile::tempdir().expect("signals");
+    let go = signals.path().join("go");
+    let script = format!(
+        "until [ -e '{}' ]; do sleep 0.05; done; echo streaming-ok; exec sleep 300",
+        go.display()
+    );
+    let watcher = create(
+        &mut conn,
+        &project,
+        "watcher",
+        AgentKind::Claude,
+        &["sh", "-c", &script],
+    )
+    .await
+    .expect("create watcher");
+    let mut viewer = Conn::open(daemon.path()).await;
+    viewer
+        .request(Request::Subscribe { id: watcher.id })
+        .await
+        .expect("subscribe");
+    let gate = Gate::post_checkout(repo.path());
+    let create = conn
+        .send(create_in_worktree_request(
+            &project,
+            "slow",
+            &["sleep", "30"],
+        ))
+        .await;
+    gate.entered().await;
+
+    let mut hook_conn = Conn::open(daemon.path()).await;
+    hook(
+        &mut hook_conn,
+        watcher.id,
+        HookKind::Notification,
+        Some("needs you"),
+    )
+    .await;
+    assert_eq!(
+        waiting_for(&mut hook_conn, watcher.id).await.as_deref(),
+        Some("needs you")
+    );
+    std::fs::write(&go, "").expect("go");
+    viewer.wait_text(watcher.id, "streaming-ok").await;
+    assert!(
+        gate.holding(),
+        "the hook and the output waited for the worktree"
+    );
+
+    gate.open();
+    let Ok(Response::Agent(slow)) = conn.response(create).await else {
+        panic!("create failed")
+    };
+    for id in [slow.id, watcher.id] {
+        conn.request(Request::KillAgent { id }).await.expect("kill");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_is_reserved_while_its_worktree_is_created() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let gate = Gate::post_checkout(repo.path());
+    let first = conn
+        .send(create_in_worktree_request(
+            &project,
+            "twin",
+            &["sleep", "30"],
+        ))
+        .await;
+    gate.entered().await;
+
+    let mut other = Conn::open(daemon.path()).await;
+    let err = other
+        .request(Request::RemoveProject { id: project.id })
+        .await
+        .expect_err("project in use");
+    assert!(err.contains("remove the project's agents first"), "{err}");
+    let err = create_in_worktree(&mut other, &project, "twin", &["sleep", "30"])
+        .await
+        .expect_err("same name in a worktree");
+    assert!(err.contains("twin is being created"), "{err}");
+    let err = create(
+        &mut other,
+        &project,
+        "twin",
+        AgentKind::Generic,
+        &["sleep", "30"],
+    )
+    .await
+    .expect_err("same name in the checkout");
+    assert!(err.contains("twin is being created"), "{err}");
+    let plain = create(
+        &mut other,
+        &project,
+        "plain",
+        AgentKind::Generic,
+        &["sleep", "30"],
+    )
+    .await
+    .expect("another name");
+    let err = other
+        .request(Request::RenameAgent {
+            id: plain.id,
+            name: "twin".into(),
+        })
+        .await
+        .expect_err("rename to the reserved name");
+    assert!(err.contains("twin is being created"), "{err}");
+
+    gate.open();
+    let Ok(Response::Agent(twin)) = conn.response(first).await else {
+        panic!("create failed")
+    };
+    assert_eq!(twin.name, "twin");
+    for id in [twin.id, plain.id] {
+        conn.request(Request::KillAgent { id }).await.expect("kill");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_being_removed_refuses_other_lifecycle_requests() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let agent = create_in_worktree(&mut conn, &project, "doomed", &["sleep", "30"])
+        .await
+        .expect("create");
+    let path = agent.worktree.as_ref().expect("worktree").path.clone();
+    let gate = Gate::fsmonitor(repo.path());
+    gate.arm();
+    let remove = conn
+        .send(Request::RemoveAgent {
+            id: agent.id,
+            remove_worktree: true,
+            force: false,
+            delete_branch: false,
+        })
+        .await;
+    gate.entered().await;
+
+    let mut other = Conn::open(daemon.path()).await;
+    for request in [
+        Request::KillAgent { id: agent.id },
+        Request::RestartAgent {
+            id: agent.id,
+            cols: 80,
+            rows: 24,
+        },
+        Request::RemoveAgent {
+            id: agent.id,
+            remove_worktree: false,
+            force: false,
+            delete_branch: false,
+        },
+    ] {
+        let err = other.request(request).await.expect_err("busy");
+        assert!(err.contains("doomed is being removed"), "{err}");
+    }
+    assert_eq!(list_agents(&mut other).await.len(), 1);
+
+    gate.open();
+    assert_eq!(conn.response(remove).await, Ok(Response::Ok));
+    assert!(list_agents(&mut conn).await.is_empty());
+    assert!(!path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_during_a_worktree_create_leaves_no_worktree() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let signals = tempfile::tempdir().expect("signals");
+    let stopped = signals.path().join("stopped");
+    let script = format!(
+        "trap \"echo stopped > '{}'; exit 0\" HUP TERM; while :; do sleep 0.05; done",
+        stopped.display()
+    );
+    create(
+        &mut conn,
+        &project,
+        "sentinel",
+        AgentKind::Generic,
+        &["sh", "-c", &script],
+    )
+    .await
+    .expect("create sentinel");
+    let gate = Gate::post_checkout_until(repo.path(), &stopped);
+    let create = conn
+        .send(create_in_worktree_request(
+            &project,
+            "late",
+            &["sleep", "30"],
+        ))
+        .await;
+    gate.entered().await;
+
+    let mut other = Conn::open(daemon.path()).await;
+    let shutdown = other.send(Request::Shutdown).await;
+    let err = conn
+        .response(create)
+        .await
+        .expect_err("shut down before it started");
+    assert!(err.contains("shut down before late started"), "{err}");
+    assert_eq!(other.response(shutdown).await, Ok(Response::Ok));
+    daemon.exits_within(WAIT).await;
+
+    assert!(!worktree_path(&daemon, &project, "late").exists());
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/*"]),
+        ""
+    );
+    let worktrees = common::git(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert!(!worktrees.contains("late"), "{worktrees}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_are_answered_while_an_agent_is_killed() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let pidfile = dir.path().join("pid");
+    let script = format!(
+        "trap '' TERM HUP; echo $$ > '{}'; exec sleep 318",
+        pidfile.display()
+    );
+    let agent = create_owned(&mut conn, &project, "stubborn", &sh(&script)).await;
+    let leaves = Leaves::read(&pidfile, 1).await;
+
+    let kill = conn.send(Request::KillAgent { id: agent.id }).await;
+    let list = conn.send(Request::ListAgents).await;
+    let first = conn
+        .wait_for(|m| matches!(m, ServerMessage::Response { .. }))
+        .await;
+    assert!(
+        matches!(first, ServerMessage::Response { id, .. } if id == list),
+        "the kill was answered first: {first:?}"
+    );
+    assert!(matches!(
+        conn.response(kill).await,
+        Ok(Response::Agent(info)) if info.status == Status::Stopped
+    ));
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived kill");
+}

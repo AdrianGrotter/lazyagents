@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -65,9 +66,17 @@ enum Flow {
 
 enum Reply {
     Now(Box<Result<Response, String>>),
-    /// Answered later from another thread through the client's sender.
+    /// Answered later, from another thread through the client's sender or from the event
+    /// loop once a job finishes.
     Deferred,
 }
+
+fn now(result: Result<Response, String>) -> Reply {
+    Reply::Now(Box::new(result))
+}
+
+/// The rest of a request, run on the event loop once its slow part finished on a thread.
+type Finish = Box<dyn FnOnce(&mut Daemon) + Send>;
 
 #[derive(Clone, Copy)]
 enum GitQuery {
@@ -190,15 +199,25 @@ fn socket_identity(socket: &Path) -> std::io::Result<(u64, u64)> {
 }
 
 async fn accept_loop(listener: UnixListener, incoming: UnboundedSender<UnixStream>) {
-    loop {
+    while !incoming.is_closed() {
         match listener.accept().await {
             Ok((stream, _)) => {
-                if incoming.send(stream).is_err() {
-                    break;
-                }
+                tokio::spawn(greet(stream, incoming.clone()));
             }
             Err(e) => tracing::warn!(error = %e, "accept failed"),
         }
+    }
+}
+
+/// Sends the Welcome before the event loop takes the connection, so a client is greeted at
+/// once however busy the loop is.
+async fn greet(mut stream: UnixStream, incoming: UnboundedSender<UnixStream>) {
+    let welcome = ServerMessage::Welcome {
+        protocol_version: PROTOCOL_VERSION,
+        daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    if write_message(&mut stream, &welcome).await.is_ok() {
+        let _ = incoming.send(stream);
     }
 }
 
@@ -267,6 +286,9 @@ struct Agent {
     /// or reports a hook.
     at_trust_dialog: bool,
     usage: Option<Usage>,
+    /// What a stop or removal running off the event loop is doing to the agent; while set,
+    /// kill, restart and remove are refused.
+    busy: Option<&'static str>,
 }
 
 impl Agent {
@@ -288,6 +310,7 @@ impl Agent {
             waiting_for: None,
             at_trust_dialog: false,
             usage: None,
+            busy: None,
         }
     }
 
@@ -324,6 +347,8 @@ type Snapshot = Vec<(AgentId, u64, Vec<Tracked>)>;
 struct PendingSnapshot {
     rx: std::sync::mpsc::Receiver<Snapshot>,
     agents: Vec<AgentId>,
+    /// Stops running off the event loop that wait for what the snapshot finds for these agents.
+    waiters: Vec<(Vec<AgentId>, Sender<Vec<Tracked>>)>,
 }
 
 /// A reap running on its own thread. Its processes stay visible here until the thread
@@ -360,6 +385,11 @@ struct Daemon {
     leftovers_retried: Option<Instant>,
     claude_config: Option<PathBuf>,
     revert_direnv: bool,
+    /// Requests whose slow part runs on its own thread; `tick` finishes them.
+    jobs: Vec<JoinHandle<Option<Finish>>>,
+    /// Names reserved by worktree agents being created.
+    creating: Vec<(ProjectId, String)>,
+    shutting_down: bool,
 }
 
 impl Drop for Daemon {
@@ -396,14 +426,13 @@ impl Daemon {
             leftovers_retried: None,
             claude_config: None,
             revert_direnv: false,
+            jobs: Vec::new(),
+            creating: Vec::new(),
+            shutting_down: false,
         }
     }
 
     fn add_client(&mut self, client: ClientId, tx: UnboundedSender<ServerMessage>) {
-        let _ = tx.send(ServerMessage::Welcome {
-            protocol_version: PROTOCOL_VERSION,
-            daemon_version: env!("CARGO_PKG_VERSION").to_string(),
-        });
         self.clients.insert(
             client,
             Client {
@@ -419,6 +448,7 @@ impl Daemon {
                 .agents
                 .values()
                 .any(|agent| agent.terminal.is_some() && agent.status.is_running())
+            || !self.jobs.is_empty()
     }
 
     fn handle_command(&mut self, command: Command) -> Flow {
@@ -429,13 +459,8 @@ impl Daemon {
                 request,
             } => {
                 let stop = matches!(request, Request::Shutdown);
-                if let Reply::Now(result) = self.handle_request(client, id, request)
-                    && let Some(c) = self.clients.get(&client)
-                {
-                    let _ = c.tx.send(ServerMessage::Response {
-                        id,
-                        result: *result,
-                    });
+                if let Reply::Now(result) = self.handle_request(client, id, request) {
+                    self.reply(client, id, *result);
                 }
                 if stop { Flow::Stop } else { Flow::Continue }
             }
@@ -454,19 +479,24 @@ impl Daemon {
             }
             Request::RemoveProject { id } => self.remove_project(id).map(|()| Response::Ok),
             Request::ListAgents => Ok(Response::Agents(self.list_agents())),
-            Request::CreateAgent(create) => self.create_agent(create).map(Response::Agent),
-            Request::KillAgent { id } => self.kill_agent(id).map(Response::Agent),
-            Request::RestartAgent { id, cols, rows } => self
-                .restart_agent(id, PaneSize::new(cols, rows))
-                .map(Response::Agent),
+            Request::CreateAgent(create) => return self.create_agent(client, request_id, create),
+            Request::KillAgent { id } => return self.kill_agent(client, request_id, id),
+            Request::RestartAgent { id, cols, rows } => {
+                return self.restart_agent(client, request_id, id, PaneSize::new(cols, rows));
+            }
             Request::RemoveAgent {
                 id,
                 remove_worktree,
                 force,
                 delete_branch,
-            } => self
-                .remove_agent(id, remove_worktree, force, delete_branch)
-                .map(|()| Response::Ok),
+            } => {
+                let removal = Removal {
+                    worktree: remove_worktree,
+                    force,
+                    delete_branch,
+                };
+                return self.remove_agent(client, request_id, id, removal);
+            }
             Request::MergeAgent { id } => return self.merge_agent(client, request_id, id),
             Request::GitStat { id } => {
                 return self.git_query(client, request_id, id, GitQuery::Stat);
@@ -503,7 +533,13 @@ impl Daemon {
                 Ok(Response::Ok)
             }
         };
-        Reply::Now(Box::new(result))
+        now(result)
+    }
+
+    fn reply(&self, client: ClientId, id: u64, result: Result<Response, String>) {
+        if let Some(c) = self.clients.get(&client) {
+            let _ = c.tx.send(ServerMessage::Response { id, result });
+        }
     }
 
     fn subscribe(&mut self, client: ClientId, id: AgentId) -> Result<(), String> {
@@ -641,7 +677,9 @@ impl Daemon {
     }
 
     fn remove_project(&mut self, id: ProjectId) -> Result<(), String> {
-        if self.agents.values().any(|a| a.record.project == id) {
+        if self.agents.values().any(|a| a.record.project == id)
+            || self.creating.iter().any(|(project, _)| *project == id)
+        {
             return Err("remove the project's agents first".into());
         }
         let before = self.projects.len();
@@ -679,44 +717,74 @@ impl Daemon {
                 "an agent named {name} already exists in this project"
             ));
         }
+        if self
+            .creating
+            .iter()
+            .any(|(reserved, reserved_name)| *reserved == project && reserved_name == name)
+        {
+            return Err(format!(
+                "an agent named {name} is being created in this project"
+            ));
+        }
         Ok(())
     }
 
-    fn create_agent(&mut self, create: CreateAgent) -> Result<AgentInfo, String> {
-        let project = self
+    /// Creates an agent in its project's checkout at once; a worktree agent's worktree is
+    /// made off the event loop, with its name reserved meanwhile.
+    fn create_agent(&mut self, client: ClientId, request_id: u64, create: CreateAgent) -> Reply {
+        let Some(project) = self
             .projects
             .iter()
             .find(|p| p.id == create.project)
             .cloned()
-            .ok_or_else(|| format!("unknown project {}", create.project))?;
-        self.validate_name(project.id, &create.name, None)?;
-        if create.kind == AgentKind::Generic && create.command.is_empty() {
-            return Err("a generic agent needs a command".into());
-        }
-        let worktree = match create.worktree {
-            Some(request) => Some(self.add_worktree(&project, &create.name, request)?),
-            None => None,
+        else {
+            return now(Err(format!("unknown project {}", create.project)));
         };
-        if let Some(worktree) = &worktree {
-            match git::copy_worktree_includes(&project.path, &worktree.path) {
-                Ok(copied) if !copied.is_empty() => {
-                    tracing::info!(files = ?copied, "copied .worktreeinclude files")
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %format!("{e:#}"), "copying .worktreeinclude files failed")
-                }
-            }
+        if let Err(e) = self.validate_name(project.id, &create.name, None) {
+            return now(Err(e));
         }
-        if let (Some(direnv), Some(worktree)) = (self.direnv.as_deref(), worktree.as_ref()) {
-            match direnv::auto_allow(direnv, &project.path, &worktree.path, &[]) {
-                Ok(true) => {
-                    tracing::info!(path = %worktree.path.display(), "allowed the worktree's .envrc")
-                }
-                Ok(false) => {}
-                Err(e) => tracing::warn!(error = %e, "checking the worktree's .envrc failed"),
-            }
+        if create.kind == AgentKind::Generic && create.command.is_empty() {
+            return now(Err("a generic agent needs a command".into()));
         }
+        let Some(request) = create.worktree.clone() else {
+            return now(self
+                .finish_create(&project, create, None)
+                .map(Response::Agent));
+        };
+        let reservation = (project.id, create.name.clone());
+        self.creating.push(reservation.clone());
+        let state = self.paths.dir().to_path_buf();
+        let direnv = self.direnv.clone();
+        let (job_project, name) = (project.clone(), create.name.clone());
+        self.off_loop(
+            "worktree",
+            move || prepare_worktree(&state, &job_project, &name, request, direnv.as_deref()),
+            move |daemon, prepared| {
+                daemon.creating.retain(|reserved| *reserved != reservation);
+                let result = match prepared {
+                    None => Err(format!("creating the worktree for {} failed", create.name)),
+                    Some(Err(e)) => Err(e),
+                    Some(Ok(worktree)) if daemon.shutting_down => {
+                        git::discard_worktree(&project.path, &worktree.path, &worktree.branch);
+                        Err(format!(
+                            "the daemon shut down before {} started; its worktree was removed",
+                            create.name
+                        ))
+                    }
+                    Some(Ok(worktree)) => daemon.finish_create(&project, create, Some(worktree)),
+                };
+                daemon.reply(client, request_id, result.map(Response::Agent));
+            },
+        );
+        Reply::Deferred
+    }
+
+    fn finish_create(
+        &mut self,
+        project: &Project,
+        create: CreateAgent,
+        worktree: Option<WorktreeInfo>,
+    ) -> Result<AgentInfo, String> {
         let record = AgentRecord {
             id: AgentId::random(),
             project: project.id,
@@ -736,45 +804,15 @@ impl Daemon {
         agent.pending_prompt = create.prompt.filter(|p| !p.trim().is_empty());
         agent.pending_setup = create.setup.filter(|s| !s.trim().is_empty());
         self.agents.insert(id, agent);
-        let started = self.start(id, Launch::Fresh, PaneSize::new(create.cols, create.rows));
+        let started = self.spawn_agent(id, Launch::Fresh, PaneSize::new(create.cols, create.rows));
         self.persist();
         self.announce(id);
         started?;
         self.info_of(id)
     }
 
-    fn add_worktree(
-        &self,
-        project: &Project,
-        name: &str,
-        request: WorktreeRequest,
-    ) -> Result<WorktreeInfo, String> {
-        let branch = format!("lazyagents/{name}");
-        git::check_branch(&branch).map_err(|e| format!("{e:#}"))?;
-        let base = match request.base.filter(|b| !b.trim().is_empty()) {
-            Some(base) => base.trim().to_string(),
-            None => match git::current_branch(&project.path).map_err(|e| format!("{e:#}"))? {
-                detached if detached == "HEAD" => {
-                    git::head_commit(&project.path).map_err(|e| format!("{e:#}"))?
-                }
-                branch => branch,
-            },
-        };
-        let state = self
-            .paths
-            .dir()
-            .canonicalize()
-            .map_err(|e| format!("{}: {e}", self.paths.dir().display()))?;
-        let id = project.id.to_string();
-        let path = state
-            .join("worktrees")
-            .join(format!("{}-{}", project.name.replace('/', "-"), &id[..8]))
-            .join(name);
-        git::add_worktree(&project.path, &path, &branch, &base).map_err(|e| format!("{e:#}"))?;
-        Ok(WorktreeInfo { path, branch, base })
-    }
-
-    fn start(&mut self, id: AgentId, launch: Launch, size: PaneSize) -> Result<(), String> {
+    /// Starts the agent's process; whatever ran before must be stopped already.
+    fn spawn_agent(&mut self, id: AgentId, launch: Launch, size: PaneSize) -> Result<(), String> {
         let project_root = {
             let agent = self.agent(id)?;
             self.projects
@@ -783,7 +821,6 @@ impl Daemon {
                 .map(|p| p.path.clone())
                 .unwrap_or_else(|| agent.record.cwd.clone())
         };
-        self.stop(&[id], STOP_GRACE);
         let agent = self
             .agents
             .get_mut(&id)
@@ -855,12 +892,70 @@ impl Daemon {
         }
     }
 
-    /// Terminates the given agents' process trees, process groups and tracked
-    /// descendants, then drops their terminals. A snapshot still running is waited for
-    /// only when it covers an agent being stopped, so what it found is stopped too; its
-    /// results for other agents are applied, or reaped as orphans, when they arrive.
-    fn stop(&mut self, ids: &[AgentId], grace: Duration) {
-        self.finish_snapshot(Some(ids));
+    /// Runs `work` on its own thread, then `then` with its result on the event loop, from
+    /// `tick`; `then` gets `None` when `work` panicked. Both run inline when no thread can
+    /// be spawned.
+    fn off_loop<T: Send + 'static>(
+        &mut self,
+        name: &str,
+        work: impl FnOnce() -> T + Send + 'static,
+        then: impl FnOnce(&mut Daemon, Option<T>) + Send + 'static,
+    ) {
+        let job = Arc::new(Mutex::new(Some((work, then))));
+        let theirs = Arc::clone(&job);
+        let spawned = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                let (work, then) = theirs.lock().ok()?.take()?;
+                let result = catch_unwind(AssertUnwindSafe(work)).ok();
+                let finish: Finish = Box::new(move |daemon: &mut Daemon| then(daemon, result));
+                Some(finish)
+            });
+        match spawned {
+            Ok(thread) => self.jobs.push(thread),
+            Err(e) => {
+                tracing::error!(error = %e, "spawning a {name} thread failed; running it inline");
+                let taken = job.lock().ok().and_then(|mut job| job.take());
+                if let Some((work, then)) = taken {
+                    let result = catch_unwind(AssertUnwindSafe(work)).ok();
+                    then(self, result);
+                }
+            }
+        }
+    }
+
+    fn finish_job(&mut self, job: JoinHandle<Option<Finish>>) {
+        match job.join() {
+            Ok(Some(finish)) => finish(self),
+            _ => tracing::error!("a request's thread ended without a result"),
+        }
+    }
+
+    fn finish_jobs(&mut self) {
+        let (finished, running) = std::mem::take(&mut self.jobs)
+            .into_iter()
+            .partition::<Vec<_>, _>(|job| job.is_finished());
+        self.jobs.extend(running);
+        for job in finished {
+            self.finish_job(job);
+        }
+    }
+
+    /// Waits for every job, including those a finishing job starts; true when there was any.
+    fn drain_jobs(&mut self) -> bool {
+        let mut drained = false;
+        while !self.jobs.is_empty() {
+            drained = true;
+            for job in std::mem::take(&mut self.jobs) {
+                self.finish_job(job);
+            }
+        }
+        drained
+    }
+
+    /// The processes a stop of `ids` ends: their trees, process groups and tracked
+    /// descendants, with those of their running reapers and their leftovers.
+    fn capture(&mut self, ids: &[AgentId]) -> (Vec<u32>, Vec<u32>, Vec<Tracked>) {
         let mut trees = Vec::new();
         let mut groups = Vec::new();
         let mut tracked = Vec::new();
@@ -884,26 +979,92 @@ impl Daemon {
                 .extract_if(.., |(agent, _)| ids.contains(agent))
                 .map(|(_, tracked)| tracked),
         );
-        let unverified = reap::terminate(&trees, &groups, &tracked, grace);
+        (trees, groups, tracked)
+    }
+
+    /// Records a finished stop of `ids`: keeps what it could not verify and the groups that
+    /// still have members, and drops the terminals. What a snapshot found for them while
+    /// the stop ran is reaped too.
+    fn stopped(&mut self, ids: &[AgentId], unverified: Vec<Tracked>) {
         if let Some(&first) = ids.first() {
             self.keep_leftovers(first, unverified);
         }
         for id in ids {
-            if let Some(agent) = self.agents.get_mut(id) {
-                agent.group = agent.group.filter(|&leader| reap::group_exists(leader));
-                if agent.terminal.take().is_some() {
-                    agent.generation += 1;
-                }
+            let Some(agent) = self.agents.get_mut(id) else {
+                continue;
+            };
+            agent.group = agent.group.filter(|&leader| reap::group_exists(leader));
+            if agent.terminal.take().is_some() {
+                agent.generation += 1;
             }
+            let late = std::mem::take(&mut agent.tracked);
+            self.reap_off_loop(*id, Vec::new(), late);
         }
     }
 
+    /// Terminates the given agents' process trees, process groups and tracked
+    /// descendants on the event loop, then drops their terminals; only shutdown, which
+    /// ends the loop, stops this way. A snapshot still running is waited for only when it
+    /// covers an agent being stopped, so what it found is stopped too; its results for
+    /// other agents are applied, or reaped as orphans, when they arrive.
+    fn stop(&mut self, ids: &[AgentId], grace: Duration) {
+        self.finish_snapshot(Some(ids));
+        let (trees, groups, tracked) = self.capture(ids);
+        let unverified = reap::terminate(&trees, &groups, &tracked, grace);
+        self.stopped(ids, unverified);
+    }
+
+    /// Stops the agent off the event loop, as `stop` does, then runs `after` on the same
+    /// thread and `then` with its result on the loop. Until then the agent is busy `doing`.
+    fn begin_stop<T: Send + 'static>(
+        &mut self,
+        id: AgentId,
+        doing: &'static str,
+        after: impl FnOnce() -> T + Send + 'static,
+        then: impl FnOnce(&mut Daemon, Option<T>) + Send + 'static,
+    ) {
+        if let Some(agent) = self.agents.get_mut(&id) {
+            agent.busy = Some(doing);
+        }
+        let snapshot = self.snapshot_waiter(&[id]);
+        let (trees, groups, mut tracked) = self.capture(&[id]);
+        self.off_loop(
+            "stop",
+            move || {
+                if let Some(snapshot) = snapshot {
+                    tracked.extend(await_snapshot(&snapshot));
+                }
+                let unverified = reap::terminate(&trees, &groups, &tracked, STOP_GRACE);
+                (unverified, after())
+            },
+            move |daemon, done| {
+                let (unverified, value) = match done {
+                    Some((unverified, value)) => (unverified, Some(value)),
+                    None => {
+                        tracing::error!(agent = %id, "stopping the agent panicked");
+                        (Vec::new(), None)
+                    }
+                };
+                daemon.stopped(&[id], unverified);
+                if let Some(agent) = daemon.agents.get_mut(&id) {
+                    agent.busy = None;
+                }
+                then(daemon, value);
+            },
+        );
+    }
+
+    /// Stops every agent and finishes every job, without starting anything new; the event
+    /// loop ends after it.
     fn stop_all(&mut self) {
+        self.shutting_down = true;
         self.finish_snapshot(None);
-        let mut ids: Vec<AgentId> = self.agents.keys().copied().collect();
-        ids.extend(self.reapers.iter().map(|r| r.agent));
-        ids.extend(self.leftovers.iter().map(|(agent, _)| *agent));
+        let ids = self.stoppable();
         self.stop(&ids, SHUTDOWN_GRACE);
+        if self.drain_jobs() {
+            let ids = self.stoppable();
+            self.stop(&ids, SHUTDOWN_GRACE);
+        }
         if !self.leftovers.is_empty() {
             let pids: Vec<(u32, &str)> = self
                 .leftovers
@@ -917,6 +1078,13 @@ impl Daemon {
         }
     }
 
+    fn stoppable(&self) -> Vec<AgentId> {
+        let mut ids: Vec<AgentId> = self.agents.keys().copied().collect();
+        ids.extend(self.reapers.iter().map(|r| r.agent));
+        ids.extend(self.leftovers.iter().map(|(agent, _)| *agent));
+        ids
+    }
+
     /// Records processes a stop could not verify, so they are retried and never
     /// forgotten; a process already recorded is not recorded twice.
     fn keep_leftovers(&mut self, agent: AgentId, unverified: Vec<Tracked>) {
@@ -925,6 +1093,35 @@ impl Daemon {
                 self.leftovers.push((agent, tracked));
             }
         }
+    }
+
+    /// A receiver for what the running snapshot finds for `ids`, when it reads any of them.
+    fn snapshot_waiter(&mut self, ids: &[AgentId]) -> Option<Receiver<Vec<Tracked>>> {
+        let pending = self
+            .snapshot
+            .as_mut()
+            .filter(|pending| pending.agents.iter().any(|agent| ids.contains(agent)))?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        pending.waiters.push((ids.to_vec(), tx));
+        Some(rx)
+    }
+
+    /// Hands the stops waiting for the snapshot what it found for their agents, then
+    /// applies it.
+    fn snapshot_finished(
+        &mut self,
+        waiters: Vec<(Vec<AgentId>, Sender<Vec<Tracked>>)>,
+        results: Snapshot,
+    ) {
+        for (ids, tx) in waiters {
+            let found = results
+                .iter()
+                .filter(|(id, _, _)| ids.contains(id))
+                .flat_map(|(_, _, tracked)| tracked.iter().cloned())
+                .collect();
+            let _ = tx.send(found);
+        }
+        self.apply_snapshot(results);
     }
 
     /// Waits for the running snapshot and applies it, unless `covering` names only
@@ -943,7 +1140,7 @@ impl Daemon {
             SHUTDOWN_SNAPSHOT_WAIT
         };
         match pending.rx.recv_timeout(wait) {
-            Ok(results) => self.apply_snapshot(results),
+            Ok(results) => self.snapshot_finished(pending.waiters, results),
             Err(RecvTimeoutError::Timeout) if covering.is_some() => {
                 tracing::warn!(
                     "stopping before the running snapshot finished; its results are applied when it does"
@@ -959,103 +1156,173 @@ impl Daemon {
         }
     }
 
-    fn kill_agent(&mut self, id: AgentId) -> Result<AgentInfo, String> {
-        self.agent(id)?;
-        self.stop(&[id], STOP_GRACE);
-        let agent = self
-            .agents
-            .get_mut(&id)
-            .ok_or_else(|| format!("unknown agent {id}"))?;
-        agent.set_status(Status::Stopped);
-        agent.dirty = true;
-        self.announce(id);
-        self.info_of(id)
+    /// The agent, unless a stop or removal of it is running.
+    fn idle(&self, id: AgentId) -> Result<&Agent, String> {
+        let agent = self.agent(id)?;
+        match agent.busy {
+            Some(doing) => Err(format!(
+                "{} is {doing}; try again once that is done",
+                agent.record.name
+            )),
+            None => Ok(agent),
+        }
     }
 
-    fn restart_agent(&mut self, id: AgentId, size: PaneSize) -> Result<AgentInfo, String> {
-        let started = self.start(id, Launch::Resume, size);
-        self.persist();
-        self.announce(id);
-        started?;
-        self.info_of(id)
+    fn kill_agent(&mut self, client: ClientId, request_id: u64, id: AgentId) -> Reply {
+        if let Err(e) = self.idle(id) {
+            return now(Err(e));
+        }
+        self.begin_stop(
+            id,
+            "stopping",
+            || (),
+            move |daemon, _| {
+                if let Some(agent) = daemon.agents.get_mut(&id) {
+                    agent.set_status(Status::Stopped);
+                    agent.dirty = true;
+                }
+                daemon.announce(id);
+                let result = daemon.info_of(id).map(Response::Agent);
+                daemon.reply(client, request_id, result);
+            },
+        );
+        Reply::Deferred
     }
 
+    fn restart_agent(
+        &mut self,
+        client: ClientId,
+        request_id: u64,
+        id: AgentId,
+        size: PaneSize,
+    ) -> Reply {
+        if let Err(e) = self.idle(id) {
+            return now(Err(e));
+        }
+        self.begin_stop(
+            id,
+            "restarting",
+            || (),
+            move |daemon, _| {
+                let started = if daemon.shutting_down {
+                    if let Some(agent) = daemon.agents.get_mut(&id) {
+                        agent.set_status(Status::Stopped);
+                        agent.dirty = true;
+                    }
+                    Err("the daemon is shutting down".to_string())
+                } else {
+                    daemon.spawn_agent(id, Launch::Resume, size)
+                };
+                daemon.persist();
+                daemon.announce(id);
+                let result = started.and_then(|()| daemon.info_of(id).map(Response::Agent));
+                daemon.reply(client, request_id, result);
+            },
+        );
+        Reply::Deferred
+    }
+
+    /// Checks off the event loop that the removal may go ahead, then stops the agent and
+    /// removes its worktree and branch, also off the loop; the agent is busy throughout.
     fn remove_agent(
         &mut self,
+        client: ClientId,
+        request_id: u64,
         id: AgentId,
-        remove_worktree: bool,
-        force: bool,
-        delete_branch: bool,
-    ) -> Result<(), String> {
-        let agent = self.agent(id)?;
+        removal: Removal,
+    ) -> Reply {
+        let agent = match self.idle(id) {
+            Ok(agent) => agent,
+            Err(e) => return now(Err(e)),
+        };
         let branch = agent
             .record
             .worktree
             .as_ref()
-            .filter(|_| delete_branch)
+            .filter(|_| removal.delete_branch)
             .map(|w| (w.branch.clone(), w.base.clone()));
-        let removal = match agent.record.worktree.as_ref().filter(|_| remove_worktree) {
+        let worktree = match agent.record.worktree.as_ref().filter(|_| removal.worktree) {
             Some(worktree) => {
-                let project = self
+                let Some(project) = self
                     .projects
                     .iter()
                     .find(|p| p.id == agent.record.project)
                     .map(|p| p.path.clone())
-                    .ok_or_else(|| format!("unknown project {}", agent.record.project))?;
+                else {
+                    return now(Err(format!("unknown project {}", agent.record.project)));
+                };
                 Some((project, worktree.path.clone()))
             }
             None => None,
         };
-        if delete_branch {
-            let (Some((project, _)), Some((branch, base))) = (&removal, &branch) else {
-                return Err(
-                    "only a worktree agent removed with its worktree can lose its branch".into(),
-                );
-            };
-            if !git::is_merged(project, branch, base).map_err(|e| format!("{e:#}"))? {
-                return Err(format!(
-                    "{branch} is not merged into {base}; merge it first, or keep the branch"
-                ));
-            }
+        if removal.delete_branch && (worktree.is_none() || branch.is_none()) {
+            return now(Err(
+                "only a worktree agent removed with its worktree can lose its branch".into(),
+            ));
         }
-        if let Some((_, path)) = &removal
-            && !force
-        {
-            let dirty = git::dirty_files(path).map_err(|e| format!("{e:#}"))?;
-            if !dirty.is_empty() {
-                return Err(format!(
-                    "worktree has uncommitted changes:\n{}",
-                    dirty.join("\n")
-                ));
-            }
+        if let Some(agent) = self.agents.get_mut(&id) {
+            agent.busy = Some("being removed");
         }
-        self.stop(&[id], STOP_GRACE);
-        if let Some((project, path)) = &removal
-            && let Err(e) = git::remove_worktree(project, path, force)
-        {
-            if let Some(agent) = self.agents.get_mut(&id) {
-                agent.set_status(Status::Stopped);
-                agent.dirty = true;
-            }
-            self.announce(id);
-            return Err(format!("{e:#}"));
-        }
-        self.agents
-            .remove(&id)
-            .ok_or_else(|| format!("unknown agent {id}"))?;
-        let _ = std::fs::remove_file(self.paths.hook_settings(id));
-        for client in self.clients.values_mut() {
-            if client.subscription.as_ref().is_some_and(|s| s.agent == id) {
-                client.subscription = None;
-            }
-        }
-        self.persist();
-        self.broadcast(&ServerMessage::AgentRemoved(id));
-        if let (Some((project, _)), Some((branch, base))) = (&removal, &branch) {
-            git::delete_merged_branch(project, branch, base)
-                .map_err(|e| format!("removed the agent but kept {branch}: {e:#}"))?;
-        }
-        Ok(())
+        let (checked_worktree, checked_branch) = (worktree.clone(), branch.clone());
+        self.off_loop(
+            "git",
+            move || removable(checked_worktree, checked_branch, removal.force),
+            move |daemon, checked| match checked {
+                Some(Ok(())) => {
+                    daemon.finish_remove(client, request_id, id, worktree, branch, removal)
+                }
+                refused => {
+                    if let Some(agent) = daemon.agents.get_mut(&id) {
+                        agent.busy = None;
+                    }
+                    let message = match refused {
+                        Some(Err(e)) => e,
+                        _ => "checking whether the agent can be removed failed".into(),
+                    };
+                    daemon.reply(client, request_id, Err(message));
+                }
+            },
+        );
+        Reply::Deferred
+    }
+
+    fn finish_remove(
+        &mut self,
+        client: ClientId,
+        request_id: u64,
+        id: AgentId,
+        worktree: Option<(PathBuf, PathBuf)>,
+        branch: Option<(String, String)>,
+        removal: Removal,
+    ) {
+        self.begin_stop(
+            id,
+            "being removed",
+            move || remove_worktree_and_branch(worktree, branch, removal.force),
+            move |daemon, removed| {
+                let (worktree, branch) =
+                    removed.unwrap_or_else(|| (Err("removing the worktree failed".into()), Ok(())));
+                if let Err(e) = worktree {
+                    if let Some(agent) = daemon.agents.get_mut(&id) {
+                        agent.set_status(Status::Stopped);
+                        agent.dirty = true;
+                    }
+                    daemon.announce(id);
+                    daemon.reply(client, request_id, Err(e));
+                    return;
+                }
+                daemon.agents.remove(&id);
+                let _ = std::fs::remove_file(daemon.paths.hook_settings(id));
+                for c in daemon.clients.values_mut() {
+                    if c.subscription.as_ref().is_some_and(|s| s.agent == id) {
+                        c.subscription = None;
+                    }
+                }
+                daemon.persist();
+                daemon.broadcast(&ServerMessage::AgentRemoved(id));
+                daemon.reply(client, request_id, branch.map(|()| Response::Ok));
+            },
+        );
     }
 
     /// Merges on its own thread, like a git query, since the user's merge hooks may take
@@ -1299,8 +1566,9 @@ impl Daemon {
         if let Some(pending) = &self.snapshot {
             match pending.rx.try_recv() {
                 Ok(results) => {
-                    self.snapshot = None;
-                    self.apply_snapshot(results);
+                    if let Some(pending) = self.snapshot.take() {
+                        self.snapshot_finished(pending.waiters, results);
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => return,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.snapshot = None,
@@ -1344,6 +1612,7 @@ impl Daemon {
                 self.snapshot = Some(PendingSnapshot {
                     rx,
                     agents: requests.iter().map(|r| r.0).collect(),
+                    waiters: Vec::new(),
                 })
             }
             Err(e) => {
@@ -1434,6 +1703,7 @@ impl Daemon {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        self.finish_jobs();
         self.collect_reapers();
         self.retry_leftovers(now);
         self.refresh_tracked(now);
@@ -1511,6 +1781,136 @@ fn note_blocked_envrc(agent: &mut Agent) -> bool {
 /// Room left in a frame for everything in a diff response but the text.
 const RESPONSE_OVERHEAD: usize = 1024;
 
+/// What a `RemoveAgent` removes besides the agent.
+#[derive(Clone, Copy)]
+struct Removal {
+    worktree: bool,
+    force: bool,
+    delete_branch: bool,
+}
+
+/// Refuses a removal that would lose work: a branch its base does not contain, or, unless
+/// `force`, a worktree with changes.
+fn removable(
+    worktree: Option<(PathBuf, PathBuf)>,
+    branch: Option<(String, String)>,
+    force: bool,
+) -> Result<(), String> {
+    if let (Some((project, _)), Some((branch, base))) = (&worktree, &branch)
+        && !git::is_merged(project, branch, base).map_err(|e| format!("{e:#}"))?
+    {
+        return Err(format!(
+            "{branch} is not merged into {base}; merge it first, or keep the branch"
+        ));
+    }
+    if let Some((_, path)) = &worktree
+        && !force
+    {
+        let dirty = git::dirty_files(path).map_err(|e| format!("{e:#}"))?;
+        if !dirty.is_empty() {
+            return Err(format!(
+                "worktree has uncommitted changes:\n{}",
+                dirty.join("\n")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Removes the worktree, then the branch; the first result says whether the agent may go.
+fn remove_worktree_and_branch(
+    worktree: Option<(PathBuf, PathBuf)>,
+    branch: Option<(String, String)>,
+    force: bool,
+) -> (Result<(), String>, Result<(), String>) {
+    let Some((project, path)) = worktree else {
+        return (Ok(()), Ok(()));
+    };
+    if let Err(e) = git::remove_worktree(&project, &path, force) {
+        return (Err(format!("{e:#}")), Ok(()));
+    }
+    let branch = match branch {
+        Some((branch, base)) => git::delete_merged_branch(&project, &branch, &base)
+            .map_err(|e| format!("removed the agent but kept {branch}: {e:#}")),
+        None => Ok(()),
+    };
+    (Ok(()), branch)
+}
+
+/// What the running snapshot found for a stop's agents; nothing once `SNAPSHOT_WAIT`
+/// passed, and the snapshot's results are then applied, or reaped, when it finishes.
+fn await_snapshot(snapshot: &Receiver<Vec<Tracked>>) -> Vec<Tracked> {
+    match snapshot.recv_timeout(SNAPSHOT_WAIT) {
+        Ok(found) => found,
+        Err(RecvTimeoutError::Timeout) => {
+            tracing::warn!(
+                "stopping before the running snapshot finished; its results are applied when it does"
+            );
+            Vec::new()
+        }
+        Err(RecvTimeoutError::Disconnected) => Vec::new(),
+    }
+}
+
+/// Makes a new agent's worktree, copies the `.worktreeinclude` files into it and allows its
+/// `.envrc` when direnv allows the project's identical one.
+fn prepare_worktree(
+    state: &Path,
+    project: &Project,
+    name: &str,
+    request: WorktreeRequest,
+    direnv: Option<&Path>,
+) -> Result<WorktreeInfo, String> {
+    let worktree = add_worktree(state, project, name, request)?;
+    match git::copy_worktree_includes(&project.path, &worktree.path) {
+        Ok(copied) if !copied.is_empty() => {
+            tracing::info!(files = ?copied, "copied .worktreeinclude files")
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "copying .worktreeinclude files failed")
+        }
+    }
+    if let Some(direnv) = direnv {
+        match direnv::auto_allow(direnv, &project.path, &worktree.path, &[]) {
+            Ok(true) => {
+                tracing::info!(path = %worktree.path.display(), "allowed the worktree's .envrc")
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "checking the worktree's .envrc failed"),
+        }
+    }
+    Ok(worktree)
+}
+
+fn add_worktree(
+    state: &Path,
+    project: &Project,
+    name: &str,
+    request: WorktreeRequest,
+) -> Result<WorktreeInfo, String> {
+    let branch = format!("lazyagents/{name}");
+    git::check_branch(&branch).map_err(|e| format!("{e:#}"))?;
+    let base = match request.base.filter(|b| !b.trim().is_empty()) {
+        Some(base) => base.trim().to_string(),
+        None => match git::current_branch(&project.path).map_err(|e| format!("{e:#}"))? {
+            detached if detached == "HEAD" => {
+                git::head_commit(&project.path).map_err(|e| format!("{e:#}"))?
+            }
+            branch => branch,
+        },
+    };
+    let state = state
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", state.display()))?;
+    let id = project.id.to_string();
+    let path = state
+        .join("worktrees")
+        .join(format!("{}-{}", project.name.replace('/', "-"), &id[..8]))
+        .join(name);
+    git::add_worktree(&project.path, &path, &branch, &base).map_err(|e| format!("{e:#}"))?;
+    Ok(WorktreeInfo { path, branch, base })
+}
 fn inherits_direnv_env(direnv: &Path) -> bool {
     match direnv::inherited_env(direnv) {
         Ok(inherited) => {
@@ -1669,6 +2069,19 @@ mod tests {
         )
     }
 
+    /// Handles the request and ticks until its job, if any, has finished.
+    fn request(daemon: &mut Daemon, request: Request) {
+        if let Reply::Now(result) = daemon.handle_request(0, 0, request) {
+            result.expect("request");
+        }
+        let deadline = Instant::now() + WAIT;
+        while !daemon.jobs.is_empty() {
+            assert!(Instant::now() < deadline, "the request never finished");
+            std::thread::sleep(Duration::from_millis(10));
+            daemon.tick();
+        }
+    }
+
     fn add_agent(daemon: &mut Daemon, status: Status) -> AgentId {
         let mut agent = claude_agent();
         agent.status = status;
@@ -1687,12 +2100,13 @@ mod tests {
         daemon.snapshot = Some(PendingSnapshot {
             rx,
             agents: vec![id],
+            waiters: Vec::new(),
         });
         let late = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
             let _ = tx.send(vec![(id, 0, vec![tracked])]);
         });
-        daemon.kill_agent(id).expect("kill");
+        request(&mut daemon, Request::KillAgent { id });
         late.join().expect("snapshot thread");
         assert!(child.exited(), "kill answered while the child still ran");
     }
@@ -1715,6 +2129,7 @@ mod tests {
         daemon.snapshot = Some(PendingSnapshot {
             rx,
             agents: vec![a],
+            waiters: Vec::new(),
         });
         let started = Instant::now();
         daemon.stop(&[b], STOP_GRACE);
@@ -1736,6 +2151,7 @@ mod tests {
         daemon.snapshot = Some(PendingSnapshot {
             rx,
             agents: vec![a],
+            waiters: Vec::new(),
         });
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
@@ -1755,12 +2171,13 @@ mod tests {
         daemon.snapshot = Some(PendingSnapshot {
             rx,
             agents: vec![a],
+            waiters: Vec::new(),
         });
         let late = std::thread::spawn(move || {
             std::thread::sleep(SNAPSHOT_WAIT + Duration::from_millis(500));
             let _ = tx.send(vec![(a, 0, vec![tracked])]);
         });
-        daemon.kill_agent(a).expect("kill");
+        request(&mut daemon, Request::KillAgent { id: a });
         assert!(
             daemon.snapshot.is_some(),
             "the slow snapshot must stay pending"
@@ -1779,6 +2196,7 @@ mod tests {
         daemon.snapshot = Some(PendingSnapshot {
             rx,
             agents: vec![a],
+            waiters: Vec::new(),
         });
         let late = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(3));
@@ -1802,6 +2220,7 @@ mod tests {
         daemon.snapshot = Some(PendingSnapshot {
             rx,
             agents: vec![removed],
+            waiters: Vec::new(),
         });
         let late = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));

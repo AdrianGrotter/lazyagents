@@ -74,7 +74,7 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   substitute a slow `ps`; release builds ignore it.
 - **Tracking agent processes.** Each agent leads its own session and process group.
   About once a second the daemon reads the process table (`ps -A -o pid=,ppid=,lstart=`)
-  on a separate thread, so `ps` never blocks the event loop, and records every
+  on a separate thread and records every
   descendant of each running agent with its start time. Each reading is merged with the
   agent's earlier list: entries still running with the same start time stay, even after
   they left the agent's tree (reparented to init or moved to a new session, as Claude's
@@ -104,9 +104,10 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   takes longer than the wait stays running too; either way its results are applied, or
   the descendants it reports for stopped agents are stopped as orphans, when it
   finishes. Shutdown waits up to 10 s for any running snapshot and logs an error if it
-  is still running then, because the processes it would report cannot be checked. The
-  request is answered only once this is done, and a restart spawns the new process only
-  afterwards.
+  is still running then, because the processes it would report cannot be checked. A
+  kill, remove or restart runs this pass, snapshot wait included, on a thread of its own
+  and is answered only once it is done; a restart spawns the new process only afterwards.
+  Shutdown runs it on the event loop, which ends with it.
 - **An agent that exits on its own.** When the agent's process exits, the daemon runs
   the same pass over its process group and tracked descendants, so background jobs it
   left behind go too. Descendants that a snapshot reports after its agent exited, was
@@ -124,11 +125,42 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   snapshot interval plus one `ps` run, since readings run one after another, and it
   grows when `ps` is slow under load.
 - **Shutdown.** A `Shutdown` request, SIGTERM and SIGINT all take the same path:
-  stop every agent as above, then remove the socket and release the lock.
+  stop every agent as above, finish the requests still in flight (see below), then
+  remove the socket and release the lock.
 - **Unreachable daemon.** About once a second the daemon checks that `daemon.sock` is
   still the socket it bound; if it was deleted or replaced, it shuts down.
-- **Idle exit.** With no client connected and no agent running for
+- **Idle exit.** With no client connected, no agent running and no request in flight for
   `LAZYAGENTS_IDLE_EXIT_SECS` seconds (default 600; 0 disables it), it shuts down.
+
+### Nothing slow runs on the event loop
+
+One event loop serves every client: it takes requests and hooks, feeds agent output to the
+terminals and sends frames. Anything that can take long runs on a thread of its own and
+answers the request when it finishes: `ps` readings, stops with their grace period, git
+commands (worktree add with the user's checkout hooks, `.worktreeinclude` copies, status
+checks, worktree removal, merges, stats and diffs) and direnv calls. A new connection gets
+its `Welcome` from its own task before the loop sees it, so a client is greeted at once and
+a hook never waits behind other work. Shutdown is the one exception: it runs on the loop,
+which ends with it.
+
+While such work is in flight the daemon keeps its state consistent (ADR 0018):
+
+- **Kill, restart and remove** mark the agent busy until they are answered. Another kill,
+  restart or remove of it is refused with `<name> is stopping; try again once that is
+  done` (`restarting` or `being removed` in place of `stopping`). Everything else (input, resize, scroll,
+  subscribe, hooks, usage, rename, merge, git queries) is served meanwhile against the
+  agent as it is; a removal's checks (merged branch, uncommitted changes) run on its thread
+  before the stop, and a refusal leaves the agent as it was.
+- **A worktree create** reserves its name in the project until it is answered: a create of
+  the same name, or a rename to it, is refused with `an agent named <name> is being created
+  in this project`, and the project cannot be removed meanwhile. The agent appears, and
+  starts, only once its worktree is ready. A create without a worktree is answered at once.
+- **Shutdown** first stops every agent, then waits for every request in flight and
+  finishes it without starting anything: a kill answers as usual, a restart leaves its
+  agent `Stopped` and answers `the daemon is shutting down`, a removal completes, and a
+  worktree made for an agent that never started is removed with its branch, the create
+  answered `the daemon shut down before <name> started; its worktree was removed`.
+  Processes found meanwhile get a second pass.
 
 ### The daemon is the terminal
 
