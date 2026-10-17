@@ -3,7 +3,7 @@
 Status: implemented in crates/tui (app.rs, keymap.rs, keys.rs, config.rs).
 
 The keys below are the defaults. Every sidebar key, the pane prefix, the keys after it and
-the direct-leave keys can be changed in `config.toml` (`[keys.sidebar]` and `[keys.pane]`);
+the direct pane keys can be changed in `config.toml` (`[keys.sidebar]` and `[keys.pane]`);
 the help popup, the status bar hints and the messages name the configured keys. Popup keys
 and the keys inside the diff view and scroll mode are fixed; there only the configured quit
 keys and, in the diff view, the configured diff key follow the config. The format is in
@@ -117,6 +117,10 @@ paste still reaches the agent.
 `ctrl-]` is an alias that goes straight back to the sidebar; legacy terminals report it as
 `ctrl-5`, which works too. `alt-[` and `alt-]` are not bound: they reach the agent like
 any other key.
+
+Switching agents without the prefix is opt-in: `direct_next` and `direct_previous` in
+`[keys.pane]` bind keys that switch in one chord, staying in the pane (none by default;
+see [configuration.md](configuration.md#keyspane)). Those keys no longer reach the agent.
 
 The mouse works in the pane too; see **Mouse** below.
 

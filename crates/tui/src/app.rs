@@ -1294,11 +1294,15 @@ impl App {
             self.prefix_pending = true;
             return Vec::new();
         }
-        if self.keymap.is_direct_leave(&key) {
-            self.leave_pane();
-            return Vec::new();
+        match self.keymap.direct(&key) {
+            Some(Action::PaneNext) => self.cycle_in_pane(1),
+            Some(Action::PanePrevious) => self.cycle_in_pane(-1),
+            Some(_) => {
+                self.leave_pane();
+                Vec::new()
+            }
+            None => self.input(id, &key),
         }
-        self.input(id, &key)
     }
 
     fn input(&self, id: AgentId, key: &KeyEvent) -> Vec<Effect> {
@@ -2490,6 +2494,43 @@ pub(crate) mod tests {
             assert!(app.on_key(leave).is_empty(), "{leave:?}");
             assert_eq!(app.focus, Focus::Agents, "{leave:?}");
         }
+    }
+
+    #[test]
+    fn ctrl_j_and_ctrl_k_reach_the_agent_by_default() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        for c in ['j', 'k'] {
+            assert_eq!(
+                app.on_key(ctrl(c)),
+                vec![char_input(a.id, c, protocol::Modifiers::CTRL)]
+            );
+            assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        }
+    }
+
+    #[test]
+    fn direct_next_and_previous_switch_and_stay_in_the_pane() {
+        let config = configured(
+            r#"
+            [keys.pane]
+            direct_next = "ctrl-j"
+            direct_previous = "ctrl-k"
+            "#,
+        );
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Idle);
+        let (mut app, _) = loaded_with(config, vec![p], vec![a.clone(), b.clone()]);
+        let _ = app.on_key(code(KeyCode::Enter));
+        let effects = app.on_key(ctrl('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: b.id })]);
+        let effects = app.on_key(ctrl('k'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: a.id })]);
     }
 
     #[test]

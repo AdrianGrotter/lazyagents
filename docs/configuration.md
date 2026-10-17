@@ -34,8 +34,10 @@ full list:
 - a `prefix` that is not exactly one key (`keys.pane.prefix: expected one key`);
 - a key bound to two actions in one scope (`keys.sidebar: d is bound to both remove and
   stop; stop wins`); the later binding wins and the other action loses that key;
-- `keys.pane.direct_leave` containing the prefix (`keys.pane.direct_leave: ctrl-q is the
-  prefix`); the prefix is dropped from it;
+- a key bound to two direct actions (`keys.pane: ctrl-] is bound to both direct_leave and
+  direct_next; direct_next wins`), like any other pane key;
+- `direct_leave`, `direct_next` or `direct_previous` containing the prefix
+  (`keys.pane.direct_leave: ctrl-q is the prefix`); the prefix is dropped from it;
 - no way left to leave the pane (`keys.pane: no way to leave the pane; leave restored to
   q/esc`); `leave` gets its defaults back;
 - a preset that is not a table (`preset #2: expected a table`), has an unknown setting
@@ -93,7 +95,8 @@ SHIFT; with `ctrl` or `alt`, SHIFT counts, so `ctrl-Q` is not `ctrl-q`.
 ### `[keys.pane]`
 
 While the pane has focus every key goes to the agent except the prefix and the direct
-leave keys. The prefix is followed by one more key that picks an action.
+keys. The prefix is followed by one more key that picks an action; a direct key acts on
+its own.
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -104,9 +107,22 @@ leave keys. The prefix is followed by one more key that picks an action.
 | `scroll` | `s` | scroll mode |
 | `send_prefix` | the prefix | send one prefix key to the agent |
 | `direct_leave` | `ctrl-]`, `ctrl-5` | leave without the prefix |
+| `direct_next` | none | next agent without the prefix, staying in the pane |
+| `direct_previous` | none | previous agent without the prefix, staying in the pane |
 
 Setting `prefix` also makes pressing it twice send it to the agent, unless `send_prefix`
-is set too. `direct_leave` may not contain the prefix.
+is set too. The direct keys may not contain the prefix.
+
+A direct key never reaches the agent. `direct_next` and `direct_previous` are unbound by
+default because the obvious choices are keys agents use: Claude Code inserts a newline on
+`ctrl-j` and deletes to the end of the line on `ctrl-k`, and shells bind both. To switch
+agents with one chord anyway:
+
+```toml
+[keys.pane]
+direct_next = "ctrl-j"
+direct_previous = "ctrl-k"
+```
 
 `alt-[` and `alt-]` are not bound by default, so they reach the agent
 ([ADR 0007](decisions/0007-ctrl-q-pane-prefix.md)).

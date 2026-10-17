@@ -207,7 +207,7 @@ pub struct Keymap {
     sidebar: Vec<(KeySpec, Action)>,
     prefix: KeySpec,
     pane: Vec<(KeySpec, Action)>,
-    leave: Vec<KeySpec>,
+    direct: Vec<(KeySpec, Action)>,
 }
 
 impl Default for Keymap {
@@ -269,7 +269,7 @@ impl Keymap {
                 ("s", PaneScroll),
                 ("ctrl-q", PaneSendPrefix),
             ]),
-            leave: vec![key("ctrl-]"), key("ctrl-5")],
+            direct: bindings(&[("ctrl-]", PaneLeave), ("ctrl-5", PaneLeave)]),
         }
     }
 
@@ -289,12 +289,13 @@ impl Keymap {
         lookup(&self.pane, key)
     }
 
-    pub fn is_direct_leave(&self, key: &KeyEvent) -> bool {
-        self.leave.iter().any(|spec| spec.matches(key))
+    /// The pane action `key` triggers without the prefix.
+    pub fn direct(&self, key: &KeyEvent) -> Option<Action> {
+        lookup(&self.direct, key)
     }
 
-    pub fn direct_leave(&self) -> &[KeySpec] {
-        &self.leave
+    pub fn direct_keys(&self, action: Action) -> Vec<KeySpec> {
+        keys_for(&self.direct, action)
     }
 
     /// The keys bound to `action`, in binding order; for pane actions, the keys that
@@ -305,11 +306,7 @@ impl Keymap {
         } else {
             &self.sidebar
         };
-        table
-            .iter()
-            .filter(|(_, a)| *a == action)
-            .map(|(spec, _)| *spec)
-            .collect()
+        keys_for(table, action)
     }
 
     /// All keys bound to `action`, joined with `/`; pane actions start with the prefix.
@@ -333,8 +330,14 @@ impl Keymap {
         self.prefix = key;
     }
 
-    pub fn set_direct_leave(&mut self, keys: Vec<KeySpec>) {
-        self.leave = keys;
+    pub fn rebind_direct(&mut self, bindings: Vec<(Action, Vec<KeySpec>)>) -> Vec<Rebound> {
+        rebind(&mut self.direct, bindings)
+    }
+
+    /// Removes `key` from the direct keys, returning the action it was bound to.
+    pub fn unbind_direct(&mut self, key: KeySpec) -> Option<Action> {
+        let index = self.direct.iter().position(|(spec, _)| *spec == key)?;
+        Some(self.direct.remove(index).1)
     }
 
     pub fn rebind_sidebar(&mut self, bindings: Vec<(Action, Vec<KeySpec>)>) -> Vec<Rebound> {
@@ -383,6 +386,14 @@ fn rebind(
         }
     }
     rebound
+}
+
+fn keys_for(table: &[(KeySpec, Action)], action: Action) -> Vec<KeySpec> {
+    table
+        .iter()
+        .filter(|(_, a)| *a == action)
+        .map(|(spec, _)| *spec)
+        .collect()
 }
 
 fn lookup(table: &[(KeySpec, Action)], key: &KeyEvent) -> Option<Action> {
@@ -637,9 +648,16 @@ mod tests {
     #[test]
     fn ctrl_bracket_and_legacy_ctrl_5_leave_directly() {
         let keymap = Keymap::defaults();
-        assert!(keymap.is_direct_leave(&ev(KeyCode::Char(']'), KeyModifiers::CONTROL)));
-        assert!(keymap.is_direct_leave(&ev(KeyCode::Char('5'), KeyModifiers::CONTROL)));
-        assert!(!keymap.is_direct_leave(&ev(KeyCode::Char(']'), KeyModifiers::NONE)));
+        for c in [']', '5'] {
+            assert_eq!(
+                keymap.direct(&ev(KeyCode::Char(c), KeyModifiers::CONTROL)),
+                Some(Action::PaneLeave)
+            );
+        }
+        assert_eq!(
+            keymap.direct(&ev(KeyCode::Char(']'), KeyModifiers::NONE)),
+            None
+        );
     }
 
     #[test]
@@ -648,7 +666,7 @@ mod tests {
         for c in ['[', ']'] {
             let event = ev(KeyCode::Char(c), KeyModifiers::ALT);
             assert!(!keymap.is_prefix(&event));
-            assert!(!keymap.is_direct_leave(&event));
+            assert_eq!(keymap.direct(&event), None);
             assert_eq!(keymap.sidebar(&event), None);
             assert_eq!(keymap.after_prefix(&event), None);
         }

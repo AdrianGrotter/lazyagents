@@ -70,6 +70,12 @@ const PANE_ACTIONS: [(&str, Action); 5] = [
     ("send_prefix", Action::PaneSendPrefix),
 ];
 
+const DIRECT_ACTIONS: [(&str, Action); 3] = [
+    ("direct_next", Action::PaneNext),
+    ("direct_previous", Action::PanePrevious),
+    ("direct_leave", Action::PaneLeave),
+];
+
 pub fn default_path() -> Option<PathBuf> {
     default_path_from(
         std::env::var_os("LAZYAGENTS_CONFIG"),
@@ -145,7 +151,15 @@ fn unknown(path: &str, value: &Value) -> String {
 }
 
 fn pane_action_name(action: Action) -> String {
-    PANE_ACTIONS
+    action_name(&PANE_ACTIONS, action)
+}
+
+fn direct_action_name(action: Action) -> String {
+    action_name(&DIRECT_ACTIONS, action)
+}
+
+fn action_name(names: &[(&str, Action)], action: Action) -> String {
+    names
         .iter()
         .find(|(_, a)| *a == action)
         .map_or_else(String::new, |(n, _)| n.to_string())
@@ -196,30 +210,31 @@ impl Config {
 
     fn apply_pane_keys(&mut self, table: Table) {
         let mut bindings = Vec::new();
+        let mut direct = Vec::new();
         let mut prefix = None;
         for (name, value) in table {
             let path = format!("keys.pane.{name}");
             let keys = |config: &mut Config| config.key_list(&path, &value);
-            match name.as_str() {
-                "prefix" => match keys(self).as_deref() {
+            if name == "prefix" {
+                match keys(self).as_deref() {
                     Some([key]) => prefix = Some(*key),
                     Some(_) => self.warn(format!("{path}: expected one key")),
                     None => {}
-                },
-                "direct_leave" => {
-                    if let Some(keys) = keys(self) {
-                        self.keymap.set_direct_leave(keys);
-                    }
                 }
-                _ => match PANE_ACTIONS.iter().find(|(n, _)| *n == name) {
-                    Some((_, action)) => {
-                        if let Some(keys) = keys(self) {
-                            bindings.push((*action, keys));
-                        }
-                    }
-                    None => self.warn(format!("unknown action {path}")),
-                },
+            } else if let Some((_, action)) = DIRECT_ACTIONS.iter().find(|(n, _)| *n == name) {
+                if let Some(keys) = keys(self) {
+                    direct.push((*action, keys));
+                }
+            } else if let Some((_, action)) = PANE_ACTIONS.iter().find(|(n, _)| *n == name) {
+                if let Some(keys) = keys(self) {
+                    bindings.push((*action, keys));
+                }
+            } else {
+                self.warn(format!("unknown action {path}"));
             }
+        }
+        for rebound in self.keymap.rebind_direct(direct) {
+            self.warn_rebound("keys.pane", rebound, direct_action_name);
         }
         if let Some(prefix) = prefix {
             self.keymap.set_prefix(prefix);
@@ -231,13 +246,13 @@ impl Config {
             self.warn_rebound("keys.pane", rebound, pane_action_name);
         }
         let prefix = self.keymap.prefix();
-        let mut leave = self.keymap.direct_leave().to_vec();
-        if leave.contains(&prefix) {
-            leave.retain(|key| *key != prefix);
-            self.keymap.set_direct_leave(leave);
-            self.warn(format!("keys.pane.direct_leave: {prefix} is the prefix"));
+        if let Some(action) = self.keymap.unbind_direct(prefix) {
+            let name = direct_action_name(action);
+            self.warn(format!("keys.pane.{name}: {prefix} is the prefix"));
         }
-        if self.keymap.keys(Action::PaneLeave).is_empty() && self.keymap.direct_leave().is_empty() {
+        if self.keymap.keys(Action::PaneLeave).is_empty()
+            && self.keymap.direct_keys(Action::PaneLeave).is_empty()
+        {
             let defaults = Keymap::defaults().keys(Action::PaneLeave);
             self.warn(format!(
                 "keys.pane: no way to leave the pane; leave restored to {}",
@@ -441,8 +456,57 @@ mod tests {
             keymap.after_prefix(&ctrl('a')),
             Some(Action::PaneSendPrefix)
         );
-        assert!(!keymap.is_direct_leave(&ctrl(']')));
-        assert!(!keymap.is_direct_leave(&ctrl('5')));
+        assert_eq!(keymap.direct(&ctrl(']')), None);
+        assert_eq!(keymap.direct(&ctrl('5')), None);
+    }
+
+    #[test]
+    fn direct_next_and_previous_are_unbound_by_default() {
+        let keymap = Keymap::defaults();
+        assert!(keymap.direct_keys(Action::PaneNext).is_empty());
+        assert!(keymap.direct_keys(Action::PanePrevious).is_empty());
+        assert_eq!(keymap.direct(&ctrl('j')), None);
+        assert_eq!(keymap.direct(&ctrl('k')), None);
+    }
+
+    #[test]
+    fn direct_next_and_previous_bind_keys_without_the_prefix() {
+        let config = load_text(
+            r#"
+            [keys.pane]
+            direct_next = "ctrl-j"
+            direct_previous = ["ctrl-k", "ctrl-q"]
+            "#,
+        );
+        let keymap = &config.keymap;
+        assert_eq!(keymap.direct(&ctrl('j')), Some(Action::PaneNext));
+        assert_eq!(keymap.direct(&ctrl('k')), Some(Action::PanePrevious));
+        assert_eq!(keymap.direct(&ctrl('q')), None);
+        assert_eq!(keymap.direct(&ctrl(']')), Some(Action::PaneLeave));
+        assert_eq!(
+            config.warnings,
+            vec!["keys.pane.direct_previous: ctrl-q is the prefix".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_direct_key_moves_between_direct_actions_with_a_warning() {
+        let config = load_text(
+            r#"
+            [keys.pane]
+            direct_next = "ctrl-]"
+            "#,
+        );
+        let keymap = &config.keymap;
+        assert_eq!(keymap.direct(&ctrl(']')), Some(Action::PaneNext));
+        assert_eq!(keymap.direct(&ctrl('5')), Some(Action::PaneLeave));
+        assert_eq!(
+            config.warnings,
+            vec![
+                "keys.pane: ctrl-] is bound to both direct_leave and direct_next; direct_next wins"
+                    .to_string()
+            ]
+        );
     }
 
     #[test]
@@ -464,7 +528,7 @@ mod tests {
             keymap.after_prefix(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Some(Action::PaneLeave)
         );
-        assert!(keymap.direct_leave().is_empty());
+        assert!(keymap.direct_keys(Action::PaneLeave).is_empty());
     }
 
     #[test]
@@ -512,8 +576,8 @@ mod tests {
             config.warnings
         );
         assert!(keymap.is_prefix(&ctrl('q')));
-        assert!(!keymap.is_direct_leave(&ctrl('q')));
-        assert!(keymap.is_direct_leave(&ctrl(']')));
+        assert_eq!(keymap.direct(&ctrl('q')), None);
+        assert_eq!(keymap.direct(&ctrl(']')), Some(Action::PaneLeave));
         assert!(
             warned(&config, "keys.pane.direct_leave: ctrl-q is the prefix"),
             "{:?}",

@@ -702,22 +702,19 @@ fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
         .iter()
         .map(|(action, text)| (keymap.describe(*action), text.to_string()))
         .collect();
-    let mut pane = vec![(
-        keymap.describe(Action::PaneLeave),
-        "back to the sidebar".to_string(),
-    )];
-    if !keymap.direct_leave().is_empty() {
-        pane.push((
-            crate::keymap::join(keymap.direct_leave()),
-            "back to the sidebar".to_string(),
-        ));
+    let mut pane = Vec::new();
+    for (action, text) in [
+        (Action::PaneLeave, "back to the sidebar"),
+        (Action::PaneNext, "next agent"),
+        (Action::PanePrevious, "previous agent"),
+    ] {
+        pane.push((keymap.describe(action), text.to_string()));
+        let direct = keymap.direct_keys(action);
+        if !direct.is_empty() {
+            pane.push((crate::keymap::join(&direct), text.to_string()));
+        }
     }
     pane.extend([
-        (keymap.describe(Action::PaneNext), "next agent".to_string()),
-        (
-            keymap.describe(Action::PanePrevious),
-            "previous agent".to_string(),
-        ),
         (
             keymap.describe(Action::PaneScroll),
             "scroll the agent's history".to_string(),
@@ -1345,17 +1342,21 @@ mod tests {
             [keys.pane]
             prefix = "ctrl-a"
             leave = ["x"]
+            direct_next = "ctrl-j"
+            direct_previous = "ctrl-k"
             "#,
         );
         let p = project("p");
         let (mut app, _) = loaded_with(config, vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
         app.popup = Some(Popup::Help);
-        let (text, _) = render(&app);
+        let (text, _) = render_at(&app, 100, 40);
         for (key, action) in [
             ("N/ctrl-n", "new agent"),
             ("ctrl-x", "quit (agents keep running)"),
             ("ctrl-a x", "back to the sidebar"),
             ("ctrl-a j", "next agent"),
+            ("ctrl-j", "next agent"),
+            ("ctrl-k", "previous agent"),
             ("ctrl-a ctrl-a", "send ctrl-a to the agent"),
         ] {
             assert!(
