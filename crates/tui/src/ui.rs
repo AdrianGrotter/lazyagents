@@ -31,7 +31,8 @@ const INPUT_HINT: &str = "enter ok · esc cancel";
 const REPLY_HINT: &str = "enter send · esc cancel";
 const COMMENT_HINT: &str = "enter save (empty removes) · esc cancel";
 const SETUP_HINT: &str = "y run it and remember · s skip it this time · n cancel";
-const SETUP_SCROLL_HINT: &str = "j/k scroll to the end to approve · n cancel";
+const SETUP_SCROLL_HINT: &str = "j/k scroll to the end to approve · s skip it · n cancel";
+const SETUP_TOO_SMALL: &str = "The terminal is too small to show the script · s skip it · n cancel";
 const CHOICE_HINT: &str = "j/k move · enter pick · esc cancel";
 const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
 const PROJECT_FORM_HINT: &str = "tab field · enter add · esc cancel";
@@ -963,6 +964,8 @@ struct SetupView {
     /// How many of `body`'s rows fit between the header and the footer.
     rows: usize,
     hint_width: usize,
+    /// Whether the screen has room for the heading, one script row and the hint.
+    fits: bool,
 }
 
 const SETUP_INDENT: usize = 2;
@@ -987,15 +990,15 @@ impl SetupView {
             .len()
             .max(wrap(SETUP_SCROLL_HINT, inner).len());
         let fixed = 2 + header.len() + 1 + 1 + hint_rows;
-        let rows = body
-            .len()
-            .min(usize::from(screen.1).saturating_sub(fixed).max(1));
+        let room = usize::from(screen.1).saturating_sub(fixed);
+        let rows = body.len().min(room.max(1));
         SetupView {
             width: width as u16,
             header,
             body,
             rows,
             hint_width: inner,
+            fits: room >= 1 && inner > SETUP_INDENT,
         }
     }
 
@@ -1004,6 +1007,12 @@ impl SetupView {
     }
 
     fn lines(&self, scroll: usize, theme: &Theme) -> Vec<Line<'static>> {
+        if !self.fits {
+            return wrap(SETUP_TOO_SMALL, self.hint_width.max(1))
+                .into_iter()
+                .map(|l| Line::from(l).fg(theme.dim))
+                .collect();
+        }
         let scroll = scroll.min(self.max_scroll());
         let mut lines: Vec<Line> = self.header.iter().cloned().map(Line::from).collect();
         lines.push(Line::default());
@@ -1035,15 +1044,15 @@ impl SetupView {
 }
 
 /// How far the setup script can scroll and how many rows a page moves, in the popup
-/// `Popup::ApproveSetup` draws on `screen`.
+/// `Popup::ApproveSetup` draws on `screen`; `None` when the screen is too small to show it.
 pub fn setup_scroll_limits(
     app: &App,
     project: &Path,
     script: &str,
     screen: (u16, u16),
-) -> (usize, usize) {
+) -> Option<(usize, usize)> {
     let view = SetupView::new(&setup_heading(app, project), script, screen);
-    (view.max_scroll(), view.rows)
+    view.fits.then(|| (view.max_scroll(), view.rows))
 }
 
 fn setup_heading(app: &App, project: &Path) -> String {
@@ -1054,16 +1063,24 @@ fn setup_heading(app: &App, project: &Path) -> String {
     )
 }
 
-/// Control characters and invisible direction marks as escapes, so the script cannot
-/// repaint the screen or reorder what is shown.
+/// Characters that draw nothing or reorder what is drawn around them.
+fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}'..='\u{1160}' | '\u{17b4}'..='\u{17b5}'
+        | '\u{180b}'..='\u{180f}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+        | '\u{2060}'..='\u{206f}' | '\u{2800}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}'
+        | '\u{feff}' | '\u{ffa0}' | '\u{fff9}'..='\u{fffb}' | '\u{e0000}'..='\u{e0fff}')
+}
+
+/// Shows control and invisible characters as escapes and a backslash as `\\`, so the
+/// script cannot repaint the screen, hide text or pass an escape for plain text.
 fn escaped(line: &str) -> String {
     line.chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
-                c.escape_default().to_string()
-            } else {
-                c.to_string()
-            }
+        .map(|c| match c {
+            '\\' => "\\\\".to_string(),
+            c if c.is_control() => c.escape_default().to_string(),
+            c if is_invisible(c) => c.escape_unicode().to_string(),
+            c => c.to_string(),
         })
         .collect()
 }
@@ -1921,6 +1938,62 @@ mod tests {
             );
             assert!(text.contains("y run it and remember"), "{text}");
         }
+    }
+
+    #[test]
+    fn invisible_characters_in_a_setup_script_are_shown_escaped() {
+        let invisible = [
+            '\u{ad}',
+            '\u{61c}',
+            '\u{180e}',
+            '\u{200b}',
+            '\u{202e}',
+            '\u{2060}',
+            '\u{2064}',
+            '\u{2066}',
+            '\u{206f}',
+            '\u{feff}',
+            '\u{fe0f}',
+            '\u{e0100}',
+            '\u{e01ef}',
+            '\u{e0001}',
+            '\u{e007f}',
+        ];
+        let script: String = invisible.iter().flat_map(|c| ['x', *c]).collect();
+        let app = asking_to_run(&script, 0);
+        let (text, _) = render_at(&app, 120, 20);
+        for c in invisible {
+            assert!(!text.contains(c), "{c:?} reached the screen\n{text}");
+            assert!(
+                text.contains(&c.escape_unicode().to_string()),
+                "{c:?}\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backslash_in_a_setup_script_is_doubled_so_it_differs_from_an_escape() {
+        let app = asking_to_run(r"echo \r \\ \u{1b}", 0);
+        let (text, _) = render_at(&app, 80, 20);
+        assert!(text.contains(r"echo \\r \\\\ \\u{1b}"), "{text}");
+    }
+
+    #[test]
+    fn a_screen_too_small_for_the_setup_script_says_so_instead_of_showing_part_of_it() {
+        let mut app = asking_to_run("npm install", 0);
+        if let Some(Popup::ApproveSetup { project, .. }) = &mut app.popup {
+            *project = format!("/w/{}", "deep/".repeat(60)).into();
+        }
+        let (text, _) = render_at(&app, 60, 12);
+        assert!(text.contains("too small to show the script"), "{text}");
+        assert!(!text.contains("npm install"), "{text}");
+    }
+
+    #[test]
+    fn the_scroll_hint_offers_skipping() {
+        let app = asking_to_run(&tall_setup(), 0);
+        let (text, _) = render_at(&app, 80, 20);
+        assert!(text.contains("s skip it"), "{text}");
     }
 
     #[test]

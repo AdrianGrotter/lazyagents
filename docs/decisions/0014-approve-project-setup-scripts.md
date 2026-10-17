@@ -44,6 +44,7 @@ without the user reading it first. Setup output scrolls by in the agent's pane b
 agent starts, and a failing setup is reported there without stopping the agent. Agents
 created by the CLI never run a setup, since the CLI cannot ask.
 
-The popup shows the whole script: long lines wrap, control characters appear escaped, and a
-script taller than the screen scrolls. `y` and `s` are refused until its last row has been
-shown, so text that was never on screen cannot be approved.
+The popup shows the whole script: long lines wrap, control and invisible characters appear
+escaped, and a script taller than the screen scrolls. `y` is refused until its last row has
+been shown, and on a terminal too small to show it, so text that was never on screen cannot
+be approved. `s` and `n` run nothing from the repository and work at any time.

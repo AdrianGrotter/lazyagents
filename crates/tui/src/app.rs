@@ -2532,8 +2532,9 @@ impl App {
     }
 
     /// `y` runs the script and remembers it for the project, `s` creates the agent without
-    /// it, `n` creates nothing. Neither `y` nor `s` acts until the script has been scrolled
-    /// to its last row; the other keys scroll.
+    /// it, `n` creates nothing. `y` waits until the script has been scrolled to its last row
+    /// on a screen big enough to show it; `s` and `n` need nothing from the script, and the
+    /// other keys scroll.
     fn on_approve_setup_key(
         &mut self,
         mut create: Box<CreateAgent>,
@@ -2543,20 +2544,18 @@ impl App {
         key: KeyEvent,
     ) -> Vec<Effect> {
         let screen = self.screen_size.unwrap_or(DEFAULT_SIZE);
-        let (last, page) = crate::ui::setup_scroll_limits(self, &project, &script, screen);
+        let limits = crate::ui::setup_scroll_limits(self, &project, &script, screen);
+        let (last, page) = limits.unwrap_or((0, 1));
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let scroll = match (key.code, ctrl) {
             (KeyCode::Char('n') | KeyCode::Esc, false) => return Vec::new(),
-            (KeyCode::Char('y' | 's'), false) if scroll >= last => {
-                return if key.code == KeyCode::Char('s') {
-                    self.send_create(*create)
-                } else {
-                    approved::approve(&mut self.approved_setups, &project, &script);
-                    create.setup = Some(script.clone());
-                    let mut effects = vec![Effect::ApproveSetup { project, script }];
-                    effects.extend(self.send_create(*create));
-                    effects
-                };
+            (KeyCode::Char('s'), false) => return self.send_create(*create),
+            (KeyCode::Char('y'), false) if limits.is_some() && scroll >= last => {
+                approved::approve(&mut self.approved_setups, &project, &script);
+                create.setup = Some(script.clone());
+                let mut effects = vec![Effect::ApproveSetup { project, script }];
+                effects.extend(self.send_create(*create));
+                return effects;
             }
             (KeyCode::Char('j') | KeyCode::Down, false) => scroll + 1,
             (KeyCode::Char('k') | KeyCode::Up, false) => scroll.saturating_sub(1),
@@ -7036,7 +7035,6 @@ mod setup_tests {
         let _ = submit_worktree_agent(&mut app);
 
         assert!(app.on_key(key('y')).is_empty());
-        assert!(app.on_key(key('s')).is_empty());
         assert!(matches!(app.popup, Some(Popup::ApproveSetup { .. })));
 
         for _ in 0..3 {
@@ -7083,6 +7081,38 @@ mod setup_tests {
         assert!(app.on_key(key('y')).is_empty());
         let _ = app.on_key(key('G'));
         assert!(!app.on_key(key('y')).is_empty());
+    }
+
+    #[test]
+    fn skipping_the_setup_works_while_the_script_is_scrolled_up() {
+        let (mut app, _dir) = with_setup(&tall_script());
+        app.set_screen_size(60, 20);
+        let _ = submit_worktree_agent(&mut app);
+        let effects = app.on_key(key('s'));
+        assert_eq!(created_setup(&effects), Some(None));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::ApproveSetup { .. }))
+        );
+    }
+
+    #[test]
+    fn a_screen_too_small_to_show_the_script_refuses_approval_but_not_skipping() {
+        let (mut app, _dir) = with_setup("npm install");
+        app.set_screen_size(60, 6);
+        let _ = submit_worktree_agent(&mut app);
+        assert!(app.on_key(key('y')).is_empty());
+        let _ = app.on_key(key('G'));
+        assert!(app.on_key(key('y')).is_empty());
+        assert!(matches!(app.popup, Some(Popup::ApproveSetup { .. })));
+        app.set_screen_size(60, 20);
+        assert!(!app.on_key(key('y')).is_empty());
+
+        let (mut app, _dir) = with_setup("npm install");
+        app.set_screen_size(60, 6);
+        let _ = submit_worktree_agent(&mut app);
+        assert_eq!(created_setup(&app.on_key(key('s'))), Some(None));
     }
 
     #[test]

@@ -80,10 +80,12 @@ leading `~` is the home directory) and Name (empty means the directory name); `t
 between them, `enter` adds and `esc` cancels.
 
 The worktree setup approval popup wraps long script lines and shows control characters
-escaped (`\r`, `\t`, `\u{1b}`), so the whole script is on screen. When it does not fit,
+escaped (`\r`, `\t`, `\u{1b}`, and `\u{200b}` for zero-width and direction-changing
+characters), with a literal backslash shown as `\\`, so the whole script is on screen. When it does not fit,
 `j`/`k` or `↓`/`↑` scroll a row, `pageup`/`pagedown` or `ctrl-u`/`ctrl-d` half a page, `g`/`G`
-jump to the top or bottom, and the popup says how many rows are above or below. `y` and `s`
-do nothing until the last row has been shown; `n` and `esc` cancel at any time.
+jump to the top or bottom, and the popup says how many rows are above or below. `y`
+does nothing until the last row has been shown, and on a terminal too small to show the script
+it never acts; `s` (skip the setup) and `n`/`esc` work at any time.
 
 Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the new agent form,
 `tab`/`shift-tab` (or `↓`/`↑`) move between the visible fields, `enter` starts the agent and
