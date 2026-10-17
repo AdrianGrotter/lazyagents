@@ -2965,15 +2965,14 @@ impl App {
             }
             FinishChoice::PullRequest => {
                 let branch = commands::shell_quote(&worktree.branch);
-                let base = if is_commit_id(&worktree.base) {
-                    String::new()
-                } else {
-                    format!(" --base {}", commands::shell_quote(&worktree.base))
-                };
+                let base = commands::shell_quote(&worktree.base);
+                let base_ref = commands::shell_quote(&format!("refs/heads/{}", worktree.base));
                 vec![Effect::RunInTerminal {
                     title: "pull request".into(),
                     script: format!(
-                        "git push -u origin {branch} && gh pr create --fill --head {branch}{base}"
+                        "git push -u origin {branch} && if git show-ref --verify --quiet {base_ref}; \
+                         then gh pr create --fill --head {branch} --base {base}; \
+                         else gh pr create --fill --head {branch}; fi"
                     ),
                     cwd: worktree.path.clone(),
                 }]
@@ -2987,11 +2986,6 @@ impl App {
             })],
         }
     }
-}
-/// A worktree started from a detached HEAD or an explicit sha records a hex object name as
-/// its base; a pull request cannot target one.
-fn is_commit_id(base: &str) -> bool {
-    base.len() >= 7 && base.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn prefix_help(keymap: &Keymap) -> String {
@@ -6847,7 +6841,7 @@ mod finish_tests {
             app.on_key(enter()),
             vec![Effect::RunInTerminal {
                 title: "pull request".into(),
-                script: "git push -u origin 'lazyagents/api' && gh pr create --fill --head 'lazyagents/api' --base 'main'"
+                script: "git push -u origin 'lazyagents/api' && if git show-ref --verify --quiet 'refs/heads/main'; then gh pr create --fill --head 'lazyagents/api' --base 'main'; else gh pr create --fill --head 'lazyagents/api'; fi"
                     .into(),
                 cwd: "/w/api".into(),
             }]
@@ -6869,21 +6863,21 @@ mod finish_tests {
     }
 
     #[test]
-    fn the_pull_request_leaves_the_base_to_gh_when_it_is_a_commit() {
+    fn the_pull_request_script_quotes_the_base() {
         let (mut app, a) = worktree_app(true);
         app.agents
             .iter_mut()
             .find(|x| x.id == a.id)
             .and_then(|x| x.worktree.as_mut())
             .unwrap()
-            .base = "0123456789abcdef0123456789abcdef01234567".into();
+            .base = "it's".into();
         let _ = app.on_key(key('F'));
         let _ = app.on_key(key('j'));
         assert_eq!(
             app.on_key(enter()),
             vec![Effect::RunInTerminal {
                 title: "pull request".into(),
-                script: "git push -u origin 'lazyagents/api' && gh pr create --fill --head 'lazyagents/api'"
+                script: r#"git push -u origin 'lazyagents/api' && if git show-ref --verify --quiet 'refs/heads/it'\''s'; then gh pr create --fill --head 'lazyagents/api' --base 'it'\''s'; else gh pr create --fill --head 'lazyagents/api'; fi"#
                     .into(),
                 cwd: "/w/api".into(),
             }]
