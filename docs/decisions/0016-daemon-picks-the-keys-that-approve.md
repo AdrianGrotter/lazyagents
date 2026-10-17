@@ -15,13 +15,15 @@ recognises the dialog; the TUI only sees the screen of the agent it subscribes t
 ## Decision
 
 The TUI sends `Request::Approve { id }` and the daemon types the answer. For a Claude
-agent whose screen shows the trust dialog, that is up or down from the option carrying the
-`❯` cursor to the option starting `Yes,` (counting option lines, not wrapped lines), then
-`enter`; it refuses with an error when it cannot find both, rather than pressing `enter` on
-whatever is highlighted. For anything else it is `enter`, as before. The keys go out as
-separate writes 100 ms apart: written together they reach the agent as one read, which a
-program that takes each read as one keypress would not recognise as an arrow then enter.
-Deny and reply stay plain `Input` keystrokes.
+agent the daemon saw reach the trust dialog while starting, and that has reported no hook
+nor left `NeedsInput` since, while its screen still shows the dialog, that is up or down
+from the option carrying the `❯` cursor to the option starting `Yes,` (counting option
+lines, not wrapped lines), then `enter`; it refuses with an error when it cannot find both,
+rather than pressing `enter` on whatever is highlighted. For anything else it is `enter`,
+as before. The screen alone does not decide: an agent working on lazyagents itself can
+show the dialog's text in a diff while it waits on an ordinary permission prompt. The keys
+go out in one write, so a second approval sent before Claude redraws follows the first
+whole instead of interleaving with it. Deny and reply stay plain `Input` keystrokes.
 
 ## Alternatives
 
@@ -32,6 +34,10 @@ Deny and reply stay plain `Input` keystrokes.
   in the main pane, while `y` works on any selected agent in the sidebar.
 - Press the option's number: Claude's current trust dialog shows no numbers, and the
   number of yes would still have to be read from the screen.
+- Write each key separately, spaced apart, in case a program takes each read as one
+  keypress: Claude Code 2.1.302 accepted the arrow and `enter` in one write, and spaced
+  writes from two quick approvals interleave (down, down, enter, enter), which ends on
+  "No, exit" if the list wraps.
 
 ## Consequences
 

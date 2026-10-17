@@ -83,7 +83,6 @@ const SNAPSHOT: Duration = Duration::from_secs(1);
 const SNAPSHOT_WAIT: Duration = Duration::from_secs(2);
 const SHUTDOWN_SNAPSHOT_WAIT: Duration = Duration::from_secs(10);
 const WHEEL_LINES: i32 = 3;
-const APPROVE_KEY_GAP: Duration = Duration::from_millis(100);
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let paths = config.paths;
@@ -264,6 +263,9 @@ struct Agent {
     pending_setup: Option<String>,
     /// What the agent waits for while it needs input; see `AgentInfo::waiting_for`.
     waiting_for: Option<String>,
+    /// Set when a starting Claude agent shows the trust dialog, until it leaves `NeedsInput`
+    /// or reports a hook.
+    at_trust_dialog: bool,
     usage: Option<Usage>,
 }
 
@@ -284,6 +286,7 @@ impl Agent {
             pending_prompt: None,
             pending_setup: None,
             waiting_for: None,
+            at_trust_dialog: false,
             usage: None,
         }
     }
@@ -295,6 +298,7 @@ impl Agent {
         }
         if status != Status::NeedsInput {
             self.waiting_for = None;
+            self.at_trust_dialog = false;
         }
     }
 
@@ -304,6 +308,7 @@ impl Agent {
     fn hooked(&mut self, kind: HookKind, detail: Option<String>, now: Instant) {
         self.status = on_hook(kind);
         self.status_since = now;
+        self.at_trust_dialog = false;
         self.waiting_for = match (self.status, kind) {
             (Status::NeedsInput, HookKind::PermissionRequest) => detail,
             (Status::NeedsInput, _) => self.waiting_for.take().or(detail),
@@ -1158,17 +1163,18 @@ impl Daemon {
         };
         terminal.scroll_to_bottom();
         let screen = terminal.screen().text();
-        let keys = if agent.record.kind == AgentKind::Claude && awaits_trust(&screen) {
+        let keys = if agent.at_trust_dialog && awaits_trust(&screen) {
             trust_keys(&screen).ok_or("cannot find the option that trusts this folder")?
         } else {
             vec![KeyCode::Enter]
         };
         let mode = terminal.mode();
-        let keys = keys
+        let bytes: Vec<u8> = keys
             .into_iter()
             .filter_map(|code| encode(&InputEvent::Key(Key::new(code, Modifiers::NONE)), mode))
+            .flatten()
             .collect();
-        terminal.write_keys(keys, APPROVE_KEY_GAP);
+        terminal.write(bytes);
         agent.dirty = true;
         Ok(())
     }
@@ -1256,6 +1262,7 @@ impl Daemon {
                 {
                     agent.set_status(Status::NeedsInput);
                     agent.waiting_for = Some("trusting this folder".into());
+                    agent.at_trust_dialog = true;
                     self.announce(event.agent);
                 } else if note_blocked_envrc(agent) {
                     self.announce(event.agent);

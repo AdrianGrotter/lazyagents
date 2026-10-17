@@ -1353,21 +1353,17 @@ async fn approving_the_trust_dialog_moves_to_yes_and_confirms() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn approving_the_trust_dialog_sends_each_key_as_its_own_read() {
+async fn approving_the_trust_dialog_twice_never_interleaves_the_keys() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;
     let (project, _dir) = add_project(&mut conn).await;
-    let script = "stty -icanon -echo -icrnl min 1 time 0; \
-                  printf ' ❯ No, exit\\n   Yes, I trust this folder\\n'; \
-                  for read in 1 2; do \
-                  dd bs=64 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '|'; \
-                  done; exec sleep 30";
+    let script = records_answer(" ❯ No, exit\\n   Yes, I trust this folder\\n");
     let agent = create(
         &mut conn,
         &project,
         "untrusted",
         AgentKind::Claude,
-        &["sh", "-c", script],
+        &["sh", "-c", &script],
     )
     .await
     .expect("create");
@@ -1375,10 +1371,60 @@ async fn approving_the_trust_dialog_sends_each_key_as_its_own_read() {
         .await
         .expect("subscribe");
     conn.wait_status(agent.id, Status::NeedsInput).await;
+    for _ in 0..2 {
+        conn.request(Request::Approve { id: agent.id })
+            .await
+            .expect("approve");
+    }
+    conn.wait_text(agent.id, "1b5b420d1b5b420d|").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approving_a_claude_prompt_that_quotes_the_trust_dialog_presses_enter() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let script = format!(
+        "stty -icanon -echo -icrnl min 1 time 0; printf 'started\\n'; \
+         dd bs=1 count=1 >/dev/null 2>&1; {}",
+        records_answer(
+            "+ Yes, I trust this folder\\n\\n Run cargo test?\\n ❯ 1. Yes\\n   2. Yes, and allow\\n   3. No\\n"
+        )
+    );
+    let agent = create(
+        &mut conn,
+        &project,
+        "trusted",
+        AgentKind::Claude,
+        &["sh", "-c", &script],
+    )
+    .await
+    .expect("create");
+    conn.request(Request::Subscribe { id: agent.id })
+        .await
+        .expect("subscribe");
+    conn.wait_text(agent.id, "started").await;
+    conn.request(Request::Hook {
+        id: agent.id,
+        kind: HookKind::SessionStart,
+        session_id: None,
+        source: Some("startup".into()),
+        detail: None,
+    })
+    .await
+    .expect("hook");
+    conn.wait_status(agent.id, Status::Idle).await;
+    conn.request(Request::Input {
+        id: agent.id,
+        event: key(KeyCode::Char('x')),
+    })
+    .await
+    .expect("input");
+    conn.wait_text(agent.id, "3. No").await;
     conn.request(Request::Approve { id: agent.id })
         .await
         .expect("approve");
-    conn.wait_text(agent.id, "1b5b42|0d|").await;
+    conn.wait_text(agent.id, "0d|").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

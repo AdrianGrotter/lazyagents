@@ -80,11 +80,12 @@ is rejected.
   that is not a running Claude agent
 - `Shutdown`: answered after every agent's process tree has exited
 - `Approve { id }`: answers yes to what the agent waits for by typing into its terminal.
-  For a Claude agent whose screen shows the trust dialog, that is up or down from the
-  option carrying the `❯` cursor to the option starting `Yes,`, then `enter`; it is
-  rejected when the screen shows no cursor on an option or no yes option. Otherwise it is
-  `enter`. Each key is its own write, 100 ms apart. Rejected, like `Input`, for an agent
-  that is not running
+  For a Claude agent that went from `Starting` to `NeedsInput` at the trust dialog and has
+  neither left `NeedsInput` nor reported a hook since, while its screen still shows the
+  dialog, that is up or down from the option carrying the `❯` cursor to the option
+  starting `Yes,`, then `enter`; it is rejected when the screen shows no cursor on an
+  option or no yes option. Otherwise it is `enter`. The keys go out in one write. Rejected,
+  like `Input`, for an agent that is not running
 
 `Response`:
 
