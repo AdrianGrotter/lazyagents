@@ -29,6 +29,8 @@ Two input modes:
 | `g` | jump to the next agent that needs input; when no other agent does, to the next one listed as `done` |
 | `D` | diff view of the agent's changes in the main pane |
 | `s` | scroll mode: browse the agent's terminal history (running or exited agents) |
+| `/` | filter the Agents box by name or branch (`s:<status>` by status): `enter` keeps the filter, `esc` clears it |
+| `J`/`K`, `pagedown`/`pageup` | scroll the selected agent's pane half a page down / up without leaving the sidebar |
 | `?` | help popup |
 | `q`, `ctrl-c` | quit TUI (agents keep running) |
 | `Q` | quit and stop daemon (confirm) |
@@ -39,6 +41,18 @@ selected, bring the terminal back into focus. Out of view means not selected, or
 while the terminal lacks focus; terminals that report no focus changes (tmux without
 `focus-events on`) always count as focused. An agent that works again, or stops, is no
 longer `done`. The marks live in the TUI and start empty when it starts.
+
+The filter (`/`) is typed in the status bar and narrows the Agents box as it changes, in
+both the project and the all-agents view. It keeps an agent when the text appears, ignoring
+case, in its listed name, its name or its worktree branch. Text after `s:` matches the status
+as listed instead: `s:needs`, `s:done`, `s:exited`. `enter` keeps it, shown in the box's title as
+`Agents · /<text>`, and `esc` while typing, or in the sidebar while one is kept, clears it.
+`backspace` deletes, `ctrl-u` empties it, and a paste adds its first line. While a filter is
+kept, `g` only visits agents that match it.
+
+`J`/`K` scroll the selected agent's pane by half its height and leave the focus in the
+sidebar. Moving to another agent, or opening the pane with `enter`, scrolls it back to the
+bottom. A stopped agent has no terminal to scroll.
 
 The add project picker lists `+ new project…` and then every known project that is not in
 the sidebar, most recently added first. `j`/`k` (or `↓`/`↑`) move, `enter` adds the

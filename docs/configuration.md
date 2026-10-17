@@ -93,6 +93,9 @@ SHIFT; with `ctrl` or `alt`, SHIFT counts, so `ctrl-Q` is not `ctrl-q`.
 | `toggle_all_agents` | `A` |
 | `diff` | `D` |
 | `scroll` | `s` |
+| `filter` | `/` |
+| `peek_down` | `J`, `pagedown` |
+| `peek_up` | `K`, `pageup` |
 
 ### `[keys.pane]`
 

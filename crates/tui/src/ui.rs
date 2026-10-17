@@ -41,28 +41,41 @@ const SIDEBAR_HINT: [(Action, &str); 12] = [
     (Action::Diff, "diff"),
 ];
 
-const SIDEBAR_HELP: [(Action, &str); 19] = [
-    (Action::Down, "move down in the focused box"),
-    (Action::Up, "move up in the focused box"),
-    (Action::FocusProjects, "focus Projects"),
-    (Action::FocusAgents, "focus Agents"),
-    (Action::ToggleFocus, "switch between Projects and Agents"),
-    (Action::Open, "open the agent's pane"),
-    (Action::NewAgent, "new agent"),
-    (Action::Stop, "stop agent"),
-    (Action::Restart, "restart agent"),
-    (Action::Remove, "remove agent (in Projects: the project)"),
-    (Action::Rename, "rename agent"),
-    (Action::AddProject, "add project"),
-    (Action::ToggleAllAgents, "all agents / this project"),
-    (Action::NextAttention, "next agent needing input"),
-    (Action::Diff, "diff of the agent's changes"),
-    (Action::Scroll, "scroll the agent's history"),
-    (Action::Help, "help"),
-    (Action::Quit, "quit (agents keep running)"),
-    (Action::StopDaemon, "stop the daemon and quit"),
+const SIDEBAR_HELP: [(&[Action], &str); 19] = [
+    (
+        &[Action::Down, Action::Up],
+        "move down / up in the focused box",
+    ),
+    (
+        &[Action::FocusProjects, Action::FocusAgents],
+        "focus Projects / Agents",
+    ),
+    (&[Action::ToggleFocus], "switch between Projects and Agents"),
+    (&[Action::Open], "open the agent's pane"),
+    (&[Action::NewAgent], "new agent"),
+    (&[Action::Stop], "stop agent"),
+    (&[Action::Restart], "restart agent"),
+    (&[Action::Remove], "remove agent (in Projects: the project)"),
+    (&[Action::Rename], "rename agent"),
+    (&[Action::AddProject], "add project"),
+    (&[Action::ToggleAllAgents], "all agents / this project"),
+    (
+        &[Action::NextAttention],
+        "next agent needing input, then next done",
+    ),
+    (&[Action::Filter], "filter the agents (esc clears)"),
+    (&[Action::Diff], "diff of the agent's changes"),
+    (&[Action::Scroll], "scroll the agent's history"),
+    (
+        &[Action::PeekDown, Action::PeekUp],
+        "scroll the agent's pane down / up from here",
+    ),
+    (&[Action::Help], "help"),
+    (&[Action::Quit], "quit (agents keep running)"),
+    (&[Action::StopDaemon], "stop the daemon and quit"),
 ];
 const SCROLL_HINT: &str = "SCROLL · j/k ctrl-u/d g/G · q exit";
+const FILTER_HINT: &str = "enter keep · esc clear";
 const TOO_SMALL: &str = "terminal too small";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,7 +242,7 @@ pub fn draw(frame: &mut Frame, app: &App, areas: &Areas, now: Instant, tick: u64
     draw_info(frame, app, areas.info);
     draw_pane(frame, app, areas);
     draw_status(frame, app, areas.status, now);
-    if let Some(popup) = &app.popup {
+    if let Some(popup) = app.popup.as_ref().filter(|p| **p != Popup::Filter) {
         draw_popup(frame, popup, app, frame.area());
     }
 }
@@ -312,11 +325,7 @@ fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
         }
         AgentView::Project => label(agent).to_string(),
     };
-    let status = match unseen {
-        true => "done".to_string(),
-        false => agent.status.label(),
-    };
-    let rest = format!(" {name}  {status}");
+    let rest = format!(" {name}  {}", app.status_label(agent));
     let line = Line::from(vec![Span::styled(symbol, style), Span::raw(rest)]);
     ListItem::new(if agent.status == Status::NeedsInput {
         line.fg(app.theme.attention)
@@ -326,15 +335,21 @@ fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
 }
 
 fn draw_agents(frame: &mut Frame, app: &App, area: Rect, tick: u64) {
-    let title = match app.view {
-        AgentView::Project => " Agents ",
-        AgentView::All => " Agents · all ",
+    let mut title = match app.view {
+        AgentView::Project => " Agents ".to_string(),
+        AgentView::All => " Agents · all ".to_string(),
     };
+    if !app.filter().is_empty() {
+        title.push_str(&format!("· /{} ", app.filter()));
+    }
     let block = block(title, app.focus == Focus::Agents, &app.theme);
     let agents = app.visible_agents();
     if agents.is_empty() {
         let new = app.keymap.first_key(Action::NewAgent);
-        let text = format!("no agents — press {new}");
+        let text = match app.filter() {
+            "" => format!("no agents — press {new}"),
+            filter => format!("no agents match /{filter}"),
+        };
         frame.render_widget(Paragraph::new(text).block(block), area);
         return;
     }
@@ -525,6 +540,18 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
         spans.push(Span::raw(message.to_string()).fg(colour));
         spans.push(Span::raw(" │ ").fg(theme.dim));
     }
+    if app.popup == Some(Popup::Filter) {
+        let filter = format!("/{}", app.filter());
+        let width = filter.chars().count() as u16;
+        let line = Line::from(vec![
+            Span::raw(filter).fg(theme.accent),
+            Span::raw(" │ ").fg(theme.dim),
+            Span::raw(FILTER_HINT).fg(theme.dim),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        frame.set_cursor_position((area.x + width.min(area.width), area.y));
+        return;
+    }
     spans.push(match app.focus {
         Focus::Pane if app.prefix_pending => {
             Span::raw(format!("{} …", app.keymap.prefix())).fg(theme.working)
@@ -639,7 +666,7 @@ impl PopupContent {
 }
 
 pub fn popup_area(app: &App, screen: Rect) -> Option<Rect> {
-    let popup = app.popup.as_ref()?;
+    let popup = app.popup.as_ref().filter(|p| **p != Popup::Filter)?;
     let content = popup_content(popup, app);
     Some(centered(screen, content.width, content.height))
 }
@@ -648,6 +675,7 @@ fn popup_content(popup: &Popup, app: &App) -> PopupContent {
     let theme = &app.theme;
     match popup {
         Popup::Help => PopupContent::fitting(" Help ", 0, help_lines(&app.keymap)),
+        Popup::Filter => PopupContent::new(" Filter ", 0, Vec::new()),
         Popup::NewAgent(form) => {
             let (lines, cursor) = form_lines(form, app);
             PopupContent::new(" New agent ", 56, lines).cursor_at(cursor)
@@ -708,7 +736,10 @@ fn field_line(label: &'static str, value: String, focused: bool, theme: &Theme) 
 fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
     let sidebar: Vec<(String, String)> = SIDEBAR_HELP
         .iter()
-        .map(|(action, text)| (keymap.describe(*action), text.to_string()))
+        .map(|(actions, text)| {
+            let keys: Vec<String> = actions.iter().map(|a| keymap.describe(*a)).collect();
+            (keys.join(", "), text.to_string())
+        })
         .collect();
     let mut pane = Vec::new();
     for (action, text) in [
@@ -1312,7 +1343,7 @@ mod tests {
     }
 
     fn help_row(key: &str, action: &str) -> String {
-        format!("  {key:<18}{action}")
+        format!("  {key:<29}{action}")
     }
 
     #[test]
@@ -1321,10 +1352,8 @@ mod tests {
         app.popup = Some(Popup::Help);
         let (text, _) = render(&app);
         for (key, action) in [
-            ("j/down", "move down in the focused box"),
-            ("k/up", "move up in the focused box"),
-            ("h/left/backtab/1", "focus Projects"),
-            ("l/right/2", "focus Agents"),
+            ("j/down, k/up", "move down / up in the focused box"),
+            ("h/left/backtab/1, l/right/2", "focus Projects / Agents"),
             ("tab", "switch between Projects and Agents"),
             ("enter", "open the agent's pane"),
             ("n", "new agent"),
@@ -1334,7 +1363,12 @@ mod tests {
             ("R", "rename agent"),
             ("a", "add project"),
             ("A", "all agents / this project"),
-            ("g", "next agent needing input"),
+            ("g", "next agent needing input, then next done"),
+            ("/", "filter the agents (esc clears)"),
+            (
+                "J/pagedown, K/pageup",
+                "scroll the agent's pane down / up from here",
+            ),
             ("?", "help"),
             ("q/ctrl-c", "quit (agents keep running)"),
             ("Q", "stop the daemon and quit"),

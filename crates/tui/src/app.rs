@@ -215,6 +215,8 @@ pub enum Popup {
         prompt: String,
         action: Confirmed,
     },
+    /// Editing `App::filter`, which narrows the Agents box as it changes.
+    Filter,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -348,6 +350,10 @@ pub struct App {
     /// Agents whose turn ended while they were out of view, until they are viewed.
     unseen: HashSet<AgentId>,
     terminal_focused: bool,
+    filter: String,
+    /// The agent whose pane was scrolled from the sidebar, to scroll back down once it
+    /// is left or opened.
+    peeked: Option<AgentId>,
     stats_in_flight: HashMap<AgentId, Instant>,
     diffs_in_flight: HashMap<AgentId, Instant>,
     stat_polled: Option<(AgentId, Instant)>,
@@ -389,6 +395,8 @@ impl App {
             known: Vec::new(),
             unseen: HashSet::new(),
             terminal_focused: true,
+            filter: String::new(),
+            peeked: None,
             stats_in_flight: HashMap::new(),
             diffs_in_flight: HashMap::new(),
             stat_polled: None,
@@ -462,6 +470,7 @@ impl App {
                     .collect()
             }
         };
+        agents.retain(|a| self.matches_filter(a));
         agents.sort_by(|a, b| {
             (a.status != Status::NeedsInput, position(a.project), &a.name).cmp(&(
                 b.status != Status::NeedsInput,
@@ -470,6 +479,36 @@ impl App {
             ))
         });
         agents
+    }
+
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// The status the Agents box shows: `done` for an unseen finished agent.
+    pub fn status_label(&self, agent: &AgentInfo) -> String {
+        match self.unseen.contains(&agent.id) {
+            true => "done".to_string(),
+            false => agent.status.label(),
+        }
+    }
+
+    /// A case-insensitive substring of the agent's listed name, name or branch; after
+    /// `s:`, of its status as listed.
+    fn matches_filter(&self, agent: &AgentInfo) -> bool {
+        let needle = self.filter.to_lowercase();
+        if let Some(status) = needle.strip_prefix("s:") {
+            return self.status_label(agent).to_lowercase().contains(status);
+        }
+        let branch = agent.worktree.as_ref().map(|w| w.branch.as_str());
+        [
+            Some(crate::ui::label(agent)),
+            Some(agent.name.as_str()),
+            branch,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|text| text.to_lowercase().contains(&needle))
     }
 
     pub fn selected_agent(&self) -> Option<&AgentInfo> {
@@ -888,6 +927,14 @@ impl App {
         }
     }
 
+    fn set_filter(&mut self, filter: String) -> Vec<Effect> {
+        let selected = self.selected_agent().map(|a| a.id);
+        self.filter = filter;
+        self.agent_index = 0;
+        self.reselect(selected);
+        self.sync()
+    }
+
     fn select_agent(&mut self, id: AgentId) {
         let Some(project) = self.agents.iter().find(|a| a.id == id).map(|a| a.project) else {
             return;
@@ -910,6 +957,31 @@ impl App {
 
     fn sync(&mut self) -> Vec<Effect> {
         self.clamp();
+        let mut effects = self.release_peek();
+        effects.extend(self.follow_selection());
+        effects
+    }
+
+    /// A pane scrolled from the sidebar goes back to the bottom once the selection
+    /// leaves it or the pane is opened.
+    fn release_peek(&mut self) -> Vec<Effect> {
+        let Some(id) = self.peeked else {
+            return Vec::new();
+        };
+        let selected = self.selected_agent().map(|a| a.id);
+        if selected == Some(id) && self.focus != Focus::Pane {
+            return Vec::new();
+        }
+        self.peeked = None;
+        match self.agents.iter().find(|a| a.id == id) {
+            Some(agent) if agent.status != Status::Stopped => {
+                vec![scroll_request(id, SCROLL_BOTTOM)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn follow_selection(&mut self) -> Vec<Effect> {
         let wanted = self.selected_agent().map(|a| (a.id, a.status.is_running()));
         if let (Some((id, _)), true) = (wanted, self.terminal_focused) {
             self.unseen.remove(&id);
@@ -1183,6 +1255,11 @@ impl App {
                     .push_str(&text.replace("\r\n", " ").replace(['\r', '\n'], " ")),
                 Field::Preset | Field::Worktree => {}
             },
+            Some(Popup::Filter) => {
+                let filter = format!("{}{}", self.filter, line);
+                let filter: String = filter.chars().filter(|c| !c.is_control()).collect();
+                return self.set_filter(filter);
+            }
             Some(Popup::Help | Popup::ProjectPicker { .. } | Popup::Confirm { .. }) | None => {}
         }
         Vec::new()
@@ -1410,6 +1487,9 @@ impl App {
     }
 
     fn on_sidebar_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if key.code == KeyCode::Esc && !self.filter.is_empty() {
+            return self.set_filter(String::new());
+        }
         let Some(action) = self.keymap.sidebar(&key) else {
             return Vec::new();
         };
@@ -1511,6 +1591,26 @@ impl App {
                 }
             }
             Action::Scroll => self.enter_scroll(false),
+            Action::Filter => {
+                self.focus = Focus::Agents;
+                self.popup = Some(Popup::Filter);
+            }
+            Action::PeekDown | Action::PeekUp => {
+                let half = (self.diff_page() / 2).max(1) as i32;
+                let lines = if action == Action::PeekDown {
+                    -half
+                } else {
+                    half
+                };
+                match self.selected_agent() {
+                    Some(agent) if agent.status != Status::Stopped => {
+                        let id = agent.id;
+                        self.peeked = Some(id);
+                        return vec![scroll_request(id, lines)];
+                    }
+                    _ => {}
+                }
+            }
             Action::PaneNext
             | Action::PanePrevious
             | Action::PaneLeave
@@ -1604,7 +1704,11 @@ impl App {
 
     fn next_attention(&mut self) {
         let position = |id: ProjectId| self.projects.iter().position(|p| p.id == id);
-        let mut ordered: Vec<&AgentInfo> = self.agents.iter().collect();
+        let mut ordered: Vec<&AgentInfo> = self
+            .agents
+            .iter()
+            .filter(|a| self.matches_filter(a))
+            .collect();
         ordered.sort_by(|a, b| (position(a.project), &a.name).cmp(&(position(b.project), &b.name)));
         let current = self.selected_agent().map(|a| a.id);
         let start = current
@@ -1635,6 +1739,16 @@ impl App {
         };
         match popup {
             Popup::Help => Vec::new(),
+            Popup::Filter => {
+                let mut filter = self.filter.clone();
+                match edit(&mut filter, &key) {
+                    Edit::Submit => return self.sync(),
+                    Edit::Cancel => return self.set_filter(String::new()),
+                    Edit::Continue => {}
+                }
+                self.popup = Some(Popup::Filter);
+                self.set_filter(filter)
+            }
             Popup::Confirm { prompt, action } => match self.on_confirm_key(&action, &key) {
                 Some(effects) => effects,
                 None => {
@@ -4147,6 +4261,140 @@ pub(crate) mod tests {
         let (mut app, _) = loaded(vec![p], vec![a.clone(), b.clone()]);
         let _ = app.set_pane_size(80, 10);
         (app, a, b)
+    }
+
+    #[test]
+    fn shifted_j_and_k_scroll_the_pane_from_the_sidebar() {
+        let (mut app, a, b) = running_pair();
+        for (event, lines) in [
+            (key('J'), -5),
+            (key('K'), 5),
+            (code(KeyCode::PageDown), -5),
+            (code(KeyCode::PageUp), 5),
+        ] {
+            assert_eq!(app.on_key(event), scroll_effects(a.id, lines), "{event:?}");
+            assert_eq!(app.focus, Focus::Agents, "{event:?}");
+        }
+        let effects = app.on_key(key('j'));
+        assert_eq!(effects.first(), scroll_effects(a.id, i32::MIN / 2).first());
+        assert!(effects.contains(&Effect::Send(Request::Subscribe { id: b.id })));
+        let effects = app.on_key(key('k'));
+        assert!(effects.contains(&Effect::Send(Request::Subscribe { id: a.id })));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Send(Request::Scroll { .. }))),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn opening_a_scrolled_pane_scrolls_it_back_down() {
+        let (mut app, a, _) = running_pair();
+        let _ = app.on_key(key('K'));
+        let effects = app.on_key(code(KeyCode::Enter));
+        assert_eq!(effects, scroll_effects(a.id, i32::MIN / 2));
+        assert_eq!(app.focus, Focus::Pane);
+    }
+
+    #[test]
+    fn a_stopped_agent_has_no_pane_to_scroll() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Stopped);
+        let (mut app, _) = loaded(vec![p], vec![a]);
+        let _ = app.set_pane_size(80, 10);
+        assert!(app.on_key(key('J')).is_empty());
+    }
+
+    fn names(app: &App) -> Vec<String> {
+        app.visible_agents()
+            .iter()
+            .map(|a| a.name.clone())
+            .collect()
+    }
+
+    fn filter_app() -> App {
+        let p = project("p");
+        let api = AgentInfo {
+            worktree: Some(protocol::WorktreeInfo {
+                path: "/w/api".into(),
+                branch: "lazyagents/api".into(),
+                base: "main".into(),
+            }),
+            ..agent(&p, "api", Status::Idle)
+        };
+        let docs = AgentInfo {
+            kind: AgentKind::Claude,
+            title: Some("Fix the parser".into()),
+            ..agent(&p, "docs", Status::Idle)
+        };
+        let web = agent(&p, "web", Status::NeedsInput);
+        loaded(vec![p], vec![api, docs, web]).0
+    }
+
+    #[test]
+    fn slash_filters_the_agents_as_you_type() {
+        let mut app = filter_app();
+        let _ = app.on_key(key('/'));
+        type_text(&mut app, "PARSER");
+        assert_eq!(names(&app), ["docs"]);
+        assert_eq!(app.selected_agent().map(|a| a.name.as_str()), Some("docs"));
+        let _ = app.on_key(code(KeyCode::Backspace));
+        let _ = app.on_key(code(KeyCode::Backspace));
+        let _ = app.on_key(code(KeyCode::Backspace));
+        let _ = app.on_key(code(KeyCode::Backspace));
+        let _ = app.on_key(code(KeyCode::Backspace));
+        let _ = app.on_key(code(KeyCode::Backspace));
+        type_text(&mut app, "lazyagents/a");
+        assert_eq!(names(&app), ["api"]);
+        let _ = app.on_paste("\u{7f}".into());
+        assert_eq!(app.filter(), "lazyagents/a");
+    }
+
+    #[test]
+    fn the_filter_matches_statuses_after_s_colon() {
+        let mut app = filter_app();
+        let _ = app.on_key(key('/'));
+        type_text(&mut app, "needs");
+        assert!(names(&app).is_empty());
+        let _ = app.on_key(ctrl('u'));
+        type_text(&mut app, "S:Needs");
+        assert_eq!(names(&app), ["web"]);
+        let _ = app.on_key(ctrl('u'));
+        type_text(&mut app, "s:idle");
+        assert_eq!(names(&app), ["api", "docs"]);
+    }
+
+    #[test]
+    fn enter_keeps_the_filter_and_esc_clears_it() {
+        let mut app = filter_app();
+        let _ = app.on_key(key('/'));
+        type_text(&mut app, "do");
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.popup, None);
+        assert_eq!(app.filter(), "do");
+        assert_eq!(names(&app), ["docs"]);
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|a| a.name.as_str()), Some("docs"));
+        let _ = app.on_key(code(KeyCode::Esc));
+        assert_eq!(app.filter(), "");
+        assert_eq!(names(&app), ["web", "api", "docs"]);
+
+        let _ = app.on_key(key('/'));
+        type_text(&mut app, "zzz");
+        assert!(names(&app).is_empty());
+        let _ = app.on_key(code(KeyCode::Esc));
+        assert_eq!((app.popup.as_ref(), app.filter()), (None, ""));
+        assert_eq!(names(&app).len(), 3);
+    }
+
+    #[test]
+    fn slash_from_projects_filters_the_agents() {
+        let mut app = filter_app();
+        let _ = app.on_key(key('h'));
+        let _ = app.on_key(key('/'));
+        assert_eq!(app.focus, Focus::Agents);
+        assert!(matches!(app.popup, Some(Popup::Filter)));
     }
 
     #[test]
