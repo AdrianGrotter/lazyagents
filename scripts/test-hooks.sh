@@ -53,6 +53,38 @@ git init -q "$clean_repo"
 stop_hook_in() { printf '%s' '{}' | CLAUDE_PROJECT_DIR="$1" "$root/.claude/hooks/clippy-on-stop.sh"; }
 expect 0 "clippy stop hook skips when no Rust files changed" stop_hook_in "$clean_repo"
 
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+echo run >>"$CARGO_STUB_LOG"
+exit "${CARGO_STUB_EXIT:-0}"
+EOF
+chmod +x "$tmp/bin/cargo"
+export CARGO_STUB_LOG="$tmp/cargo.log"
+stub_repo="$tmp/stub-repo"
+git init -q "$stub_repo"
+printf 'pub fn a() {}\n' >"$stub_repo/lib.rs"
+git -C "$stub_repo" add lib.rs
+git -C "$stub_repo" -c user.name=t -c user.email=t@t commit -qm init
+stub_stop() { PATH="$tmp/bin:$PATH" CARGO_STUB_EXIT=${1:-0} stop_hook_in "$stub_repo"; }
+clippy_runs() { [[ $(wc -l <"$CARGO_STUB_LOG" 2>/dev/null || echo 0) -eq $1 ]]; }
+
+printf 'pub fn a() { }\n' >"$stub_repo/lib.rs"
+expect 0 "clippy stop hook runs clippy on a changed file" stub_stop
+expect 0 "clippy stop hook ran clippy once" clippy_runs 1
+expect 0 "clippy stop hook skips an unchanged diff after a pass" stub_stop
+expect 0 "clippy stop hook did not rerun clippy" clippy_runs 1
+printf 'pub fn a() {  }\n' >"$stub_repo/lib.rs"
+expect 0 "clippy stop hook reruns after an edit" stub_stop
+expect 0 "clippy stop hook ran clippy again" clippy_runs 2
+printf 'pub fn b() {}\n' >"$stub_repo/new.rs"
+expect 0 "clippy stop hook reruns for a new untracked file" stub_stop
+expect 0 "clippy stop hook ran clippy for the new file" clippy_runs 3
+printf 'pub fn b() { }\n' >"$stub_repo/new.rs"
+expect 2 "clippy stop hook blocks when clippy fails" stub_stop 1
+expect 2 "clippy stop hook reruns after a failure" stub_stop 1
+expect 0 "clippy stop hook ran clippy for each failure" clippy_runs 5
+
 precommit_in() { (cd "$1" && "$root/.githooks/pre-commit"); }
 expect 0 "pre-commit skips when nothing Rust is staged" precommit_in "$clean_repo"
 
