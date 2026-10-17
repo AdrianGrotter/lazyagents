@@ -2,6 +2,9 @@
 # End-to-end run of a worktree agent on a private tmux server: create it with a worktree, dirty it, read the git stat and diff, remove it with its worktree, and check that the branch stays.
 set -euo pipefail
 
+# The daemons started here must not depend on the direnv state of the shell running this.
+unset "${!DIRENV_@}"
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 h="$root/scripts/tmux-harness.sh"
 work=$(mktemp -d)

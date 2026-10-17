@@ -2,6 +2,9 @@
 # End-to-end run of the TUI on a private tmux server: add project, start a shell agent, type, stop, remove, quit; then stop the daemon underneath a running TUI.
 set -euo pipefail
 
+# The daemons started here must not depend on the direnv state of the shell running this.
+unset "${!DIRENV_@}"
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 h="$root/scripts/tmux-harness.sh"
 work=$(mktemp -d)

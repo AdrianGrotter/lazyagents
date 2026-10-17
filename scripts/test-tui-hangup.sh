@@ -4,6 +4,9 @@
 # the signal path.
 set -euo pipefail
 
+# The daemons started here must not depend on the direnv state of the shell running this.
+unset "${!DIRENV_@}"
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 h="$root/scripts/tmux-harness.sh"
 bin="$root/target/debug/lazyagents"
