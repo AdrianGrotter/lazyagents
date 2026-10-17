@@ -23,7 +23,7 @@ use crate::encode::encode;
 use crate::lock::InstanceLock;
 use crate::reap::{self, ProcessTable, Tracked};
 use crate::spawn::{Launch, SpawnContext, blocked_envrc_hint, hook_settings, spawn_spec};
-use crate::status::{on_hook, settle};
+use crate::status::{awaits_trust, on_hook, settle};
 use crate::store::{self, AgentRecord, StoredState};
 use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent, session_title};
 use crate::{direnv, git};
@@ -1077,7 +1077,13 @@ impl Daemon {
             Outcome::Output => {
                 agent.dirty = true;
                 agent.last_output = Some(Instant::now());
-                if note_blocked_envrc(agent) {
+                if agent.record.kind == AgentKind::Claude
+                    && agent.status == Status::Starting
+                    && awaits_trust(&terminal.screen().text())
+                {
+                    agent.set_status(Status::NeedsInput);
+                    self.announce(event.agent);
+                } else if note_blocked_envrc(agent) {
                     self.announce(event.agent);
                 }
             }

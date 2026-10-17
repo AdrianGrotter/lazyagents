@@ -999,6 +999,39 @@ async fn generic_agents_ignore_terminal_titles() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_claude_agent_at_the_trust_dialog_needs_input() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "untrusted",
+        AgentKind::Claude,
+        &[
+            "sh",
+            "-c",
+            "printf ' Quick safety check\\n   Yes, I trust this folder\\n'; exec sleep 30",
+        ],
+    )
+    .await
+    .expect("create");
+    conn.wait_status(agent.id, Status::NeedsInput).await;
+    conn.request(Request::Hook {
+        id: agent.id,
+        kind: HookKind::SessionStart,
+        session_id: None,
+        source: Some("startup".into()),
+    })
+    .await
+    .expect("hook");
+    conn.wait_status(agent.id, Status::Idle).await;
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn hook_for_unknown_agent_is_an_error() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;

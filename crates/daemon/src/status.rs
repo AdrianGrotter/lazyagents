@@ -19,6 +19,13 @@ pub fn on_hook(kind: HookKind) -> Status {
     }
 }
 
+/// Whether a Claude screen shows the workspace-trust dialog, which Claude shows before it
+/// runs any hook, whatever the line wrapping.
+pub fn awaits_trust(screen: &str) -> bool {
+    let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+    squeezed.contains("Yes,Itrustthisfolder") || squeezed.contains("Doyoutrustthefiles")
+}
+
 pub fn generic_status(last_output: Option<Instant>, now: Instant) -> Status {
     match last_output {
         Some(at) if now.duration_since(at) < ACTIVITY_WINDOW => Status::Working,
@@ -265,6 +272,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_trust_dialog_is_recognised_however_it_wraps() {
+        let dialog = " Quick safety check: Is this a project you created or one you trust?\n\n \
+                      ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm";
+        assert!(awaits_trust(dialog));
+        assert!(awaits_trust("   Yes, I trust\n this folder"));
+        assert!(awaits_trust("Do you trust the files in this folder?"));
+        assert!(!awaits_trust("✻ Welcome to Claude Code!\n> "));
+        assert!(!awaits_trust("direnv: loading ~/p/.envrc"));
     }
 
     #[test]
