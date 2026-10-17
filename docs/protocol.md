@@ -28,6 +28,18 @@ is rejected.
 4. Pushes (`AgentUpdated`, `AgentRemoved`, `AgentBell`, `ProjectsChanged`, `Frame`) can
    arrive at any time, between responses.
 
+## Changing the wire format
+
+postcard is not self-describing and encodes enum variants by index, so a client and a
+daemon that disagree on any message type misread each other while both still pass the
+version check. Any change to the encoded bytes of a message (a variant added, removed or
+reordered, a field added, removed, reordered or retyped) bumps `PROTOCOL_VERSION`.
+`crates/protocol/tests/wire.rs` enforces this: it encodes a fixed sample of every message
+and compares it with `crates/protocol/tests/fixtures/wire-v<version>.txt`. After bumping,
+`UPDATE_GOLDEN=1 cargo test -p protocol --test wire` writes the fixture for the new version;
+it refuses to rewrite the fixture of a version that already has one. A new enum variant
+does not compile in the test until its sample is added.
+
 ## Messages
 
 `ClientMessage`:

@@ -36,6 +36,7 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 - Commit each logical change with a Conventional Commit (skill: committing). Git hooks gate message format, fmt and clippy; Claude Code hooks format edited Rust files and run clippy before you stop.
 - A choice between real alternatives gets an ADR in `docs/decisions/` (skill: recording-decisions).
 - A change to the protocol, keybindings or status detection updates its doc in `docs/` in the same commit.
+- Any change to the encoded bytes of a protocol message bumps `PROTOCOL_VERSION`; `crates/protocol/tests/wire.rs` fails until you do, then `UPDATE_GOLDEN=1 cargo test -p protocol --test wire` records the new fixture.
 - Comments: default to none. Write one only for a non-obvious invariant or constraint that stays true as the code evolves; change history belongs in commit messages.
 - Tests and dev runs keep state in temp dirs (they set `LAZYAGENTS_STATE_DIR` to a temp dir); `~/.local/state/lazyagents` belongs to the user's real agents.
 - The tmux harness runs on its own server (`tmux -L lazyagents-harness`), leaving the user's tmux sessions alone.
