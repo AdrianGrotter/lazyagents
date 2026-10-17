@@ -5,7 +5,7 @@ description: "Drive the lazyagents TUI in an isolated tmux session: start it, se
 
 # Running dev
 
-`scripts/tmux-harness.sh` runs a TUI in a detached session on a private tmux server (`-L lazyagents-harness`); the user's own tmux is untouched.
+`scripts/tmux-harness.sh` runs a TUI in a detached session on a private tmux server (`-L lazyagents-harness`); the user's own tmux is untouched. `LAZYAGENTS_HARNESS_SERVER` names a different server; the harness and every script that drives it (`just check`'s smoke, hangup and worktree runs) use it. Set it to something unique, e.g. `LAZYAGENTS_HARNESS_SERVER=harness-$(basename "$PWD")`, when running `just check` in two worktrees at once, and pass the same name to `tmux -L` to attach and watch.
 
 1. Build first so startup is instant: `cargo build -p lazyagents`.
 2. Make a temp state dir and project with `mktemp -d` (the daemon's socket path must stay under ~104 bytes, so avoid long scratch paths), then start:

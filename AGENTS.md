@@ -39,4 +39,4 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 - Any change to the encoded bytes of a protocol message bumps `PROTOCOL_VERSION`; `crates/protocol/tests/wire.rs` fails until you do, then `UPDATE_GOLDEN=1 cargo test -p protocol --test wire` records the new fixture.
 - Comments: default to none. Write one only for a non-obvious invariant or constraint that stays true as the code evolves; change history belongs in commit messages.
 - Tests and dev runs keep state in temp dirs (they set `LAZYAGENTS_STATE_DIR` to a temp dir); `~/.local/state/lazyagents` belongs to the user's real agents.
-- The tmux harness runs on its own server (`tmux -L lazyagents-harness`), leaving the user's tmux sessions alone.
+- The tmux harness runs on its own server (`tmux -L lazyagents-harness`, or `$LAZYAGENTS_HARNESS_SERVER` when set), leaving the user's tmux sessions alone.

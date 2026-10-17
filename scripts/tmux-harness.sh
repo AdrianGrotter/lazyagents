@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Drives a TUI inside a detached session on a private tmux server for scripted end-to-end checks.
+# The server is $LAZYAGENTS_HARNESS_SERVER (default lazyagents-harness); concurrent runs, such
+# as `just check` in two worktrees, each set their own.
 set -euo pipefail
 
 usage() {
@@ -15,7 +17,8 @@ USAGE
   exit 2
 }
 
-t() { tmux -L lazyagents-harness -f /dev/null "$@"; }
+server=${LAZYAGENTS_HARNESS_SERVER:-lazyagents-harness}
+t() { tmux -L "$server" -f /dev/null "$@"; }
 
 cmd=${1:-}
 name=${2:-}
