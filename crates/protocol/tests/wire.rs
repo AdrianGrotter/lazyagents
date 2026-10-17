@@ -781,3 +781,35 @@ fn hook_kind_all_lists_every_variant() {
     );
     assert_eq!(HookKind::ALL.len(), HOOK_KIND_VARIANTS);
 }
+
+/// Version-mismatch detection (and the restart prompt after an upgrade) reads the
+/// handshake of a daemon or client from any version, so its start must never change:
+/// `Hello` and `Welcome` are variant 0 and begin with `protocol_version` as a u32
+/// varint. Fields after that prefix (`Welcome::daemon_version`) may evolve, so only the
+/// prefix is pinned.
+#[test]
+fn handshake_prefix_is_independent_of_the_protocol_version() {
+    const MESSAGE: &str = "the handshake layout must never change: version-mismatch \
+                           detection across releases depends on it";
+    for (version, prefix) in [
+        (5u32, vec![0x00, 0x05]),
+        (6, vec![0x00, 0x06]),
+        (300, vec![0x00, 0xac, 0x02]),
+    ] {
+        let hello = postcard::to_stdvec(&ClientMessage::Hello {
+            protocol_version: version,
+        })
+        .expect("serialize");
+        assert_eq!(hello, prefix, "Hello for version {version}: {MESSAGE}");
+
+        let welcome = postcard::to_stdvec(&ServerMessage::Welcome {
+            protocol_version: version,
+            daemon_version: "x".into(),
+        })
+        .expect("serialize");
+        assert!(
+            welcome.starts_with(&prefix),
+            "Welcome for version {version}: {MESSAGE}"
+        );
+    }
+}
