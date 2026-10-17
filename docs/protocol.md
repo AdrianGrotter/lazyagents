@@ -138,7 +138,8 @@ direnv's `… .envrc is blocked` error when it exits) gets `direnv blocked the w
 [architecture.md](architecture.md#worktrees)), and creates no agent.
 
 `GitStat` and `GitDiff` compare an agent's directory with the merge base of its `base`
-and `HEAD` for a worktree agent, with `HEAD` for any other. They answer
+and `HEAD` for a worktree agent, with `HEAD` for any other, counting untracked files that
+are not ignored as new files (the committed-only diff scope has none). They answer
 `Response::GitStat` or `Response::Diff`, or `Err` for an unknown agent, a directory that
 is not a git repository, or a diff too large for one message. `RemoveAgent` with
 `remove_worktree` answers `Err("worktree has uncommitted changes:\n<path>...")`, one

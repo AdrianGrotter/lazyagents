@@ -204,9 +204,11 @@ start: …`; after the allow, `r` restarts the agent.
 `GitStat` and `GitDiff` run on their own thread and answer when git finishes, so the event
 loop keeps serving. For a worktree agent they compare the working tree with `git
 merge-base <base> HEAD` (committed and uncommitted work); for any other agent with `HEAD`
-(uncommitted changes only). Untracked files appear only in `uncommitted`, the count of
-`git status --porcelain --untracked-files=normal` entries, and not in the diff. A diff too large for one message is
-an error.
+(uncommitted changes only). Untracked files that are not ignored count as new files in both:
+the diff runs against a copy of the index, in the temp dir, where `git add --intent-to-add
+--all` has listed them, so the agent's own index is never written. `uncommitted` is the
+count of `git status --porcelain --untracked-files=normal` entries. A diff too large for
+one message is an error.
 
 `RemoveAgent { remove_worktree: true }` refuses while `git status --porcelain
 --untracked-files=normal` lists anything, answering `worktree has uncommitted changes:`

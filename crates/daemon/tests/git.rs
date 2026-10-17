@@ -86,15 +86,51 @@ fn stat_without_base_counts_uncommitted_only() {
     assert_eq!(
         stat(repo.path(), None).expect("stat"),
         GitStat {
-            insertions: 1,
+            insertions: 2,
             deletions: 1,
-            files: 1,
+            files: 2,
             uncommitted: 2,
         }
     );
     let text = diff(repo.path(), None, DiffScope::All).expect("diff");
     assert!(text.contains("-hello") && text.contains("+bye"), "{text}");
     assert!(!text.contains("second.txt"), "{text}");
+}
+
+#[test]
+fn untracked_files_count_as_changes_without_touching_the_index() {
+    let repo = repo();
+    std::fs::write(repo.path().join(".gitignore"), "*.log\n").expect("gitignore");
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-q", "-m", "ignore logs"]);
+    std::fs::create_dir(repo.path().join("sub")).expect("mkdir");
+    std::fs::write(repo.path().join("sub/new.txt"), "a\nb\n").expect("untracked");
+    std::fs::write(repo.path().join("noise.log"), "x\n").expect("ignored");
+
+    assert_eq!(
+        stat(repo.path(), Some("main")).expect("stat"),
+        GitStat {
+            insertions: 2,
+            deletions: 0,
+            files: 1,
+            uncommitted: 1,
+        }
+    );
+    for scope in [DiffScope::All, DiffScope::Uncommitted] {
+        let text = diff(repo.path(), Some("main"), scope).expect("diff");
+        assert!(
+            text.contains("sub/new.txt") && text.contains("+a\n+b\n"),
+            "{text}"
+        );
+        assert!(!text.contains("noise.log"), "{text}");
+    }
+    let committed = diff(repo.path(), Some("main"), DiffScope::Committed).expect("diff");
+    assert_eq!(committed, "");
+    assert_eq!(
+        git(repo.path(), &["status", "--porcelain"]),
+        "?? sub/\n",
+        "the real index still lists the file as untracked"
+    );
 }
 
 #[test]

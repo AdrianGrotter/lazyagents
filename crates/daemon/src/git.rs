@@ -1,11 +1,12 @@
 //! Git worktrees and change queries, through the git CLI so the user's git config applies.
 
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::Context;
 use protocol::{DiffScope, GitStat};
+use uuid::Uuid;
 
 fn command(dir: Option<&Path>) -> Command {
     let mut command = Command::new("git");
@@ -278,9 +279,56 @@ fn compare_point(dir: &Path, base: Option<&str>) -> anyhow::Result<String> {
     Ok(point.trim().to_string())
 }
 
+/// A copy of a worktree's index that also lists its untracked, unignored files as
+/// intent-to-add, so a `git diff` against the working tree shows them as new files. The
+/// worktree's own index is never written; the copy is deleted on drop.
+struct IndexWithUntracked(PathBuf);
+
+impl IndexWithUntracked {
+    fn new(dir: &Path) -> anyhow::Result<Self> {
+        let index = git_read(
+            dir,
+            ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        )?;
+        let copy = Self(std::env::temp_dir().join(format!("lazyagents-index-{}", Uuid::new_v4())));
+        match std::fs::copy(index.trim(), &copy.0) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).context("copying the index");
+            }
+            _ => {}
+        }
+        finish(
+            command(Some(dir))
+                .args(["add", "--intent-to-add", "--all"])
+                .env("GIT_INDEX_FILE", &copy.0),
+        )?;
+        Ok(copy)
+    }
+
+    fn diff<I, S>(&self, dir: &Path, args: I) -> anyhow::Result<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        finish(
+            command(Some(dir))
+                .arg("diff")
+                .args(args)
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .env("GIT_INDEX_FILE", &self.0),
+        )
+    }
+}
+
+impl Drop for IndexWithUntracked {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 pub fn stat(dir: &Path, base: Option<&str>) -> anyhow::Result<GitStat> {
     let point = compare_point(dir, base)?;
-    let numstat = git_read(dir, ["diff", "--numstat", point.as_str()])?;
+    let numstat = IndexWithUntracked::new(dir)?.diff(dir, ["--numstat", point.as_str()])?;
     let mut stat = GitStat::default();
     for line in numstat.lines().filter(|line| !line.is_empty()) {
         let mut fields = line.split('\t');
@@ -300,11 +348,14 @@ pub fn stat(dir: &Path, base: Option<&str>) -> anyhow::Result<GitStat> {
 
 pub fn diff(dir: &Path, base: Option<&str>, scope: DiffScope) -> anyhow::Result<String> {
     let point = compare_point(dir, base)?;
-    let mut args = vec!["diff", "--no-color", "--no-ext-diff"];
+    let plain = ["--no-color", "--no-ext-diff"];
     match scope {
-        DiffScope::All => args.push(&point),
-        DiffScope::Uncommitted => args.push("HEAD"),
-        DiffScope::Committed => args.extend([point.as_str(), "HEAD"]),
+        DiffScope::All => {
+            IndexWithUntracked::new(dir)?.diff(dir, [plain[0], plain[1], point.as_str()])
+        }
+        DiffScope::Uncommitted => {
+            IndexWithUntracked::new(dir)?.diff(dir, [plain[0], plain[1], "HEAD"])
+        }
+        DiffScope::Committed => git_read(dir, ["diff", plain[0], plain[1], &point, "HEAD"]),
     }
-    git_read(dir, args)
 }

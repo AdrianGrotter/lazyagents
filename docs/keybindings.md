@@ -120,7 +120,8 @@ quit with the mismatch error.
 
 **Diff view** (`D`): the main pane shows `git diff` of the selected agent's directory:
 against the merge base with its base branch for a worktree agent (committed and uncommitted
-changes), against `HEAD` otherwise. Added lines are green, removed lines red, hunk headers
+changes), against `HEAD` otherwise. Untracked files that are not ignored show as new files.
+Added lines are green, removed lines red, hunk headers
 cyan and file headers bold (`[theme]` `diff_add`, `diff_remove`, `diff_hunk`). The view
 shows at most 20 000 lines. A git error closes it and shows the error in the status bar.
 
