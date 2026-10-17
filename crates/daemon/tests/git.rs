@@ -343,6 +343,51 @@ fn worktree_include_copies_matching_ignored_files_only() {
 }
 
 #[test]
+fn worktree_include_searches_only_the_ignored_directories_it_names() {
+    let repo = repo();
+    std::fs::write(
+        repo.path().join(".gitignore"),
+        "target/\n.cache/\nnode_modules/\n.env\n",
+    )
+    .expect("ignore");
+    std::fs::write(
+        repo.path().join(".worktreeinclude"),
+        "*.env\n.env\n.cache/token\nnode_modules\n",
+    )
+    .expect("include");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-q", "-m", "ignore"]);
+    let files = [
+        ".env",
+        "pkg/a/.env",
+        "target/debug/build.env",
+        ".cache/token",
+        ".cache/other",
+        "node_modules/m/index.js",
+    ];
+    for file in files {
+        let path = repo.path().join(file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(path, file).expect("write");
+    }
+
+    let root = tempfile::tempdir().expect("worktree root");
+    let wt = root.path().join("wt");
+    add_worktree(repo.path(), &wt, "lazyagents/wt", "main").expect("add");
+    let copied = copy_worktree_includes(repo.path(), &wt).expect("copy");
+    assert_eq!(
+        copied,
+        [
+            ".cache/token",
+            ".env",
+            "node_modules/m/index.js",
+            "pkg/a/.env"
+        ]
+    );
+    assert!(!wt.join("target").exists());
+}
+
+#[test]
 fn without_a_worktree_include_nothing_is_copied() {
     let repo = repo();
     let root = tempfile::tempdir().expect("worktree root");

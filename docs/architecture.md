@@ -191,9 +191,12 @@ its worktree, so it can be restarted. The agent's cwd is the worktree, and
 `AgentInfo.worktree` holds its path, branch and base. Renaming the agent keeps its branch
 and worktree path.
 
-After the add, files named by the project's `.worktreeinclude` that git ignores (`git
-ls-files --others --ignored` with its patterns, intersected with `--exclude-standard`) are
-copied into the worktree, skipping any already there; a failure is logged and the agent
+After the add, files named by the project's `.worktreeinclude` that git ignores are copied into
+the worktree, skipping any already there. `git ls-files --others --ignored --exclude-standard
+--directory` lists the ignored files and each directory ignored as a whole once, without
+walking it; such a directory is searched only when an include pattern names it or a path in
+it (ADR 0017). Within those paths, the files `ls-files` lists with the include patterns and
+with `--exclude-standard` are copied; a failure is logged and the agent
 starts anyway. A `CreateAgent.setup` the user approved in the TUI (ADR 0014) wraps the
 agent's first start in `sh -c` so the script runs in its terminal first.
 

@@ -165,35 +165,30 @@ pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> anyhow::Result<
 
 /// Copies into a new worktree the project's files that git ignores and its `.worktreeinclude`
 /// names, as Claude Code does for its own worktrees; gitignore syntax, relative to the
-/// project. Returns the copied paths, sorted.
+/// project. A directory git ignores as a whole is searched only when a pattern may reach
+/// into it (`may_reach_into`), so a large ignored tree such as `target/` is never walked
+/// for a pattern like `*.env`. Returns the copied paths, sorted.
 pub fn copy_worktree_includes(project: &Path, worktree: &Path) -> anyhow::Result<Vec<String>> {
     let include = project.join(".worktreeinclude");
     if !include.is_file() {
         return Ok(Vec::new());
     }
-    let listed = |args: &[&OsStr]| -> anyhow::Result<std::collections::BTreeSet<String>> {
-        let out = git_read(project, args)?;
-        Ok(out
-            .split('\0')
-            .filter(|p| !p.is_empty())
-            .map(str::to_string)
-            .collect())
-    };
+    let patterns = std::fs::read_to_string(&include)
+        .with_context(|| format!("reading {}", include.display()))?;
+    let entries = ls_ignored(project, &["--exclude-standard", "--directory"], &[])?;
+    let scope: Vec<&str> = entries
+        .iter()
+        .map(String::as_str)
+        .filter(|entry| {
+            !entry.ends_with('/') || patterns.lines().any(|line| may_reach_into(line, entry))
+        })
+        .collect();
+    if scope.is_empty() {
+        return Ok(Vec::new());
+    }
     let exclude_from = format!("--exclude-from={}", include.display());
-    let named = listed(&[
-        OsStr::new("ls-files"),
-        OsStr::new("-z"),
-        OsStr::new("--others"),
-        OsStr::new("--ignored"),
-        OsStr::new(&exclude_from),
-    ])?;
-    let ignored = listed(&[
-        OsStr::new("ls-files"),
-        OsStr::new("-z"),
-        OsStr::new("--others"),
-        OsStr::new("--ignored"),
-        OsStr::new("--exclude-standard"),
-    ])?;
+    let named = ls_ignored(project, &[exclude_from.as_str()], &scope)?;
+    let ignored = ls_ignored(project, &["--exclude-standard"], &scope)?;
     let mut copied = Vec::new();
     for path in named.intersection(&ignored) {
         let target = worktree.join(path);
@@ -209,6 +204,88 @@ pub fn copy_worktree_includes(project: &Path, worktree: &Path) -> anyhow::Result
         copied.push(path.clone());
     }
     Ok(copied)
+}
+
+/// Untracked files that `excludes` ignore, within the `scope` paths when there are any;
+/// they go to git in batches, so no command line grows too long.
+fn ls_ignored(
+    project: &Path,
+    excludes: &[&str],
+    scope: &[&str],
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let batches: Vec<&[&str]> = if scope.is_empty() {
+        vec![&[]]
+    } else {
+        scope.chunks(500).collect()
+    };
+    let mut listed = std::collections::BTreeSet::new();
+    for batch in batches {
+        let mut args = vec!["ls-files", "-z", "--others", "--ignored"];
+        args.extend(excludes);
+        let literal: Vec<String> = batch
+            .iter()
+            .map(|path| format!(":(literal){path}"))
+            .collect();
+        if !literal.is_empty() {
+            args.push("--");
+            args.extend(literal.iter().map(String::as_str));
+        }
+        let out = git_read(project, &args)?;
+        listed.extend(
+            out.split('\0')
+                .filter(|path| !path.is_empty())
+                .map(str::to_string),
+        );
+    }
+    Ok(listed)
+}
+
+/// Whether the `.worktreeinclude` line may match a path inside `dir`, a directory git listed
+/// whole, with its trailing `/`: whether the pattern, read up to its first wildcard, names
+/// the directory, a path in it or a directory holding it. A pattern without a `/` before
+/// its end, or one starting with `**/`, is tried at every depth of `dir`; one starting with
+/// a wildcard reaches into no such directory.
+fn may_reach_into(line: &str, dir: &str) -> bool {
+    let pattern = line.trim_end();
+    if pattern.is_empty() || pattern.starts_with(['#', '!']) {
+        return false;
+    }
+    let mut body = pattern;
+    let mut any_depth = false;
+    while let Some(rest) = body.strip_prefix("**/") {
+        body = rest;
+        any_depth = true;
+    }
+    let anchored = body.starts_with('/');
+    let body = body.trim_start_matches('/').trim_end_matches('/');
+    if body.is_empty() {
+        return false;
+    }
+    if !any_depth && (anchored || body.contains('/')) {
+        return reaches(body, dir);
+    }
+    let mut start = dir;
+    loop {
+        if reaches(body, start) {
+            return true;
+        }
+        match start.trim_end_matches('/').find('/') {
+            Some(slash) => start = &start[slash + 1..],
+            None => return false,
+        }
+    }
+}
+
+/// Whether the anchored pattern `body` may match `dir` or a path inside it.
+fn reaches(body: &str, dir: &str) -> bool {
+    match body.find(['*', '?', '[', '\\']) {
+        None => format!("{body}/").starts_with(dir) || dir.starts_with(&format!("{body}/")),
+        Some(0) => false,
+        Some(wildcard) => {
+            let literal = &body[..wildcard];
+            literal.starts_with(dir) || dir.starts_with(literal)
+        }
+    }
 }
 
 /// Merges `branch` into `base` in the project's own checkout. The agent's worktree must hold
@@ -357,5 +434,42 @@ pub fn diff(dir: &Path, base: Option<&str>, scope: DiffScope) -> anyhow::Result<
             IndexWithUntracked::new(dir)?.diff(dir, [plain[0], plain[1], "HEAD"])
         }
         DiffScope::Committed => git_read(dir, ["diff", plain[0], plain[1], &point, "HEAD"]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_reach_into;
+
+    #[test]
+    fn a_pattern_reaches_into_the_directories_it_names() {
+        for (pattern, dir) in [
+            (".cache/token", ".cache/"),
+            ("/.cache/token", ".cache/"),
+            ("config/*.json", "config/"),
+            (".env*", ".envs/"),
+            ("node_modules", "node_modules/"),
+            ("node_modules/", "pkg/a/node_modules/"),
+            ("build", "build/debug/"),
+            ("**/secrets/key", "app/secrets/"),
+        ] {
+            assert!(may_reach_into(pattern, dir), "{pattern} into {dir}");
+        }
+    }
+
+    #[test]
+    fn a_pattern_leaves_unrelated_directories_alone() {
+        for (pattern, dir) in [
+            (".env", "target/"),
+            ("*.env", "target/"),
+            ("**/*.env", "target/"),
+            ("/node_modules", "pkg/node_modules/"),
+            ("config/local.toml", "target/config/"),
+            ("!target", "target/"),
+            ("# target", "target/"),
+            ("", "target/"),
+        ] {
+            assert!(!may_reach_into(pattern, dir), "{pattern} into {dir}");
+        }
     }
 }

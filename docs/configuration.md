@@ -303,7 +303,10 @@ directory, in their environment, which a setup can use to copy from the main che
 
 `.worktreeinclude` lists, in gitignore syntax, gitignored files to copy from the project
 into each new worktree, such as `.env`; it is the file Claude Code and the Codex app read for
-their own worktrees. Files already in the worktree are left alone, and nothing is run.
+their own worktrees. Files already in the worktree are left alone, and nothing is run. As in
+Claude Code, a directory git ignores as a whole, such as `target/`, is searched only when a
+pattern names it or a path in it: `*.env` copies `.env` and `app/.env`, but not
+`target/debug/x.env` unless a line such as `target/debug/*.env` names that directory.
 
 ## Notifications
 
