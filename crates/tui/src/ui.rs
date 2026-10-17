@@ -3,6 +3,7 @@ use std::time::Instant;
 use protocol::{AgentInfo, AgentKind, Color as ScreenColor, Screen, Status};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -310,8 +311,20 @@ fn selectable_list(
     (list, ListState::default().with_selected(Some(selected)))
 }
 
+/// `name` led by the first plain digit key bound to `action`, as lazygit numbers its boxes.
+fn numbered(keymap: &Keymap, action: Action, name: &str) -> String {
+    let digit = keymap.keys(action).into_iter().find(|key| {
+        matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit()) && !key.ctrl && !key.alt
+    });
+    match digit {
+        Some(key) => format!(" [{key}] {name} "),
+        None => format!(" {name} "),
+    }
+}
+
 fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
-    let block = block(" Projects ", app.focus == Focus::Projects, &app.theme);
+    let title = numbered(&app.keymap, Action::FocusProjects, "Projects");
+    let block = block(title, app.focus == Focus::Projects, &app.theme);
     if app.projects.is_empty() {
         let open_sides = block.borders(Borders::TOP | Borders::BOTTOM);
         let add = app.keymap.first_key(Action::AddProject);
@@ -374,10 +387,11 @@ fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
 }
 
 fn draw_agents(frame: &mut Frame, app: &App, area: Rect, tick: u64) {
-    let mut title = match app.view {
-        AgentView::Project => " Agents ".to_string(),
-        AgentView::All => " Agents · all ".to_string(),
+    let name = match app.view {
+        AgentView::Project => "Agents",
+        AgentView::All => "Agents · all",
     };
+    let mut title = numbered(&app.keymap, Action::FocusAgents, name);
     if !app.filter().is_empty() {
         title.push_str(&format!("· /{} ", app.filter()));
     }
@@ -1572,6 +1586,26 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_titles_name_the_digit_that_focuses_them() {
+        let p = project("p");
+        let agents = vec![agent(&p, "a", Status::Idle)];
+        let (mut app, _) = loaded(vec![p.clone()], agents.clone());
+        let (text, _) = render(&app);
+        assert!(text.contains("╭ [1] Projects ─"), "{text}");
+        assert!(text.contains("╭ [2] Agents ─"), "{text}");
+        app.view = crate::app::AgentView::All;
+        let (text, _) = render(&app);
+        assert!(text.contains("╭ [2] Agents · all ─"), "{text}");
+
+        let config =
+            "[keys.sidebar]\nfocus_projects = [\"p\", \"ctrl-3\"]\nfocus_agents = [\"l\", \"9\"]\n";
+        let (app, _) = loaded_with(configured(config), vec![p], agents);
+        let (text, _) = render(&app);
+        assert!(text.contains("╭ Projects ─"), "{text}");
+        assert!(text.contains("╭ [9] Agents ─"), "{text}");
+    }
+
+    #[test]
     fn status_bar_shows_messages_then_hints() {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
@@ -2014,17 +2048,6 @@ mod tests {
         }
     }
 
-    fn find(buffer: &Buffer, area: Rect, symbol: &str) -> (u16, u16) {
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                if buffer[(x, y)].symbol() == symbol {
-                    return (x, y);
-                }
-            }
-        }
-        panic!("{symbol:?} not found in {area:?}");
-    }
-
     fn find_text(buffer: &Buffer, area: Rect, text: &str) -> (u16, u16) {
         for y in area.top()..area.bottom() {
             let row: String = (area.left()..area.right())
@@ -2081,7 +2104,10 @@ mod tests {
         assert_eq!(fg(dot("a3")), Color::LightGreen);
         assert_eq!(fg(dot("a4")), Color::White);
         assert_eq!(fg(dot("a5")), Color::LightRed);
-        assert_eq!(fg(find(&buffer, layout.projects, "1")), Color::Magenta);
+        assert_eq!(
+            fg(find_text(&buffer, layout.projects, "● 1")),
+            Color::Magenta
+        );
         assert_eq!(fg((0, layout.status.y)), Color::White);
 
         app.fail("boom");

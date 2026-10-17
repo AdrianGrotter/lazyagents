@@ -17,7 +17,7 @@ Two input modes:
 |---|---|
 | `j`/`k`, `↑`/`↓` | move within the focused box |
 | `h`/`l`, `←`/`→`, `tab`/`shift-tab` | switch between Projects and Agents |
-| `1`/`2` | focus Projects / Agents |
+| `1`/`2` | focus Projects / Agents; each box's title starts with the first plain digit key bound to focus it (`[1] Projects`, `[2] Agents`), or no number when none is |
 | `enter` | focus main pane (pane mode); on a stopped or exited agent, start it (Claude: resume session) and focus the pane once it runs |
 | `n` | new agent popup: name (optional), preset (`claude`, `shell`, custom command), worktree toggle, base branch and first prompt |
 | `x` | stop agent (confirm) |
