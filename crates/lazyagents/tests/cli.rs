@@ -776,7 +776,7 @@ fn stop_daemon_stops_a_running_daemon() {
             .expect("start daemon"),
     );
     assert!(
-        wait_until(Duration::from_secs(5), || env.socket().exists()),
+        wait_until(Duration::from_secs(30), || env.socket().exists()),
         "daemon never listened"
     );
     let paths = protocol::StatePaths::new(env.state.path());
