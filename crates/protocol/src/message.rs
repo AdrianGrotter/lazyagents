@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentId, AgentInfo, CreateAgent, Frame, GitStat, HookKind, InputEvent, Project, ProjectId,
-    Usage,
+    AgentId, AgentInfo, CreateAgent, DiffScope, Frame, GitStat, HookKind, InputEvent, Project,
+    ProjectId, Usage,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +43,7 @@ pub enum Request {
     },
     GitDiff {
         id: AgentId,
+        scope: DiffScope,
     },
     RenameAgent {
         id: AgentId,
@@ -220,7 +221,10 @@ mod tests {
                 force: true,
             },
             Request::GitStat { id },
-            Request::GitDiff { id },
+            Request::GitDiff {
+                id,
+                scope: DiffScope::Committed,
+            },
             Request::RenameAgent {
                 id,
                 name: "b".into(),

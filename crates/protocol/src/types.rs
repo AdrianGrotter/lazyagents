@@ -154,6 +154,36 @@ pub struct WorktreeRequest {
     pub base: Option<String>,
 }
 
+/// Which changes a `GitDiff` shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DiffScope {
+    /// Committed and uncommitted changes since the comparison point.
+    #[default]
+    All,
+    /// Changes not committed yet: the working tree against `HEAD`.
+    Uncommitted,
+    /// Commits since the comparison point, without uncommitted changes.
+    Committed,
+}
+
+impl DiffScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            DiffScope::All => "all changes",
+            DiffScope::Uncommitted => "uncommitted",
+            DiffScope::Committed => "committed",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            DiffScope::All => DiffScope::Uncommitted,
+            DiffScope::Uncommitted => DiffScope::Committed,
+            DiffScope::Committed => DiffScope::All,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitStat {
     pub insertions: u32,

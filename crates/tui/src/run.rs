@@ -286,8 +286,8 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                     app.apply_git_stat(id, result);
                     Vec::new()
                 }
-                Some(Incoming::Diff { id, result }) => {
-                    app.apply_diff(id, result);
+                Some(Incoming::Diff { id, scope, result }) => {
+                    app.apply_scoped_diff(id, scope, result);
                     Vec::new()
                 }
                 Some(Incoming::Failed(error)) => {

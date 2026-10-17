@@ -433,7 +433,12 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     let focused = app.focus == Focus::Pane;
     let agent = app.selected_agent();
     if let (Some(view), Some(agent)) = (&app.diff, agent) {
-        let title = format!(" diff · {} ", label(agent));
+        let files = match view.files() {
+            1 => " · 1 file".to_string(),
+            n if view.lines.is_some() => format!(" · {n} files"),
+            _ => String::new(),
+        };
+        let title = format!(" diff · {} · {}{files} ", label(agent), view.scope.label());
         frame.render_widget(block(title, true, &app.theme), areas.pane);
         frame.render_widget(
             diff_text(view, app, areas.pane_inner.height),
@@ -556,7 +561,7 @@ fn diff_hint(keymap: &Keymap) -> String {
         }
     }
     format!(
-        "c comment · S send comments · n/N next/previous comment · {} close · j/k move · ctrl-d/ctrl-u half page · pagedown/pageup page · g/G top/bottom",
+        "{} close · c comment · S send comments · n/N comments · s scope · ]/[ file · }}/{{ hunk · j/k move · ctrl-d/ctrl-u half page · pagedown/pageup page · g/G top/bottom",
         close.join("/")
     )
 }
@@ -2206,7 +2211,7 @@ mod tests {
         );
         let status = text.lines().last().expect("status line");
         assert!(
-            status.starts_with("c comment · S send comments"),
+            status.starts_with("q/esc/D close · c comment · S send comments"),
             "{status}"
         );
     }
@@ -2235,7 +2240,7 @@ mod tests {
         assert!(!at("+new").modifier.contains(Modifier::BOLD));
         assert_eq!(at(" same").fg, Color::Reset);
         assert_eq!(buffer[(layout.pane.x, layout.pane.y)].fg, Color::Green);
-        assert!(text.contains(" diff · a "), "{text}");
+        assert!(text.contains(" diff · a · all changes · 1 file "), "{text}");
         let status = text.lines().last().expect("status line");
         assert!(status.contains("q/esc/D close"), "{status}");
         let _ = app.set_pane_size(73, 5);

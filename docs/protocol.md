@@ -52,7 +52,9 @@ is rejected.
   worktree and is refused while it has uncommitted changes unless `force` is set; the
   branch is never deleted
 - `GitStat { id }`
-- `GitDiff { id }`
+- `GitDiff { id, scope }`: `scope` is `All` (committed and uncommitted changes since the
+  comparison point), `Uncommitted` (working tree against `HEAD`) or `Committed` (comparison
+  point to `HEAD`)
 - `RenameAgent { id, name }`
 - `Subscribe { id }`
 - `Unsubscribe`

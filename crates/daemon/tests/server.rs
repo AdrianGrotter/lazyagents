@@ -2412,7 +2412,12 @@ async fn git_queries_answer_while_the_loop_keeps_serving() {
     std::fs::write(path.join("big.txt"), shuffled).expect("shuffle big file");
 
     let sent = tokio::time::Instant::now();
-    let diff_id = conn.send(Request::GitDiff { id: agent.id }).await;
+    let diff_id = conn
+        .send(Request::GitDiff {
+            id: agent.id,
+            scope: protocol::DiffScope::All,
+        })
+        .await;
     let list_id = conn.send(Request::ListAgents).await;
     let mut list_after = None;
     let mut diff = None;
@@ -2467,7 +2472,13 @@ async fn git_stat_and_diff_for_plain_agents_show_uncommitted_changes() {
             uncommitted: 1,
         }))
     );
-    let Ok(Response::Diff(text)) = conn.request(Request::GitDiff { id: agent.id }).await else {
+    let Ok(Response::Diff(text)) = conn
+        .request(Request::GitDiff {
+            id: agent.id,
+            scope: protocol::DiffScope::All,
+        })
+        .await
+    else {
         panic!("diff")
     };
     assert!(text.contains("+more"), "{text}");

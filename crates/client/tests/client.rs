@@ -124,7 +124,13 @@ async fn sent_requests_get_their_own_replies_in_any_order() {
     });
     let mut client = Client::connect(&paths).await.expect("connect");
     let id = protocol::AgentId::random();
-    let slow = client.send(Request::GitDiff { id }).await.expect("send");
+    let slow = client
+        .send(Request::GitDiff {
+            id,
+            scope: protocol::DiffScope::All,
+        })
+        .await
+        .expect("send");
     let fast = client.send(Request::ListAgents).await.expect("send");
     let fast = tokio::time::timeout(Duration::from_secs(2), fast.wait())
         .await

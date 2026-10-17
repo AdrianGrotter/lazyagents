@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::Context;
-use protocol::GitStat;
+use protocol::{DiffScope, GitStat};
 
 fn command(dir: Option<&Path>) -> Command {
     let mut command = Command::new("git");
@@ -195,7 +195,13 @@ pub fn stat(dir: &Path, base: Option<&str>) -> anyhow::Result<GitStat> {
     Ok(stat)
 }
 
-pub fn diff(dir: &Path, base: Option<&str>) -> anyhow::Result<String> {
+pub fn diff(dir: &Path, base: Option<&str>, scope: DiffScope) -> anyhow::Result<String> {
     let point = compare_point(dir, base)?;
-    git_read(dir, ["diff", "--no-color", "--no-ext-diff", point.as_str()])
+    let mut args = vec!["diff", "--no-color", "--no-ext-diff"];
+    match scope {
+        DiffScope::All => args.push(&point),
+        DiffScope::Uncommitted => args.push("HEAD"),
+        DiffScope::Committed => args.extend([point.as_str(), "HEAD"]),
+    }
+    git_read(dir, args)
 }

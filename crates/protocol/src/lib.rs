@@ -14,8 +14,8 @@ pub use message::{ClientMessage, Request, Response, ServerMessage};
 pub use paths::StatePaths;
 pub use screen::{Cell, Color, Frame, Row, Screen, Style};
 pub use types::{
-    AgentId, AgentInfo, AgentKind, CreateAgent, GitStat, HookKind, Project, ProjectId, Status,
-    Usage, WorktreeInfo, WorktreeRequest,
+    AgentId, AgentInfo, AgentKind, CreateAgent, DiffScope, GitStat, HookKind, Project, ProjectId,
+    Status, Usage, WorktreeInfo, WorktreeRequest,
 };
 
 pub const PROTOCOL_VERSION: u32 = 5;

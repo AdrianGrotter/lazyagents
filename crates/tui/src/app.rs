@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use protocol::{
-    AgentId, AgentInfo, AgentKind, CreateAgent, GitStat, InputEvent, Project, ProjectId, Request,
-    Response, Screen, ServerMessage, Status, WorktreeRequest,
+    AgentId, AgentInfo, AgentKind, CreateAgent, DiffScope, GitStat, InputEvent, Project, ProjectId,
+    Request, Response, Screen, ServerMessage, Status, WorktreeRequest,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Position, Rect};
@@ -191,6 +191,7 @@ impl Confirmed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffView {
     pub agent: AgentId,
+    pub scope: DiffScope,
     pub lines: Option<Vec<String>>,
     pub locations: Vec<Option<Location>>,
     pub scroll: usize,
@@ -409,7 +410,7 @@ pub struct App {
     /// is left or opened.
     peeked: Option<AgentId>,
     stats_in_flight: HashMap<AgentId, Instant>,
-    diffs_in_flight: HashMap<AgentId, Instant>,
+    diffs_in_flight: HashMap<(AgentId, DiffScope), Instant>,
     stat_polled: Option<(AgentId, Instant)>,
     pending_remove: Option<PendingRemove>,
     pending_select: Option<PendingCreate>,
@@ -682,12 +683,24 @@ impl App {
         }
     }
 
+    /// Fills the open diff view with the diff of its own scope.
     pub fn apply_diff(&mut self, id: AgentId, result: Result<String, String>) {
-        self.diffs_in_flight.remove(&id);
+        let scope = self.diff.as_ref().map_or(DiffScope::All, |view| view.scope);
+        self.apply_scoped_diff(id, scope, result);
+    }
+
+    /// A reply for another scope than the view shows is dropped, since the user moved on.
+    pub fn apply_scoped_diff(
+        &mut self,
+        id: AgentId,
+        scope: DiffScope,
+        result: Result<String, String>,
+    ) {
+        self.diffs_in_flight.remove(&(id, scope));
         let Some(view) = self
             .diff
             .as_mut()
-            .filter(|view| view.agent == id && view.lines.is_none())
+            .filter(|view| view.agent == id && view.scope == scope && view.lines.is_none())
         else {
             return;
         };
@@ -713,7 +726,7 @@ impl App {
         let exists = |id: &AgentId| self.agents.iter().any(|a| a.id == *id);
         self.git_stats.retain(|id, _| exists(id));
         self.stats_in_flight.retain(|id, _| exists(id));
-        self.diffs_in_flight.retain(|id, _| exists(id));
+        self.diffs_in_flight.retain(|(id, _), _| exists(id));
         self.unseen.retain(|id| exists(id));
     }
 
@@ -1088,6 +1101,14 @@ const WHEEL_LINES: i32 = 3;
 const SCROLL_TOP: i32 = i32::MAX / 2;
 const SCROLL_BOTTOM: i32 = i32::MIN / 2;
 
+impl DiffView {
+    pub fn files(&self) -> usize {
+        self.lines.as_ref().map_or(0, |lines| {
+            lines.iter().filter(|l| l.starts_with("diff --git")).count()
+        })
+    }
+}
+
 /// How many of `comments` sit on `location`: 0 or 1.
 fn comments_at(comments: &[Comment], location: Option<&Option<Location>>) -> usize {
     match location {
@@ -1204,6 +1225,17 @@ impl App {
                 return Vec::new();
             }
             (KeyCode::Char('S'), false) => return self.send_comments(),
+            (KeyCode::Char('s'), false) => {
+                let Some(view) = &self.diff else {
+                    return Vec::new();
+                };
+                let (id, scope) = (view.agent, view.scope.next());
+                return self.show_diff(id, scope);
+            }
+            (KeyCode::Char(']'), false) => return self.jump_diff("diff --git", true),
+            (KeyCode::Char('['), false) => return self.jump_diff("diff --git", false),
+            (KeyCode::Char('}'), false) => return self.jump_diff("@@", true),
+            (KeyCode::Char('{'), false) => return self.jump_diff("@@", false),
             _ => return Vec::new(),
         };
         self.move_diff_cursor(step);
@@ -1325,6 +1357,47 @@ impl App {
             }
             None => self.fail("no comments on this diff"),
         }
+    }
+
+    /// Opens the diff view on `scope` of `id`'s changes, asking the daemon unless that
+    /// diff is already on its way.
+    fn show_diff(&mut self, id: AgentId, scope: DiffScope) -> Vec<Effect> {
+        self.diff = Some(DiffView {
+            agent: id,
+            scope,
+            lines: None,
+            locations: Vec::new(),
+            scroll: 0,
+            cursor: 0,
+        });
+        if self.diffs_in_flight.contains_key(&(id, scope)) {
+            return Vec::new();
+        }
+        self.diffs_in_flight.insert((id, scope), Instant::now());
+        vec![Effect::Send(Request::GitDiff { id, scope })]
+    }
+
+    /// Moves the cursor to the next or previous line starting with `prefix`: a file
+    /// header or a hunk header. It stays put when there is none that way.
+    fn jump_diff(&mut self, prefix: &str, forward: bool) -> Vec<Effect> {
+        let Some(view) = self.diff.as_mut() else {
+            return Vec::new();
+        };
+        let Some(lines) = &view.lines else {
+            return Vec::new();
+        };
+        let found = if forward {
+            (view.cursor + 1..lines.len()).find(|&i| lines[i].starts_with(prefix))
+        } else {
+            (0..view.cursor)
+                .rev()
+                .find(|&i| lines[i].starts_with(prefix))
+        };
+        if let Some(line) = found {
+            view.cursor = line;
+            self.keep_cursor_visible();
+        }
+        Vec::new()
     }
 
     /// Sends every comment on the agent's diff as one prompt, in diff order, and returns
@@ -1813,19 +1886,8 @@ impl App {
             },
             Action::Diff => {
                 if let Some(id) = self.selected_agent().map(|a| a.id) {
-                    self.diff = Some(DiffView {
-                        agent: id,
-                        lines: None,
-                        locations: Vec::new(),
-                        scroll: 0,
-                        cursor: 0,
-                    });
                     self.focus = Focus::Diff;
-                    if self.diffs_in_flight.contains_key(&id) {
-                        return Vec::new();
-                    }
-                    self.diffs_in_flight.insert(id, Instant::now());
-                    return vec![Effect::Send(Request::GitDiff { id })];
+                    return self.show_diff(id, DiffScope::All);
                 }
             }
             Action::Restart => match self.selected_agent() {
@@ -4866,7 +4928,10 @@ pub(crate) mod tests {
     fn open_diff(app: &mut App, id: AgentId) {
         assert_eq!(
             app.on_key(key('D')),
-            vec![Effect::Send(Request::GitDiff { id })]
+            vec![Effect::Send(Request::GitDiff {
+                id,
+                scope: DiffScope::All
+            })]
         );
         assert_eq!(app.focus, Focus::Diff);
     }
@@ -6254,5 +6319,91 @@ mod help_tests {
         assert!(app.unavailable(Action::Restart).is_none());
         assert!(app.unavailable(Action::NewAgent).is_none());
         assert!(app.unavailable(Action::Help).is_none());
+    }
+}
+
+#[cfg(test)]
+mod diff_navigation_tests {
+    use super::tests::{agent, loaded, project};
+    use super::*;
+    use protocol::DiffScope;
+
+    const DIFF: &str = "diff --git a/a.rs b/a.rs\n\
+                        --- a/a.rs\n\
+                        +++ b/a.rs\n\
+                        @@ -1 +1 @@\n\
+                        -x\n\
+                        +y\n\
+                        @@ -9 +9 @@\n\
+                        -p\n\
+                        +q\n\
+                        diff --git a/b.rs b/b.rs\n\
+                        --- a/b.rs\n\
+                        +++ b/b.rs\n\
+                        @@ -1 +1 @@\n\
+                        -m\n\
+                        +n";
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn with_diff() -> (App, AgentInfo) {
+        let p = project("p");
+        let a = agent(&p, "api", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a.clone()]);
+        let _ = app.set_pane_size(80, 30);
+        assert_eq!(
+            app.on_key(key('D')),
+            vec![Effect::Send(Request::GitDiff {
+                id: a.id,
+                scope: DiffScope::All
+            })]
+        );
+        app.apply_diff(a.id, Ok(DIFF.into()));
+        (app, a)
+    }
+
+    fn cursor(app: &App) -> usize {
+        app.diff.as_ref().expect("diff").cursor
+    }
+
+    #[test]
+    fn brackets_jump_between_files_and_braces_between_hunks() {
+        let (mut app, _) = with_diff();
+        let _ = app.on_key(key(']'));
+        assert_eq!(cursor(&app), 9);
+        let _ = app.on_key(key(']'));
+        assert_eq!(cursor(&app), 9);
+        let _ = app.on_key(key('['));
+        assert_eq!(cursor(&app), 0);
+        let _ = app.on_key(key('}'));
+        assert_eq!(cursor(&app), 3);
+        let _ = app.on_key(key('}'));
+        assert_eq!(cursor(&app), 6);
+        let _ = app.on_key(key('}'));
+        assert_eq!(cursor(&app), 12);
+        let _ = app.on_key(key('{'));
+        assert_eq!(cursor(&app), 6);
+    }
+
+    #[test]
+    fn s_cycles_the_scope_and_asks_for_that_diff() {
+        let (mut app, a) = with_diff();
+        for scope in [DiffScope::Uncommitted, DiffScope::Committed, DiffScope::All] {
+            assert_eq!(
+                app.on_key(key('s')),
+                vec![Effect::Send(Request::GitDiff { id: a.id, scope })]
+            );
+            let view = app.diff.as_ref().expect("diff");
+            assert_eq!((view.scope, view.lines.as_ref()), (scope, None));
+            app.apply_diff(a.id, Ok(DIFF.into()));
+        }
+    }
+
+    #[test]
+    fn the_diff_counts_its_files() {
+        let (app, _) = with_diff();
+        assert_eq!(app.diff.as_ref().map(DiffView::files), Some(2));
     }
 }

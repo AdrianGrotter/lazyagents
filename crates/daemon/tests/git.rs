@@ -6,7 +6,7 @@ use common::{git, repo};
 use daemon::git::{
     add_worktree, check_branch, current_branch, diff, dirty_files, remove_worktree, stat,
 };
-use protocol::GitStat;
+use protocol::{DiffScope, GitStat};
 
 #[test]
 fn current_branch_reports_main() {
@@ -50,9 +50,17 @@ fn worktree_lifecycle() {
             uncommitted: 1,
         }
     );
-    let text = diff(&wt, Some("main")).expect("diff");
+    let text = diff(&wt, Some("main"), DiffScope::All).expect("diff");
     assert!(text.contains("+world"), "{text}");
     assert!(text.contains("+a\n+b\n"), "{text}");
+    let uncommitted = diff(&wt, Some("main"), DiffScope::Uncommitted).expect("diff");
+    assert!(uncommitted.contains("+world"), "{uncommitted}");
+    assert!(!uncommitted.contains("+a\n"), "{uncommitted}");
+    let committed = diff(&wt, Some("main"), DiffScope::Committed).expect("diff");
+    assert!(committed.contains("+a\n+b\n"), "{committed}");
+    assert!(!committed.contains("+world"), "{committed}");
+    let plain = diff(&wt, None, DiffScope::Committed).expect("diff");
+    assert_eq!(plain, "");
 
     let err = remove_worktree(repo.path(), &wt, false).expect_err("dirty worktree kept");
     assert!(!format!("{err:#}").is_empty());
@@ -83,7 +91,7 @@ fn stat_without_base_counts_uncommitted_only() {
             uncommitted: 2,
         }
     );
-    let text = diff(repo.path(), None).expect("diff");
+    let text = diff(repo.path(), None, DiffScope::All).expect("diff");
     assert!(text.contains("-hello") && text.contains("+bye"), "{text}");
     assert!(!text.contains("second.txt"), "{text}");
 }
@@ -95,8 +103,8 @@ fn non_repo_errors_mention_git_repository() {
     let errors = [
         stat(plain, None).map(|_| ()),
         stat(plain, Some("main")).map(|_| ()),
-        diff(plain, None).map(|_| ()),
-        diff(plain, Some("main")).map(|_| ()),
+        diff(plain, None, DiffScope::All).map(|_| ()),
+        diff(plain, Some("main"), DiffScope::All).map(|_| ()),
         dirty_files(plain).map(|_| ()),
         current_branch(plain).map(|_| ()),
     ];
@@ -127,7 +135,9 @@ fn bases_never_reach_git_as_options() {
     let base = "--output=/dev/null";
     for err in [
         stat(repo.path(), Some(base)).map(|_| ()).expect_err("stat"),
-        diff(repo.path(), Some(base)).map(|_| ()).expect_err("diff"),
+        diff(repo.path(), Some(base), DiffScope::All)
+            .map(|_| ())
+            .expect_err("diff"),
         add_worktree(repo.path(), &root.path().join("wt"), "lazyagents/wt", base).expect_err("add"),
     ] {
         assert!(format!("{err:#}").contains("invalid base"), "{err:#}");

@@ -1,5 +1,5 @@
 use client::Client;
-use protocol::{AgentId, GitStat, Request, Response, ServerMessage};
+use protocol::{AgentId, DiffScope, GitStat, Request, Response, ServerMessage};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
@@ -13,6 +13,7 @@ pub enum Incoming {
     },
     Diff {
         id: AgentId,
+        scope: DiffScope,
         result: Result<String, String>,
     },
     Closed,
@@ -29,8 +30,11 @@ pub fn spawn(mut client: Client) -> (UnboundedSender<Request>, UnboundedReceiver
             tokio::select! {
                 request = requests.recv() => {
                     let Some(request) = request else { break };
-                    if let Request::GitStat { id } | Request::GitDiff { id } = request {
-                        let diff = matches!(request, Request::GitDiff { .. });
+                    if let Request::GitStat { id } | Request::GitDiff { id, .. } = request {
+                        let diff = match request {
+                            Request::GitDiff { scope, .. } => Some(scope),
+                            _ => None,
+                        };
                         let sent = client.send(request).await;
                         let tx = incoming_tx.clone();
                         tokio::spawn(async move {
@@ -78,14 +82,14 @@ pub fn spawn(mut client: Client) -> (UnboundedSender<Request>, UnboundedReceiver
     (requests_tx, incoming)
 }
 
-fn git_reply(id: AgentId, diff: bool, result: Result<Response, String>) -> Incoming {
+fn git_reply(id: AgentId, diff: Option<DiffScope>, result: Result<Response, String>) -> Incoming {
     let unexpected = |other: Response| format!("unexpected reply {other:?}");
-    if diff {
+    if let Some(scope) = diff {
         let result = result.and_then(|response| match response {
             Response::Diff(text) => Ok(text),
             other => Err(unexpected(other)),
         });
-        Incoming::Diff { id, result }
+        Incoming::Diff { id, scope, result }
     } else {
         let result = result.and_then(|response| match response {
             Response::GitStat(stat) => Ok(stat),
@@ -105,12 +109,12 @@ mod tests {
     #[test]
     fn git_replies_of_the_wrong_kind_become_errors() {
         let id = AgentId::random();
-        let stat = git_reply(id, false, Ok(Response::Diff("+x".into())));
+        let stat = git_reply(id, None, Ok(Response::Diff("+x".into())));
         assert!(
             matches!(&stat, Incoming::GitStat { id: got, result: Err(e) } if *got == id && e.contains("unexpected")),
             "{stat:?}"
         );
-        let diff = git_reply(id, true, Ok(Response::Diff("+x".into())));
+        let diff = git_reply(id, Some(DiffScope::All), Ok(Response::Diff("+x".into())));
         assert!(
             matches!(&diff, Incoming::Diff { result: Ok(text), .. } if text == "+x"),
             "{diff:?}"
@@ -154,7 +158,10 @@ mod tests {
         let agent = AgentId::random();
         for request in [
             Request::GitStat { id: agent },
-            Request::GitDiff { id: agent },
+            Request::GitDiff {
+                id: agent,
+                scope: protocol::DiffScope::All,
+            },
             Request::ListAgents,
         ] {
             requests.send(request).expect("send");
@@ -170,7 +177,7 @@ mod tests {
                 Incoming::GitStat { id, result } => {
                     assert_eq!((id, result), (agent, Err("stat failed".into())));
                 }
-                Incoming::Diff { id, result } => {
+                Incoming::Diff { id, result, .. } => {
                     assert_eq!((id, result), (agent, Err("diff failed".into())));
                 }
                 Incoming::Failed(message) => assert_eq!(message, "list failed"),

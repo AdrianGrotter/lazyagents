@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use protocol::{
-    AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, HookKind, InputEvent,
+    AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, DiffScope, HookKind, InputEvent,
     MAX_MESSAGE_LEN, PROTOCOL_VERSION, Project, ProjectId, Request, Response, Screen,
     ServerMessage, StatePaths, Status, Usage, WorktreeInfo, WorktreeRequest, read_message,
     write_message,
@@ -71,7 +71,7 @@ enum Reply {
 #[derive(Clone, Copy)]
 enum GitQuery {
     Stat,
-    Diff,
+    Diff(DiffScope),
 }
 
 const TICK: Duration = Duration::from_millis(33);
@@ -456,8 +456,8 @@ impl Daemon {
             Request::GitStat { id } => {
                 return self.git_query(client, request_id, id, GitQuery::Stat);
             }
-            Request::GitDiff { id } => {
-                return self.git_query(client, request_id, id, GitQuery::Diff);
+            Request::GitDiff { id, scope } => {
+                return self.git_query(client, request_id, id, GitQuery::Diff(scope));
             }
             Request::RenameAgent { id, name } => self.rename_agent(id, name).map(Response::Agent),
             Request::Subscribe { id } => self.subscribe(client, id).map(|()| Response::Ok),
@@ -1396,7 +1396,7 @@ const RESPONSE_OVERHEAD: usize = 1024;
 fn run_git_query(dir: &Path, base: Option<&str>, query: GitQuery) -> Result<Response, String> {
     match query {
         GitQuery::Stat => git::stat(dir, base).map(Response::GitStat),
-        GitQuery::Diff => git::diff(dir, base).map(Response::Diff),
+        GitQuery::Diff(scope) => git::diff(dir, base, scope).map(Response::Diff),
     }
     .map_err(|e| format!("{e:#}"))
     .and_then(fit_in_a_message)

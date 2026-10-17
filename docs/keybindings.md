@@ -125,6 +125,9 @@ shows at most 20 000 lines. A git error closes it and shows the error in the sta
 | `ctrl-d`/`ctrl-u` | move it half a page |
 | `pagedown`/`pageup` | move it a page |
 | `g`/`G` | first / last line |
+| `s` | switch what the diff shows: all changes, uncommitted only, committed only (the title names it, with the file count) |
+| `]`/`[` | next / previous file |
+| `}`/`{` | next / previous hunk |
 | `c` | comment on the cursor line (an added, removed or context line); on a commented line, edit the comment; saving it empty removes it |
 | `n`/`N` | next / previous commented line |
 | `S` | send every comment to the agent as one prompt and return to the sidebar |
