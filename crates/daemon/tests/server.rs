@@ -100,12 +100,15 @@ async fn spawn_daemon(dir: &Path) -> JoinHandle<anyhow::Result<()>> {
 
 async fn spawn_configured(config: Config) -> JoinHandle<anyhow::Result<()>> {
     let socket = config.paths.socket();
+    let started = tokio::time::Instant::now();
     let task = tokio::spawn(run(config));
-    let deadline = tokio::time::Instant::now() + WAIT;
     while UnixStream::connect(&socket).await.is_err() {
+        if task.is_finished() {
+            panic!("daemon stopped before listening: {:?}", task.await);
+        }
         assert!(
-            tokio::time::Instant::now() < deadline,
-            "daemon never listened"
+            started.elapsed() < WAIT,
+            "daemon never listened within {WAIT:?}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
