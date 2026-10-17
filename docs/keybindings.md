@@ -19,7 +19,7 @@ Two input modes:
 | `h`/`l`, `←`/`→`, `tab`/`shift-tab` | switch between Projects and Agents |
 | `1`/`2` | focus Projects / Agents |
 | `enter` | focus main pane (pane mode) |
-| `n` | new agent popup: name (optional), preset (`claude`, `shell`, custom command), worktree toggle and base branch |
+| `n` | new agent popup: name (optional), preset (`claude`, `shell`, custom command), worktree toggle, base branch and first prompt |
 | `x` | stop agent (confirm) |
 | `r` | restart agent (confirm while it is running; Claude: resume session) |
 | `d` | remove agent (confirm; for a worktree agent, choose whether the worktree goes too); with Projects focused, remove the project (confirm; refused while it has agents) |
@@ -44,7 +44,8 @@ between them, `enter` adds and `esc` cancels.
 Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the new agent form,
 `tab`/`shift-tab` (or `↓`/`↑`) move between the visible fields, `enter` starts the agent and
 `esc` cancels. The fields are Name, Preset (`←`/`→`/`space` change it), Command (only for the
-custom preset), Worktree (`space`/`←`/`→` toggle it) and Base (only while Worktree is on).
+custom preset), Worktree (`space`/`←`/`→` toggle it), Base (only while Worktree is on) and
+Prompt, the agent's first message (empty means none; a pasted newline becomes a space).
 Spaces in an agent's name (new agent form and rename) become dashes: `my new agent` is
 stored as `my-new-agent`. An empty name becomes `<preset>-<n>` with the lowest number no
 agent in the project uses (`claude-1`, `shell-2`). The Agents box and the pane's header

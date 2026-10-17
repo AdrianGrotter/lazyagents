@@ -40,9 +40,12 @@ is rejected.
 - `AddProject { path, name }`
 - `RemoveProject { id }`
 - `ListAgents`
-- `CreateAgent(CreateAgent)`: `project`, `name`, `kind`, `command`, `cols`, `rows` and
-  `worktree: Option<WorktreeRequest>`; a `WorktreeRequest { base: Option<String> }` makes
-  the daemon create a git worktree for the agent first
+- `CreateAgent(CreateAgent)`: `project`, `name`, `kind`, `command`, `cols`, `rows`,
+  `worktree: Option<WorktreeRequest>` and `prompt: Option<String>`; a
+  `WorktreeRequest { base: Option<String> }` makes the daemon create a git worktree for
+  the agent first. A non-blank `prompt` goes to the agent on its first start only: a
+  Claude agent gets `-- <prompt>` after its options, a generic agent has `<prompt>\r`
+  written to its terminal once it first prints
 - `KillAgent { id }`
 - `RestartAgent { id, cols, rows }`
 - `RemoveAgent { id, remove_worktree, force }`: `remove_worktree` also removes the agent's

@@ -158,6 +158,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 worktree: None,
+                prompt: Some("fix the parser".into()),
             }),
             Request::CreateAgent(CreateAgent {
                 project: ProjectId::random(),
@@ -169,6 +170,7 @@ mod tests {
                 worktree: Some(WorktreeRequest {
                     base: Some("main".into()),
                 }),
+                prompt: None,
             }),
             Request::CreateAgent(CreateAgent {
                 project: ProjectId::random(),
@@ -178,6 +180,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 worktree: Some(WorktreeRequest { base: None }),
+                prompt: None,
             }),
             Request::KillAgent { id },
             Request::RestartAgent {

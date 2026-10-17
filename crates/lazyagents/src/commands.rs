@@ -46,6 +46,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
             name,
             project,
             kind,
+            prompt,
             command,
         } => {
             let (projects, _) = snapshot(&mut client).await?;
@@ -71,6 +72,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
                 cols: DEFAULT_COLS,
                 rows: DEFAULT_ROWS,
                 worktree: None,
+                prompt,
             });
             let info = expect_agent(client.request(request).await?)?;
             println!("started {}", info.name);

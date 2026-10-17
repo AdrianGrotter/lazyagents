@@ -38,6 +38,10 @@ pub enum Command {
         /// Agent kind; defaults to claude without a command, generic with one
         #[arg(long, value_enum)]
         kind: Option<Kind>,
+        /// Prompt to start with: Claude gets it as its first message, another command has
+        /// it typed in once it prints
+        #[arg(long)]
+        prompt: Option<String>,
         /// Command to run
         #[arg(last = true)]
         command: Vec<String>,

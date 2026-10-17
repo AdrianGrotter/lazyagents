@@ -248,6 +248,9 @@ struct Agent {
     tracked: Vec<Tracked>,
     /// The process group the agent leads; kept after it exits while members remain.
     group: Option<u32>,
+    /// The create request's prompt until it is delivered: a Claude agent gets it as an
+    /// argument when it starts, a generic one has it typed once it first prints.
+    pending_prompt: Option<String>,
 }
 
 impl Agent {
@@ -264,6 +267,7 @@ impl Agent {
             dirty: false,
             tracked: Vec::new(),
             group: None,
+            pending_prompt: None,
         }
     }
 
@@ -674,7 +678,9 @@ impl Daemon {
             title: None,
         };
         let id = record.id;
-        self.agents.insert(id, Agent::new(record));
+        let mut agent = Agent::new(record);
+        agent.pending_prompt = create.prompt.filter(|p| !p.trim().is_empty());
+        self.agents.insert(id, agent);
         let started = self.start(id, Launch::Fresh, PaneSize::new(create.cols, create.rows));
         self.persist();
         self.announce(id);
@@ -744,10 +750,15 @@ impl Daemon {
                 return Err(message);
             }
         }
+        let claude_prompt = match agent.record.kind {
+            AgentKind::Claude => agent.pending_prompt.take(),
+            AgentKind::Generic => None,
+        };
         let ctx = SpawnContext {
             paths: &self.paths,
             project_root: &project_root,
             direnv: self.direnv.as_deref(),
+            prompt: claude_prompt.as_deref(),
         };
         let spec = spawn_spec(
             &agent.record,
@@ -1077,6 +1088,9 @@ impl Daemon {
             Outcome::Output => {
                 agent.dirty = true;
                 agent.last_output = Some(Instant::now());
+                if let Some(prompt) = agent.pending_prompt.take() {
+                    terminal.write(format!("{prompt}\r").into_bytes());
+                }
                 if agent.record.kind == AgentKind::Claude
                     && agent.status == Status::Starting
                     && awaits_trust(&terminal.screen().text())

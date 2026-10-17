@@ -35,8 +35,10 @@ Subcommands:
 - `lazyagents ls` — list projects and agents.
 - `lazyagents project add [path] [--name n]` / `project rm <project>` — register or
   unregister a project.
-- `lazyagents new <name> [--project p] [--kind claude|generic] [-- cmd...]` — start an
-  agent.
+- `lazyagents new <name> [--project p] [--kind claude|generic] [--prompt text] [-- cmd...]`
+  — start an agent. `--prompt` is the agent's first message: Claude gets it as its
+  positional prompt argument (after `--`), any other command has it typed in, followed
+  by Enter, when it first prints. Restarts never repeat it.
 - `lazyagents kill|restart|rm <agent>`, `lazyagents rename <agent> <name>`. `rm` keeps
   a worktree agent's worktree and branch and says so: `removed <name>; kept worktree
   <path> (branch <branch>)`.

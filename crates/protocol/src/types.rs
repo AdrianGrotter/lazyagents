@@ -120,6 +120,8 @@ pub struct CreateAgent {
     pub cols: u16,
     pub rows: u16,
     pub worktree: Option<WorktreeRequest>,
+    /// Sent to the agent on its first start only.
+    pub prompt: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

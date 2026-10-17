@@ -24,6 +24,7 @@ pub struct SpawnContext<'a> {
     pub paths: &'a StatePaths,
     pub project_root: &'a Path,
     pub direnv: Option<&'a Path>,
+    pub prompt: Option<&'a str>,
 }
 
 pub fn spawn_spec(record: &AgentRecord, launch: Launch, ctx: &SpawnContext<'_>) -> SpawnSpec {
@@ -43,6 +44,10 @@ pub fn spawn_spec(record: &AgentRecord, launch: Launch, ctx: &SpawnContext<'_>) 
         }
         argv.push("--settings".to_string());
         argv.push(ctx.paths.hook_settings(record.id).display().to_string());
+        if let Some(prompt) = ctx.prompt {
+            argv.push("--".to_string());
+            argv.push(prompt.to_string());
+        }
     }
 
     let (program, args) = match ctx.direnv.zip(find_envrc(&record.cwd, ctx.project_root)) {
@@ -181,7 +186,31 @@ mod tests {
             paths,
             project_root: root,
             direnv,
+            prompt: None,
         }
+    }
+
+    #[test]
+    fn a_claude_prompt_follows_the_options() {
+        let paths = StatePaths::new("/s");
+        let rec = record(AgentKind::Claude, &[], Path::new("/p"));
+        let ctx = SpawnContext {
+            prompt: Some("-v fix the parser"),
+            ..ctx(&paths, Path::new("/p"), None)
+        };
+        let spec = spawn_spec(&rec, Launch::Fresh, &ctx);
+        assert_eq!(spec.args[4..], ["--", "-v fix the parser"]);
+    }
+
+    #[test]
+    fn a_generic_command_never_gets_the_prompt_as_an_argument() {
+        let paths = StatePaths::new("/s");
+        let rec = record(AgentKind::Generic, &["sh"], Path::new("/p"));
+        let ctx = SpawnContext {
+            prompt: Some("echo hi"),
+            ..ctx(&paths, Path::new("/p"), None)
+        };
+        assert!(spawn_spec(&rec, Launch::Fresh, &ctx).args.is_empty());
     }
 
     #[test]

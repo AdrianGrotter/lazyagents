@@ -83,6 +83,7 @@ pub enum Field {
     Command,
     Worktree,
     Base,
+    Prompt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +93,7 @@ pub struct NewAgentForm {
     pub command: String,
     pub worktree: bool,
     pub base: String,
+    pub prompt: String,
     pub field: Field,
 }
 
@@ -127,6 +129,7 @@ impl NewAgentForm {
         if self.worktree {
             fields.push(Field::Base);
         }
+        fields.push(Field::Prompt);
         fields
     }
 
@@ -1097,6 +1100,9 @@ impl App {
                 Field::Name => form.name.push_str(&line),
                 Field::Command => form.command.push_str(&line),
                 Field::Base => form.base.push_str(&line),
+                Field::Prompt => form
+                    .prompt
+                    .push_str(&text.replace("\r\n", " ").replace(['\r', '\n'], " ")),
                 Field::Preset | Field::Worktree => {}
             },
             Some(Popup::Help | Popup::ProjectPicker { .. } | Popup::Confirm { .. }) | None => {}
@@ -1513,6 +1519,7 @@ impl App {
             command: String::new(),
             worktree: false,
             base: String::new(),
+            prompt: String::new(),
             field: Field::Name,
         }));
     }
@@ -1699,6 +1706,7 @@ impl App {
                     Field::Name => Some(&mut form.name),
                     Field::Command => Some(&mut form.command),
                     Field::Base => Some(&mut form.base),
+                    Field::Prompt => Some(&mut form.prompt),
                     Field::Preset | Field::Worktree => None,
                 };
                 if let Some(target) = target {
@@ -1756,6 +1764,8 @@ impl App {
                 base: (!base.is_empty()).then(|| base.to_string()),
             }
         });
+        let prompt = form.prompt.trim();
+        let prompt = (!prompt.is_empty()).then(|| prompt.to_string());
         let (cols, rows) = self.pane_size.unwrap_or(DEFAULT_SIZE);
         self.pending_select = Some(PendingCreate {
             project,
@@ -1770,6 +1780,7 @@ impl App {
             cols,
             rows,
             worktree,
+            prompt,
         }))]
     }
 }
@@ -3514,7 +3525,7 @@ pub(crate) mod tests {
         }
         assert_eq!(
             order,
-            [Field::Name, Field::Preset, Field::Worktree, Field::Name]
+            [Field::Name, Field::Preset, Field::Worktree, Field::Prompt]
         );
         let _ = app.on_key(code(KeyCode::BackTab));
         assert_eq!(form(&app).field, Field::Worktree);
@@ -3534,7 +3545,7 @@ pub(crate) mod tests {
         let _ = app.on_paste("-x\nignored".into());
         assert_eq!(form(&app).base, "dev-x");
         let _ = app.on_key(code(KeyCode::Tab));
-        assert_eq!(form(&app).field, Field::Name);
+        assert_eq!(form(&app).field, Field::Prompt);
         let _ = app.on_key(code(KeyCode::BackTab));
         assert_eq!(form(&app).field, Field::Base);
 
@@ -3555,8 +3566,8 @@ pub(crate) mod tests {
                 Field::Command,
                 Field::Worktree,
                 Field::Base,
-                Field::Name,
-                Field::Preset
+                Field::Prompt,
+                Field::Name
             ]
         );
     }
@@ -3584,12 +3595,32 @@ pub(crate) mod tests {
             let _ = app.on_key(key('n'));
             type_text(&mut app, "wt");
             let _ = app.on_key(code(KeyCode::Up));
+            let _ = app.on_key(code(KeyCode::Up));
             let _ = app.on_key(key(' '));
             let _ = app.on_key(code(KeyCode::Down));
             type_text(&mut app, typed);
             let c = created(app.on_key(code(KeyCode::Enter)));
             assert_eq!(c.worktree, Some(protocol::WorktreeRequest { base }));
         }
+    }
+
+    #[test]
+    fn form_sends_the_prompt() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        let _ = app.on_key(code(KeyCode::Up));
+        assert_eq!(form(&app).field, Field::Prompt);
+        type_text(&mut app, "fix it");
+        let _ = app.on_paste(" in\nparser.rs\r\n".into());
+        let c = created(app.on_key(code(KeyCode::Enter)));
+        assert_eq!(c.prompt.as_deref(), Some("fix it in parser.rs"));
+
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        let _ = app.on_key(code(KeyCode::Up));
+        type_text(&mut app, "   ");
+        let c = created(app.on_key(code(KeyCode::Enter)));
+        assert_eq!(c.prompt, None);
     }
 
     #[test]

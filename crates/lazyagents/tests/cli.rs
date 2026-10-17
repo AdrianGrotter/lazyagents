@@ -179,6 +179,36 @@ fn prints_version() {
 }
 
 #[test]
+fn new_types_the_prompt_into_a_generic_agent() {
+    let env = TestEnv::new();
+    let typed = env.project.path().join("typed");
+    let script = format!(
+        "printf 'ready> '; read line; echo \"$line\" > '{}'; sleep 30",
+        typed.display()
+    );
+    env.ok(&[
+        "new",
+        "asker",
+        "--prompt",
+        "hello there",
+        "--",
+        "sh",
+        "-c",
+        &script,
+    ]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !typed.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(
+        std::fs::read_to_string(&typed).expect("typed").trim(),
+        "hello there"
+    );
+    env.ok(&["shutdown"]);
+}
+
+#[test]
 fn lifecycle_through_the_cli() {
     let env = TestEnv::new();
     assert!(env.ok(&["ls"]).contains("no projects yet"));

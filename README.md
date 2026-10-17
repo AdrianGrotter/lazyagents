@@ -43,6 +43,7 @@ The same daemon is scriptable without the TUI:
 
 ```sh
 lazyagents new api        # start a Claude agent named api in the current project
+lazyagents new fix --prompt "fix the failing parser test"   # start one with a task
 lazyagents ls             # projects and agents with status
 lazyagents kill api       # stop it
 lazyagents shutdown       # stop the daemon and every agent

@@ -827,8 +827,18 @@ fn form_lines(form: &NewAgentForm, app: &App) -> (Vec<Line<'static>>, Option<usi
         };
         rows.push((Field::Base, "Base:    ", base));
     }
+    let prompt = if form.prompt.is_empty() && form.field != Field::Prompt {
+        "(none)".to_string()
+    } else {
+        form.prompt.clone()
+    };
+    rows.push((Field::Prompt, "Prompt:  ", prompt));
     let cursor = rows.iter().position(|(field, ..)| {
-        *field == form.field && matches!(field, Field::Name | Field::Command | Field::Base)
+        *field == form.field
+            && matches!(
+                field,
+                Field::Name | Field::Command | Field::Base | Field::Prompt
+            )
     });
     let mut lines: Vec<Line> = rows
         .into_iter()
@@ -1215,6 +1225,7 @@ mod tests {
             command: String::new(),
             worktree: false,
             base: String::new(),
+            prompt: String::new(),
             field: Field::Name,
         };
         app.popup = Some(Popup::NewAgent(form.clone()));
@@ -1540,6 +1551,7 @@ mod tests {
             command: "make".into(),
             worktree: false,
             base: String::new(),
+            prompt: String::new(),
             field: Field::Name,
         };
         app.popup = Some(Popup::NewAgent(form(Preset::Claude)));

@@ -256,6 +256,7 @@ async fn create(
         cols: 80,
         rows: 24,
         worktree: None,
+        prompt: None,
     });
     match conn.request(request).await {
         Ok(Response::Agent(info)) => Ok(info),
@@ -993,6 +994,82 @@ async fn generic_agents_ignore_terminal_titles() {
         panic!("list")
     };
     assert_eq!(agents[0].title, None);
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+async fn create_with_prompt(
+    conn: &mut Conn,
+    project: &Project,
+    kind: AgentKind,
+    command: &[&str],
+    prompt: &str,
+) -> AgentInfo {
+    let request = Request::CreateAgent(CreateAgent {
+        project: project.id,
+        name: "prompted".into(),
+        kind,
+        command: command.iter().map(|s| s.to_string()).collect(),
+        cols: 80,
+        rows: 24,
+        worktree: None,
+        prompt: Some(prompt.into()),
+    });
+    match conn.request(request).await {
+        Ok(Response::Agent(info)) => info,
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_prompt_is_passed_on_the_first_start_only() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    let (fake, args_file) = fake_claude(dir.path());
+    let agent = create_with_prompt(
+        &mut conn,
+        &project,
+        AgentKind::Claude,
+        &[fake.to_str().expect("utf8")],
+        "fix the parser",
+    )
+    .await;
+    let args = wait_for_file(&args_file).await;
+    let lines: Vec<&str> = args.lines().collect();
+    assert_eq!(lines[lines.len() - 2..], ["--", "fix the parser"]);
+    let restarted = restart_args(&mut conn, agent.id, &args_file).await;
+    assert!(
+        !restarted.iter().any(|a| a == "fix the parser"),
+        "{restarted:?}"
+    );
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generic_prompt_is_typed_once_the_agent_prints() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create_with_prompt(
+        &mut conn,
+        &project,
+        AgentKind::Generic,
+        &[
+            "sh",
+            "-c",
+            "printf 'ready> '; read line; echo \"got:$line\"; exec sleep 30",
+        ],
+        "hello there",
+    )
+    .await;
+    conn.request(Request::Subscribe { id: agent.id })
+        .await
+        .expect("subscribe");
+    conn.wait_text(agent.id, "got:hello there").await;
     conn.request(Request::KillAgent { id: agent.id })
         .await
         .expect("kill");
@@ -1754,6 +1831,7 @@ async fn create_in_worktree(
         cols: 250,
         rows: 24,
         worktree: Some(WorktreeRequest { base: None }),
+        prompt: None,
     });
     match conn.request(request).await {
         Ok(Response::Agent(info)) => Ok(info),
