@@ -1,0 +1,11 @@
+[test-groups]
+process-heavy = { max-threads = 4 }
+
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# Each of these tests starts a daemon, agents on PTYs, git and ps; run in parallel by the
+# dozen they starve one another past their own timeouts.
+[[profile.default.overrides]]
+filter = 'binary_id(daemon::server) | binary_id(daemon::git) | binary_id(lazyagents::cli) | binary_id(client::client)'
+test-group = 'process-heavy'
