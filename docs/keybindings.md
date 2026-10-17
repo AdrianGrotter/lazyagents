@@ -79,6 +79,12 @@ project form has Path (starts at the cwd; relative paths resolve against the cwd
 leading `~` is the home directory) and Name (empty means the directory name); `tab` moves
 between them, `enter` adds and `esc` cancels.
 
+The worktree setup approval popup wraps long script lines and shows control characters
+escaped (`\r`, `\t`, `\u{1b}`), so the whole script is on screen. When it does not fit,
+`j`/`k` or `↓`/`↑` scroll a row, `pageup`/`pagedown` or `ctrl-u`/`ctrl-d` half a page, `g`/`G`
+jump to the top or bottom, and the popup says how many rows are above or below. `y` and `s`
+do nothing until the last row has been shown; `n` and `esc` cancel at any time.
+
 Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the new agent form,
 `tab`/`shift-tab` (or `↓`/`↑`) move between the visible fields, `enter` starts the agent and
 `esc` cancels. The fields are Name, Preset (`←`/`→`/`space` change it), Command (only for the

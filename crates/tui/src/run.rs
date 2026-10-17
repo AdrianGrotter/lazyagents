@@ -259,6 +259,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
         if redraw {
             let size = guard.terminal.size()?;
             layout = ui::layout(Rect::new(0, 0, size.width, size.height), &app);
+            app.set_screen_size(size.width, size.height);
             send_all(
                 &requests,
                 app.set_pane_size(layout.pane_inner.width, layout.pane_inner.height),

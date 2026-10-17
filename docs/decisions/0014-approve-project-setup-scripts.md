@@ -43,3 +43,7 @@ Teams can share worktree setup in the repository, and nothing from a repository 
 without the user reading it first. Setup output scrolls by in the agent's pane before the
 agent starts, and a failing setup is reported there without stopping the agent. Agents
 created by the CLI never run a setup, since the CLI cannot ask.
+
+The popup shows the whole script: long lines wrap, control characters appear escaped, and a
+script taller than the screen scrolls. `y` and `s` are refused until its last row has been
+shown, so text that was never on screen cannot be approved.
