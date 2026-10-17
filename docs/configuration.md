@@ -100,6 +100,7 @@ SHIFT; with `ctrl` or `alt`, SHIFT counts, so `ctrl-Q` is not `ctrl-q`.
 | `approve` | `y` |
 | `deny` | `N` |
 | `reply` | `i` |
+| `screen_mode` | `+` |
 
 ### `[keys.pane]`
 
@@ -115,6 +116,7 @@ its own.
 | `leave` | `q`, `esc` | back to the sidebar |
 | `scroll` | `s` | scroll mode |
 | `send_prefix` | the prefix | send one prefix key to the agent |
+| `screen` | `+` | next screen mode, staying in the pane |
 | `direct_leave` | `ctrl-]`, `ctrl-5` | leave without the prefix |
 | `direct_next` | none | next agent without the prefix, staying in the pane |
 | `direct_previous` | none | previous agent without the prefix, staying in the pane |

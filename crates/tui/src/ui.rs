@@ -12,7 +12,7 @@ use ratatui::widgets::{
 
 use crate::app::{
     AgentView, App, CommandRun, DiffView, Field, Focus, MIN_PANE, MessageKind, NewAgentForm, Popup,
-    Preset, ProjectField, ProjectForm, Selection,
+    Preset, ProjectField, ProjectForm, ScreenMode, Selection,
 };
 use crate::commands::Prompt;
 use crate::config::Theme;
@@ -61,8 +61,11 @@ const SIDEBAR_HELP: [(&[Action], &str); 19] = [
     (&[Action::Open], "open the agent's pane"),
     (&[Action::NewAgent], "new agent"),
     (&[Action::Stop, Action::Restart], "stop / restart agent"),
-    (&[Action::Remove], "remove agent (in Projects: the project)"),
-    (&[Action::Rename], "rename agent"),
+    (
+        &[Action::Remove, Action::Rename],
+        "remove / rename agent (in Projects: the project)",
+    ),
+    (&[Action::ScreenMode], "wider pane / full screen / normal"),
     (&[Action::AddProject], "add project"),
     (&[Action::ToggleAllAgents], "all agents / this project"),
     (
@@ -106,15 +109,31 @@ const INFO_MIN_HEIGHT: u16 = 6;
 const AGENTS_MIN_HEIGHT: u16 = 8;
 
 pub fn layout(area: Rect, app: &App) -> Areas {
-    areas(area, app.projects.len(), info_lines(app).len())
+    areas_in(
+        area,
+        app.projects.len(),
+        info_lines(app).len(),
+        app.screen_mode,
+    )
+}
+
+pub const WIDE_SIDEBAR: u16 = 18;
+
+pub fn areas(area: Rect, project_count: usize, info_lines: usize) -> Areas {
+    areas_in(area, project_count, info_lines, ScreenMode::Normal)
 }
 
 /// The Info box fits `info_lines` lines, but never takes the Agents box below
 /// `AGENTS_MIN_HEIGHT` rows to do so; it keeps `INFO_MIN_HEIGHT` rows while they fit.
-pub fn areas(area: Rect, project_count: usize, info_lines: usize) -> Areas {
+pub fn areas_in(area: Rect, project_count: usize, info_lines: usize, mode: ScreenMode) -> Areas {
     let body_height = area.height.saturating_sub(1);
     let status = Rect::new(area.x, area.y + body_height, area.width, area.height.min(1));
-    let sidebar_width = (area.width / 4).clamp(24, 40).min(area.width);
+    let sidebar_width = match mode {
+        ScreenMode::Normal => (area.width / 4).clamp(24, 40),
+        ScreenMode::Wide => WIDE_SIDEBAR,
+        ScreenMode::Full => 0,
+    }
+    .min(area.width);
     let projects_height = (project_count.clamp(1, 6) as u16 + 2).min(body_height);
     let below_projects = body_height - projects_height;
     let wanted = u16::try_from(info_lines)
@@ -1751,8 +1770,8 @@ mod tests {
             ("n", "new agent"),
             ("x, r", "stop / restart agent"),
             ("c", "custom commands"),
-            ("d", "remove agent"),
-            ("R", "rename agent"),
+            ("d, R", "remove / rename agent"),
+            ("+", "wider pane / full screen / normal"),
             ("a", "add project"),
             ("A", "all agents / this project"),
             ("g", "next agent needing input, then next done"),
@@ -2276,6 +2295,22 @@ mod tests {
         open_diff(&mut app, "");
         let (text, _) = render(&app);
         assert!(text.contains("no changes"), "{text}");
+    }
+
+    #[test]
+    fn screen_modes_narrow_or_hide_the_sidebar() {
+        let screen = Rect::new(0, 0, 120, 30);
+        let normal = areas_in(screen, 2, 4, ScreenMode::Normal);
+        assert_eq!(normal.agents.width, 30);
+        let wide = areas_in(screen, 2, 4, ScreenMode::Wide);
+        assert_eq!(wide.agents.width, WIDE_SIDEBAR);
+        assert_eq!(
+            wide.pane,
+            Rect::new(WIDE_SIDEBAR, 0, 120 - WIDE_SIDEBAR, 29)
+        );
+        let full = areas_in(screen, 2, 4, ScreenMode::Full);
+        assert_eq!(full.agents.width, 0);
+        assert_eq!(full.pane, Rect::new(0, 0, 120, 29));
     }
 
     #[test]

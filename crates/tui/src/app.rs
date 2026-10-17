@@ -204,6 +204,25 @@ pub struct ScrollMode {
     pub from_pane: bool,
 }
 
+/// How much of the screen the pane takes: beside the usual sidebar, beside a narrow one, or
+/// all of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenMode {
+    Normal,
+    Wide,
+    Full,
+}
+
+impl ScreenMode {
+    pub fn next(self) -> Self {
+        match self {
+            ScreenMode::Normal => ScreenMode::Wide,
+            ScreenMode::Wide => ScreenMode::Full,
+            ScreenMode::Full => ScreenMode::Normal,
+        }
+    }
+}
+
 /// A custom command waiting on its prompts; `vars` fills its template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRun {
@@ -421,6 +440,7 @@ pub struct App {
     pub keymap: Keymap,
     pub presets: Vec<PresetDef>,
     pub commands: Vec<CustomCommand>,
+    pub screen_mode: ScreenMode,
     /// What the help popup is filtered by while it is open.
     pub help_filter: String,
     /// Review comments per agent, kept until they are sent.
@@ -471,6 +491,7 @@ impl App {
             commands: config.commands,
             comments: HashMap::new(),
             help_filter: String::new(),
+            screen_mode: ScreenMode::Normal,
             theme: config.theme,
             cwd,
             home,
@@ -1770,6 +1791,10 @@ impl App {
                     Vec::new()
                 }
                 Some(Action::PaneSendPrefix) => self.input(id, &self.keymap.prefix().event()),
+                Some(Action::PaneScreenMode) => {
+                    self.screen_mode = self.screen_mode.next();
+                    Vec::new()
+                }
                 Some(_) => Vec::new(),
                 None => {
                     self.fail(prefix_help(&self.keymap));
@@ -1957,11 +1982,13 @@ impl App {
                     _ => {}
                 }
             }
+            Action::ScreenMode => self.screen_mode = self.screen_mode.next(),
             Action::PaneNext
             | Action::PanePrevious
             | Action::PaneLeave
             | Action::PaneScroll
-            | Action::PaneSendPrefix => {}
+            | Action::PaneSendPrefix
+            | Action::PaneScreenMode => {}
         }
         self.sync()
     }
@@ -6405,5 +6432,34 @@ mod diff_navigation_tests {
     fn the_diff_counts_its_files() {
         let (app, _) = with_diff();
         assert_eq!(app.diff.as_ref().map(DiffView::files), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod screen_mode_tests {
+    use super::tests::{agent, loaded, project};
+    use super::*;
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn plus_cycles_the_screen_mode_from_the_sidebar_and_the_pane() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        assert_eq!(app.screen_mode, ScreenMode::Normal);
+        for expected in [ScreenMode::Wide, ScreenMode::Full, ScreenMode::Normal] {
+            assert!(app.on_key(key('+')).is_empty());
+            assert_eq!(app.screen_mode, expected);
+        }
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Pane);
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(app.on_key(key('+')).is_empty());
+        assert_eq!(
+            (app.screen_mode, app.focus),
+            (ScreenMode::Wide, Focus::Pane)
+        );
     }
 }

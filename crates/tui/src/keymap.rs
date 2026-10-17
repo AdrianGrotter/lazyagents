@@ -31,11 +31,13 @@ pub enum Action {
     Approve,
     Deny,
     Reply,
+    ScreenMode,
     PaneNext,
     PanePrevious,
     PaneLeave,
     PaneScroll,
     PaneSendPrefix,
+    PaneScreenMode,
 }
 
 impl Action {
@@ -47,6 +49,7 @@ impl Action {
                 | Action::PaneLeave
                 | Action::PaneScroll
                 | Action::PaneSendPrefix
+                | Action::PaneScreenMode
         )
     }
 }
@@ -271,6 +274,7 @@ impl Keymap {
                 ("y", Approve),
                 ("N", Deny),
                 ("i", Reply),
+                ("+", ScreenMode),
                 ("J", PeekDown),
                 ("pagedown", PeekDown),
                 ("K", PeekUp),
@@ -284,6 +288,7 @@ impl Keymap {
                 ("esc", PaneLeave),
                 ("s", PaneScroll),
                 ("ctrl-q", PaneSendPrefix),
+                ("+", PaneScreenMode),
             ]),
             direct: bindings(&[("ctrl-]", PaneLeave), ("ctrl-5", PaneLeave)]),
         }

@@ -34,6 +34,7 @@ Two input modes:
 | `y` / `N` | approve / deny what the selected agent waits for: sends `enter` / `esc` to its terminal, which answers Claude's permission dialog with its highlighted choice (yes) or no; only while the agent needs input |
 | `i` | reply: type a line and `enter` sends it to the selected agent with `enter` after it, as if typed in its pane; `esc` cancels. A pasted newline becomes a space |
 | `J`/`K`, `pagedown`/`pageup` | scroll the selected agent's pane half a page down / up without leaving the sidebar |
+| `+` | screen mode: the pane beside a narrow sidebar, then the pane alone, then back. The sidebar keys keep working while it is hidden |
 | `?` | help popup: typing filters it by key or description (`backspace` deletes), `esc`, `enter` or `?` closes it |
 | `q`, `ctrl-c` | quit TUI (agents keep running) |
 | `Q` | quit and stop daemon (confirm) |
@@ -163,6 +164,7 @@ After `ctrl-q`, one more key picks a pane action:
 | `ctrl-q k` | previous agent in the Agents panel, staying in the pane |
 | `ctrl-q q`, `ctrl-q esc` | back to the sidebar |
 | `ctrl-q s` | scroll mode |
+| `ctrl-q +` | next screen mode, staying in the pane |
 | `ctrl-q ctrl-q` | send one `ctrl-q` to the agent |
 
 While the prefix waits for its second key the status bar shows `ctrl-q …`. Any other key

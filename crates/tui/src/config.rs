@@ -94,12 +94,13 @@ impl Default for Theme {
     }
 }
 
-const PANE_ACTIONS: [(&str, Action); 5] = [
+const PANE_ACTIONS: [(&str, Action); 6] = [
     ("next", Action::PaneNext),
     ("previous", Action::PanePrevious),
     ("leave", Action::PaneLeave),
     ("scroll", Action::PaneScroll),
     ("send_prefix", Action::PaneSendPrefix),
+    ("screen", Action::PaneScreenMode),
 ];
 
 const DIRECT_ACTIONS: [(&str, Action); 3] = [
