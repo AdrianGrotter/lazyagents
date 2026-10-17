@@ -277,6 +277,35 @@ mod tests {
         );
     }
 
+    /// Claude does not restore `--settings` and similar flags on `--resume`, so a resumed
+    /// agent must be given every option a fresh one gets.
+    #[test]
+    fn a_resumed_claude_agent_gets_every_option_a_fresh_one_does() {
+        let paths = StatePaths::new("/s");
+        let mut rec = record(
+            AgentKind::Claude,
+            &["/bin/claude", "--model", "x"],
+            Path::new("/p"),
+        );
+        rec.resumable = true;
+        let without_session = |args: Vec<String>| -> Vec<String> {
+            let at = args
+                .iter()
+                .position(|a| a == "--session-id" || a == "--resume")
+                .expect("session flag");
+            args.into_iter()
+                .enumerate()
+                .filter(|(i, _)| *i != at && *i != at + 1)
+                .map(|(_, a)| a)
+                .collect()
+        };
+        let fresh = spawn_spec(&rec, Launch::Fresh, &ctx(&paths, Path::new("/p"), None));
+        let resumed = spawn_spec(&rec, Launch::Resume, &ctx(&paths, Path::new("/p"), None));
+        assert!(resumed.args.contains(&"--resume".to_string()));
+        assert_eq!(without_session(resumed.args), without_session(fresh.args));
+        assert_eq!(resumed.env, fresh.env);
+    }
+
     #[test]
     fn direnv_wraps_when_envrc_is_inside_the_project() {
         let root = tempfile::tempdir().expect("tempdir");
