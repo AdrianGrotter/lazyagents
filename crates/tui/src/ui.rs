@@ -288,7 +288,7 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// A Claude agent is listed by its session's title once it has one.
-fn label(agent: &AgentInfo) -> &str {
+pub(crate) fn label(agent: &AgentInfo) -> &str {
     match (&agent.title, agent.kind) {
         (Some(title), AgentKind::Claude) => title,
         _ => &agent.name,

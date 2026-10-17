@@ -221,6 +221,8 @@ pub enum Popup {
 pub enum Effect {
     Send(Request),
     Copy(String),
+    /// Tells the outer terminal, with a bell or a desktop notification.
+    Notify(String),
     RememberProjects(Vec<KnownProject>),
     ForgetProject(PathBuf),
     Quit,
@@ -614,7 +616,8 @@ impl App {
         let before = self.selected_agent().map(|a| a.id);
         let mut effects = Vec::new();
         match message {
-            ServerMessage::AgentUpdated(info) => self.upsert_agent(info),
+            ServerMessage::AgentUpdated(info) => effects.extend(self.upsert_agent(info)),
+            ServerMessage::AgentBell(id) => effects.extend(self.on_bell(id)),
             ServerMessage::AgentRemoved(id) => {
                 let selected = self.selected_agent().map(|a| a.id);
                 self.agents.retain(|a| a.id != id);
@@ -673,7 +676,7 @@ impl App {
                 if undisturbed && info.status.is_running() {
                     created = Some(info.id);
                 }
-                self.upsert_agent(info);
+                let _ = self.upsert_agent(info);
             }
             Response::Ok | Response::GitStat(_) | Response::Diff(_) => {}
         }
@@ -773,10 +776,12 @@ impl App {
         }
     }
 
-    fn upsert_agent(&mut self, info: AgentInfo) {
+    /// Returns the notification for an agent out of view that starts needing input or
+    /// ends its turn.
+    fn upsert_agent(&mut self, info: AgentInfo) -> Option<Effect> {
         let selected = self.selected_agent().map(|a| a.id);
         let in_view = selected == Some(info.id) && self.terminal_focused;
-        let (id, status) = (info.id, info.status);
+        let (id, status, name) = (info.id, info.status, crate::ui::label(&info).to_string());
         let before = match self.agents.iter_mut().find(|a| a.id == info.id) {
             Some(existing) => Some(std::mem::replace(existing, info).status),
             None => {
@@ -786,12 +791,55 @@ impl App {
         };
         let ended_turn =
             matches!(before, Some(Status::Working | Status::NeedsInput)) && status == Status::Idle;
+        let started_waiting =
+            before.is_some_and(|b| b != Status::NeedsInput) && status == Status::NeedsInput;
         if ended_turn && !in_view {
             self.unseen.insert(id);
         } else if status != Status::Idle {
             self.unseen.remove(&id);
         }
         self.reselect(selected);
+        let body = match (in_view, started_waiting, ended_turn) {
+            (false, true, _) => format!("{name} needs input"),
+            (false, _, true) => format!("{name} is done"),
+            _ => return None,
+        };
+        Some(self.notify(body))
+    }
+
+    /// Bells from Claude agents are left out: their hooks already report what a bell
+    /// would announce.
+    fn on_bell(&mut self, id: AgentId) -> Option<Effect> {
+        let in_view = self.selected_agent().map(|a| a.id) == Some(id) && self.terminal_focused;
+        let agent = self.agents.iter().find(|a| a.id == id)?;
+        if in_view || agent.kind == AgentKind::Claude {
+            return None;
+        }
+        let body = format!("{} rang the bell", crate::ui::label(agent));
+        Some(self.notify(body))
+    }
+
+    /// The status bar repeats the notification unless it is showing an error.
+    fn notify(&mut self, body: String) -> Effect {
+        let error_shown = self.message_kind == MessageKind::Error
+            && self.current_message(Instant::now()).is_some();
+        if !error_shown {
+            self.inform(body.clone());
+        }
+        Effect::Notify(body)
+    }
+
+    pub fn window_title(&self) -> String {
+        match self
+            .agents
+            .iter()
+            .filter(|a| a.status == Status::NeedsInput)
+            .count()
+        {
+            0 => "lazyagents".to_string(),
+            1 => "lazyagents · 1 needs input".to_string(),
+            n => format!("lazyagents · {n} need input"),
+        }
     }
 
     pub fn is_unseen(&self, id: AgentId) -> bool {
@@ -3402,6 +3450,69 @@ pub(crate) mod tests {
             app.current_message(Instant::now()),
             Some("no other agent needs attention")
         );
+    }
+
+    fn notifications(effects: &[Effect]) -> Vec<String> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Notify(body) => Some(body.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn updated(app: &mut App, info: &AgentInfo, status: Status) -> Vec<String> {
+        notifications(&app.apply_server(ServerMessage::AgentUpdated(AgentInfo {
+            status,
+            ..info.clone()
+        })))
+    }
+
+    #[test]
+    fn agents_out_of_view_notify_when_they_need_input_or_finish() {
+        let (mut app, a, b) = two_agents();
+        assert!(updated(&mut app, &b, Status::Working).is_empty());
+        assert_eq!(
+            updated(&mut app, &b, Status::NeedsInput),
+            ["beta needs input"]
+        );
+        assert!(updated(&mut app, &b, Status::NeedsInput).is_empty());
+        assert!(updated(&mut app, &b, Status::Working).is_empty());
+        assert_eq!(updated(&mut app, &b, Status::Idle), ["beta is done"]);
+        assert!(updated(&mut app, &a, Status::Working).is_empty());
+        assert!(updated(&mut app, &a, Status::NeedsInput).is_empty());
+        assert!(updated(&mut app, &a, Status::Idle).is_empty());
+        let _ = app.on_focus(false);
+        assert!(updated(&mut app, &a, Status::Working).is_empty());
+        assert_eq!(updated(&mut app, &a, Status::Idle), ["alpha is done"]);
+    }
+
+    #[test]
+    fn a_bell_out_of_view_notifies_for_generic_agents_only() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Working);
+        let c = AgentInfo {
+            kind: AgentKind::Claude,
+            ..agent(&p, "gamma", Status::Working)
+        };
+        let (mut app, _) = loaded(vec![p], vec![a.clone(), b.clone(), c.clone()]);
+        let bell =
+            |app: &mut App, id| notifications(&app.apply_server(ServerMessage::AgentBell(id)));
+        assert_eq!(bell(&mut app, b.id), ["beta rang the bell"]);
+        assert!(bell(&mut app, a.id).is_empty());
+        assert!(bell(&mut app, c.id).is_empty());
+    }
+
+    #[test]
+    fn the_window_title_counts_agents_needing_input() {
+        let (mut app, a, b) = two_agents();
+        assert_eq!(app.window_title(), "lazyagents");
+        let _ = updated(&mut app, &a, Status::NeedsInput);
+        assert_eq!(app.window_title(), "lazyagents · 1 needs input");
+        let _ = updated(&mut app, &b, Status::NeedsInput);
+        assert_eq!(app.window_title(), "lazyagents · 2 need input");
     }
 
     #[test]

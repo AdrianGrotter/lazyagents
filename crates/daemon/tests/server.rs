@@ -1076,6 +1076,30 @@ async fn a_generic_prompt_is_typed_once_the_agent_prints() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_agents_bell_reaches_every_client() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let mut other = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "ringer",
+        AgentKind::Generic,
+        &["sh", "-c", "sleep 0.5; printf 'ding\\a'; exec sleep 30"],
+    )
+    .await
+    .expect("create");
+    for conn in [&mut conn, &mut other] {
+        conn.wait_for(|m| matches!(m, ServerMessage::AgentBell(id) if *id == agent.id))
+            .await;
+    }
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_claude_agent_at_the_trust_dialog_needs_input() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;

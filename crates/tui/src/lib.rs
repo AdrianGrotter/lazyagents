@@ -7,6 +7,7 @@ pub mod connection;
 pub mod keymap;
 pub mod keys;
 pub mod known;
+pub mod notify;
 mod run;
 pub mod ui;
 

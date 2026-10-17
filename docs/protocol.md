@@ -24,8 +24,8 @@ is rejected.
    `Err(message)`. Most answers come in request order; `GitStat` and `GitDiff` are
    answered when git finishes, so their answers can follow later requests' answers and a
    client matches them by `id`.
-4. Pushes (`AgentUpdated`, `AgentRemoved`, `ProjectsChanged`, `Frame`) can arrive at any
-   time, between responses.
+4. Pushes (`AgentUpdated`, `AgentRemoved`, `AgentBell`, `ProjectsChanged`, `Frame`) can
+   arrive at any time, between responses.
 
 ## Messages
 
@@ -80,6 +80,8 @@ is rejected.
 - `Response { id, result }`
 - `AgentUpdated(AgentInfo)`
 - `AgentRemoved(AgentId)`
+- `AgentBell(AgentId)`: the agent's program rang the terminal bell (BEL); sent to every
+  client, whatever it subscribes to
 - `ProjectsChanged(Vec<Project>)`
 - `Frame(Frame)`
 

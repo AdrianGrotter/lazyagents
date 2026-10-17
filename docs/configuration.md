@@ -1,6 +1,6 @@
 # Configuration
 
-Status: implemented in crates/tui (config.rs, keymap.rs).
+Status: implemented in crates/tui (config.rs, keymap.rs, notify.rs).
 
 The TUI reads one TOML file at startup. Changes apply the next time the TUI starts.
 
@@ -25,7 +25,7 @@ full list:
   <message>`; the whole file is then ignored;
 - an unknown table or setting (`unknown table [keybindings]`, `unknown setting theme.glow`,
   `unknown setting keys.extra`);
-- `keys`, `theme`, `keys.sidebar` or `keys.pane` that is not a table (`keys.pane: expected
+- `keys`, `theme`, `notifications`, `keys.sidebar` or `keys.pane` that is not a table (`keys.pane: expected
   a table`), or `presets` that is not a list of `[[presets]]` tables;
 - an unknown action (`unknown action keys.sidebar.frobnicate`), including a pane action
   under `[keys.sidebar]` or a sidebar action under `[keys.pane]`;
@@ -43,7 +43,9 @@ full list:
 - a preset that is not a table (`preset #2: expected a table`), has an unknown setting
   (`unknown setting colour in preset #2`), lacks a name or a command (`preset #2: needs a
   name and a command`), or has a `kind` other than `claude` or `generic`;
-- a colour that does not parse (`theme.accent: unknown colour "mauve"`).
+- a colour that does not parse (`theme.accent: unknown colour "mauve"`);
+- a `notifications.method` other than the five below, or a `notifications.title` that is
+  not a boolean.
 
 ## Keys
 
@@ -182,6 +184,26 @@ working = 208
 
 A colour is a name (`red`, `light-green`, `dark-gray`, ...; case-insensitive), `#rrggbb`,
 or a 0-255 palette index, as a number (`208`) or a string (`"12"`).
+
+## Notifications
+
+```toml
+[notifications]
+method = "osc9"
+title = false
+```
+
+The TUI tells the terminal it runs in when an agent out of view starts needing input, ends
+its turn (it is then listed as `done`, see [keybindings.md](keybindings.md)), or rings the
+terminal bell (generic agents only; a Claude agent's hooks already report what its bell
+would). Out of view means not selected, or selected while the terminal lacks focus. The
+status bar shows the same text, `<agent> needs input`, `<agent> is done` or `<agent> rang
+the bell`, unless it is showing an error.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `method` | `auto` | `bel` rings the bell; `osc9` sends an OSC 9 desktop notification (iTerm2, WezTerm, Ghostty); `osc777` sends OSC 777 `notify` (Ghostty, foot, urxvt); `off` sends nothing. `auto` is `osc9` when `TERM_PROGRAM` is `iTerm.app`, `WezTerm` or `ghostty`, and `bel` otherwise, including inside tmux, which flags a bell on the window but drops OSC 9 |
+| `title` | `true` | set the window title to `lazyagents`, or `lazyagents · N need input` while agents wait; the terminal's own title is saved on start and restored on exit |
 
 ## Clipboard
 

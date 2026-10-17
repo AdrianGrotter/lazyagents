@@ -24,6 +24,7 @@ use crate::clipboard;
 use crate::config;
 use crate::connection::{self, Incoming};
 use crate::known::{self, KnownProject};
+use crate::notify;
 use crate::ui::{self, Mismatch};
 
 enum Term {
@@ -77,6 +78,22 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = self.terminal.show_cursor();
         restore_terminal(self.enhanced);
+    }
+}
+
+/// Saves the outer terminal's title while the TUI sets its own, and restores it on drop.
+struct TitleGuard;
+
+impl TitleGuard {
+    fn push() -> Self {
+        notify::write(&mut stdout(), notify::PUSH_TITLE);
+        TitleGuard
+    }
+}
+
+impl Drop for TitleGuard {
+    fn drop(&mut self) {
+        notify::write(&mut stdout(), notify::POP_TITLE);
     }
 }
 
@@ -177,6 +194,10 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let config = config::load(config::default_path().as_deref());
+    let notify_method =
+        notify::resolve(config.notifications.method, |name| std::env::var(name).ok());
+    let title = config.notifications.title.then(TitleGuard::push);
+    let mut shown_title = String::new();
     let mut app = App::new(cwd, shell, home, config);
     let known_file = paths.known_projects();
     match known::load(&known_file) {
@@ -199,6 +220,13 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
             guard
                 .terminal
                 .draw(|frame| ui::draw(frame, &app, &layout, now, frame_counter))?;
+            if title.is_some() && app.window_title() != shown_title {
+                shown_title = app.window_title();
+                notify::write(
+                    guard.terminal.backend_mut(),
+                    &notify::title_sequence(&shown_title),
+                );
+            }
             message_shown = app.current_message(now).is_some();
         }
 
@@ -245,6 +273,14 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                     let _ = requests.send(request);
                 }
                 Effect::Copy(text) => clipboard::copy(guard.terminal.backend_mut(), &text),
+                Effect::Notify(body) => {
+                    if let Some(method) = notify_method {
+                        notify::write(
+                            guard.terminal.backend_mut(),
+                            &notify::sequence(method, &body),
+                        );
+                    }
+                }
                 Effect::RememberProjects(added) => {
                     update_known(&mut app, &known_file, |list| known::remember(list, &added))
                 }

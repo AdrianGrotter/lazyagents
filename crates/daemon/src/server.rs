@@ -1121,6 +1121,7 @@ impl Daemon {
                     self.announce(event.agent);
                 }
             }
+            Outcome::Bell => self.broadcast(&ServerMessage::AgentBell(event.agent)),
             Outcome::Nothing => {}
         }
     }

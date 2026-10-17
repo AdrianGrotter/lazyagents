@@ -12,6 +12,7 @@ pub struct Config {
     pub keymap: Keymap,
     pub presets: Vec<PresetDef>,
     pub theme: Theme,
+    pub notifications: Notifications,
     pub warnings: Vec<String>,
 }
 
@@ -20,6 +21,32 @@ pub struct PresetDef {
     pub name: String,
     pub kind: AgentKind,
     pub command: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NotifyMethod {
+    #[default]
+    Auto,
+    Bel,
+    Osc9,
+    Osc777,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Notifications {
+    pub method: NotifyMethod,
+    /// Whether the window title counts the agents that need input.
+    pub title: bool,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Notifications {
+            method: NotifyMethod::Auto,
+            title: true,
+        }
+    }
 }
 
 pub const IDLE_GREEN: Color = Color::Rgb(0x43, 0x84, 0x40);
@@ -137,12 +164,26 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 }
             }
             ("theme", Value::Table(table)) => config.apply_theme(table),
-            ("keys" | "theme", _) => config.warn(format!("{name}: expected a table")),
+            ("notifications", Value::Table(table)) => config.apply_notifications(table),
+            ("keys" | "theme" | "notifications", _) => {
+                config.warn(format!("{name}: expected a table"))
+            }
             ("presets", _) => config.warn("presets: expected [[presets]] tables"),
             (_, value) => config.warn(unknown(&name, &value)),
         }
     }
     Ok(config)
+}
+
+fn notify_method(name: &str) -> Option<NotifyMethod> {
+    match name {
+        "auto" => Some(NotifyMethod::Auto),
+        "bel" => Some(NotifyMethod::Bel),
+        "osc9" => Some(NotifyMethod::Osc9),
+        "osc777" => Some(NotifyMethod::Osc777),
+        "off" => Some(NotifyMethod::Off),
+        _ => None,
+    }
 }
 
 fn unknown(path: &str, value: &Value) -> String {
@@ -337,6 +378,22 @@ impl Config {
             _ => {
                 self.warn(format!("{label}: needs a name and a command"));
                 None
+            }
+        }
+    }
+
+    fn apply_notifications(&mut self, table: Table) {
+        for (name, value) in table {
+            match (name.as_str(), value) {
+                ("method", value) => match value.as_str().and_then(notify_method) {
+                    Some(method) => self.notifications.method = method,
+                    None => {
+                        self.warn("notifications.method: expected auto, bel, osc9, osc777 or off")
+                    }
+                },
+                ("title", Value::Boolean(on)) => self.notifications.title = on,
+                ("title", _) => self.warn("notifications.title: expected true or false"),
+                (_, value) => self.warn(unknown(&format!("notifications.{name}"), &value)),
             }
         }
     }
@@ -728,6 +785,65 @@ mod tests {
             .map(|preset| preset.label(&config.presets))
             .collect();
         assert_eq!(labels, ["claude", "shell", "custom", "codex", "opus"]);
+    }
+
+    #[test]
+    fn notifications_default_to_auto_with_a_title() {
+        assert_eq!(
+            Config::default().notifications,
+            Notifications {
+                method: NotifyMethod::Auto,
+                title: true
+            }
+        );
+        let config = load_text(
+            r#"
+            [notifications]
+            method = "osc777"
+            title = false
+            "#,
+        );
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(
+            config.notifications,
+            Notifications {
+                method: NotifyMethod::Osc777,
+                title: false
+            }
+        );
+        for (method, parsed) in [
+            ("bel", NotifyMethod::Bel),
+            ("osc9", NotifyMethod::Osc9),
+            ("off", NotifyMethod::Off),
+            ("auto", NotifyMethod::Auto),
+        ] {
+            let config = load_text(&format!("[notifications]\nmethod = \"{method}\""));
+            assert_eq!(config.notifications.method, parsed);
+        }
+    }
+
+    #[test]
+    fn bad_notification_settings_warn_and_keep_the_defaults() {
+        let config = load_text(
+            r#"
+            [notifications]
+            method = "loud"
+            title = "yes"
+            sound = true
+            "#,
+        );
+        assert_eq!(config.notifications, Notifications::default());
+        for expected in [
+            "notifications.method: expected auto, bel, osc9, osc777 or off",
+            "notifications.title: expected true or false",
+            "unknown setting notifications.sound",
+        ] {
+            assert!(
+                config.warnings.iter().any(|w| w == expected),
+                "{expected}: {:?}",
+                config.warnings
+            );
+        }
     }
 
     #[test]

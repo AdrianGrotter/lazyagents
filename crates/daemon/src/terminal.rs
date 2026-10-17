@@ -92,6 +92,7 @@ pub enum Outcome {
     Output,
     Exited(i32),
     Title(String),
+    Bell,
     Nothing,
 }
 
@@ -159,6 +160,7 @@ impl Terminal {
             }
             Event::ChildExit(status) => Outcome::Exited(exit_code(status)),
             Event::Title(title) => Outcome::Title(title),
+            Event::Bell => Outcome::Bell,
             _ => Outcome::Nothing,
         }
     }

@@ -97,6 +97,8 @@ pub enum ServerMessage {
     },
     AgentUpdated(AgentInfo),
     AgentRemoved(AgentId),
+    /// The agent's program rang the terminal bell.
+    AgentBell(AgentId),
     ProjectsChanged(Vec<Project>),
     Frame(Frame),
 }
@@ -279,6 +281,7 @@ mod tests {
             },
             ServerMessage::AgentUpdated(info.clone()),
             ServerMessage::AgentRemoved(info.id),
+            ServerMessage::AgentBell(info.id),
             ServerMessage::ProjectsChanged(vec![Project {
                 id: ProjectId::random(),
                 name: "p".into(),
