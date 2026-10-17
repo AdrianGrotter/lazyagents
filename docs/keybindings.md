@@ -34,9 +34,17 @@ Two input modes:
 | `y` / `N` | approve / deny what the selected agent waits for: sends `enter` / `esc` to its terminal, which answers Claude's permission dialog with its highlighted choice (yes) or no; only while the agent needs input |
 | `i` | reply: type a line and `enter` sends it to the selected agent with `enter` after it, as if typed in its pane; `esc` cancels. A pasted newline becomes a space |
 | `J`/`K`, `pagedown`/`pageup` | scroll the selected agent's pane half a page down / up without leaving the sidebar |
-| `?` | help popup |
+| `?` | help popup: typing filters it by key or description (`backspace` deletes), `esc`, `enter` or `?` closes it |
 | `q`, `ctrl-c` | quit TUI (agents keep running) |
 | `Q` | quit and stop daemon (confirm) |
+
+Actions that cannot act on the selected agent are dimmed in the help popup, and pressing one
+says why in the status bar instead of doing nothing: `no agent selected`, `<agent> is not
+running` (open, stop, reply), `<agent> has no terminal yet — r starts it` (scroll mode and
+`J`/`K` on a stopped agent), `<agent> is not waiting for an answer` (`y`, `N`). The status
+bar starts with what the selected agent's state calls for: the answers to a waiting agent,
+`r start` for a stopped one, `r restart` for an exited one, and `D <n> comments to send`
+while it has review comments.
 
 An agent whose turn ends (working or needs input → idle) while it is out of view is
 listed as `done`, with a blue dot, until you view it: select it, or, for the agent already

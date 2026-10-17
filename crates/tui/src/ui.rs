@@ -14,7 +14,7 @@ use crate::app::{
     AgentView, App, CommandRun, DiffView, Field, Focus, MIN_PANE, MessageKind, NewAgentForm, Popup,
     Preset, ProjectField, ProjectForm, Selection,
 };
-use crate::commands::{CustomCommand, Prompt};
+use crate::commands::Prompt;
 use crate::config::Theme;
 use crate::keymap::{Action, Keymap};
 
@@ -581,6 +581,25 @@ fn sidebar_hint(keymap: &Keymap) -> String {
         .join(" · ")
 }
 
+/// What the selected agent's state calls for, shown before the usual hints: the answers to
+/// a waiting agent, starting a stopped one, reviewing comments not yet sent.
+fn state_hint(app: &App) -> Option<String> {
+    let agent = app.selected_agent()?;
+    let key = |action| app.keymap.first_key(action);
+    let mut hints = Vec::new();
+    match agent.status {
+        Status::NeedsInput => hints.push(answer_hint(&app.keymap)),
+        Status::Stopped => hints.push(format!("{} start", key(Action::Restart))),
+        Status::Exited(_) => hints.push(format!("{} restart", key(Action::Restart))),
+        _ => {}
+    }
+    if let Some(count) = app.comments.get(&agent.id).map(Vec::len) {
+        let s = if count == 1 { "" } else { "s" };
+        hints.push(format!("{} {count} comment{s} to send", key(Action::Diff)));
+    }
+    (!hints.is_empty()).then(|| hints.join(" · "))
+}
+
 /// The answers a waiting agent can be sent from the sidebar.
 fn answer_hint(keymap: &Keymap) -> String {
     [
@@ -625,16 +644,9 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
         Focus::Diff => Span::raw(diff_hint(&app.keymap)).fg(theme.dim),
         Focus::Scroll => Span::raw(SCROLL_HINT).fg(theme.scroll),
         Focus::Projects | Focus::Agents => {
-            let waiting = app
-                .selected_agent()
-                .is_some_and(|a| a.status == Status::NeedsInput);
-            let hint = match waiting {
-                true => format!(
-                    "{} · {}",
-                    answer_hint(&app.keymap),
-                    sidebar_hint(&app.keymap)
-                ),
-                false => sidebar_hint(&app.keymap),
+            let hint = match state_hint(app) {
+                Some(state) => format!("{state} · {}", sidebar_hint(&app.keymap)),
+                None => sidebar_hint(&app.keymap),
             };
             Span::raw(hint).fg(theme.dim)
         }
@@ -752,7 +764,13 @@ pub fn popup_area(app: &App, screen: Rect) -> Option<Rect> {
 fn popup_content(popup: &Popup, app: &App) -> PopupContent {
     let theme = &app.theme;
     match popup {
-        Popup::Help => PopupContent::fitting(" Help ", 0, help_lines(&app.keymap, &app.commands)),
+        Popup::Help => {
+            let title = match app.help_filter.as_str() {
+                "" => " Help · type to filter ".to_string(),
+                filter => format!(" Help · /{filter} "),
+            };
+            PopupContent::fitting(title, 0, help_lines(app))
+        }
         Popup::Filter => PopupContent::new(" Filter ", 0, Vec::new()),
         Popup::Commands { index } => {
             PopupContent::fitting(" Commands ", 40, command_menu_lines(app, *index))
@@ -861,12 +879,17 @@ fn field_line(label: &'static str, value: String, focused: bool, theme: &Theme) 
     Line::from(vec![label, Span::raw(value)])
 }
 
-fn help_lines(keymap: &Keymap, commands: &[CustomCommand]) -> Vec<Line<'static>> {
-    let sidebar: Vec<(String, String)> = SIDEBAR_HELP
+/// Rows are `(keys, description, applies)`; a sidebar action that cannot act on the
+/// selection is dimmed. `app.help_filter` keeps only the rows whose keys or description
+/// contain it, ignoring case, and the key column keeps its width while filtering.
+fn help_lines(app: &App) -> Vec<Line<'static>> {
+    let keymap = &app.keymap;
+    let sidebar: Vec<(String, String, bool)> = SIDEBAR_HELP
         .iter()
         .map(|(actions, text)| {
             let keys: Vec<String> = actions.iter().map(|a| keymap.describe(*a)).collect();
-            (keys.join(", "), text.to_string())
+            let applies = actions.iter().any(|a| app.unavailable(*a).is_none());
+            (keys.join(", "), text.to_string(), applies)
         })
         .collect();
     let mut pane = Vec::new();
@@ -875,46 +898,66 @@ fn help_lines(keymap: &Keymap, commands: &[CustomCommand]) -> Vec<Line<'static>>
         (Action::PaneNext, "next agent"),
         (Action::PanePrevious, "previous agent"),
     ] {
-        pane.push((keymap.describe(action), text.to_string()));
+        pane.push((keymap.describe(action), text.to_string(), true));
         let direct = keymap.direct_keys(action);
         if !direct.is_empty() {
-            pane.push((crate::keymap::join(&direct), text.to_string()));
+            pane.push((crate::keymap::join(&direct), text.to_string(), true));
         }
     }
     pane.extend([
         (
             keymap.describe(Action::PaneScroll),
             "scroll the agent's history".to_string(),
+            true,
         ),
         (
             keymap.describe(Action::PaneSendPrefix),
             format!("send {} to the agent", keymap.prefix()),
+            true,
         ),
     ]);
-    let custom: Vec<(String, String)> = commands
+    let custom: Vec<(String, String, bool)> = app
+        .commands
         .iter()
-        .filter_map(|c| Some((c.key?.to_string(), c.description.clone())))
+        .filter_map(|c| Some((c.key?.to_string(), c.description.clone(), true)))
         .collect();
     let width = sidebar
         .iter()
         .chain(&pane)
         .chain(&custom)
-        .map(|(key, _)| key.chars().count())
+        .map(|(key, ..)| key.chars().count())
         .max()
         .unwrap_or(0);
-    let section = |title: &'static str, rows: Vec<(String, String)>| {
-        let heading = Line::from(title).bold();
-        let rows = rows
-            .into_iter()
-            .map(move |(key, action)| Line::from(format!("  {key:<width$}  {action}")));
-        std::iter::once(heading).chain(rows).collect::<Vec<_>>()
+    let filter = app.help_filter.to_lowercase();
+    let matches = |key: &str, text: &str| {
+        key.to_lowercase().contains(&filter) || text.to_lowercase().contains(&filter)
     };
-    let mut lines = section("Sidebar", sidebar);
-    lines.push(Line::default());
-    lines.extend(section("Agent pane", pane));
-    if !custom.is_empty() {
-        lines.push(Line::default());
-        lines.extend(section("Commands", custom));
+    let dim = app.theme.dim;
+    let mut lines = Vec::new();
+    for (title, rows) in [
+        ("Sidebar", sidebar),
+        ("Agent pane", pane),
+        ("Commands", custom),
+    ] {
+        let rows: Vec<Line> = rows
+            .into_iter()
+            .filter(|(key, text, _)| matches(key, text))
+            .map(|(key, text, applies)| {
+                let line = Line::from(format!("  {key:<width$}  {text}"));
+                if applies { line } else { line.fg(dim) }
+            })
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.push(Line::from(title).bold());
+        lines.extend(rows);
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(format!("no key matches \"{}\"", app.help_filter)).fg(dim));
     }
     lines
 }
@@ -1195,6 +1238,57 @@ mod tests {
         assert!(text.contains("● docs  idle"), "{text}");
         assert!(text.contains(" api · generic · needs input "), "{text}");
         assert!(text.contains("status: needs input"), "{text}");
+    }
+
+    #[test]
+    fn the_help_shows_only_rows_matching_the_filter() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.popup = Some(Popup::Help);
+        let (text, _) = render(&app);
+        assert!(text.contains(" Help · type to filter "), "{text}");
+        app.help_filter = "DIFF".into();
+        let (text, _) = render(&app);
+        assert!(text.contains(" Help · /DIFF "), "{text}");
+        assert!(text.contains("diff of the agent's changes"), "{text}");
+        assert!(!text.contains("new agent"), "{text}");
+        assert!(!text.contains("Agent pane"), "{text}");
+        app.help_filter = "zzz".into();
+        let (text, _) = render(&app);
+        assert!(text.contains("no key matches \"zzz\""), "{text}");
+    }
+
+    #[test]
+    fn the_help_dims_what_cannot_act_on_the_selection() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Stopped)]);
+        app.popup = Some(Popup::Help);
+        let (text, buffer) = render_at(&app, 100, 40);
+        let row = |needle: &str| {
+            let y = text
+                .lines()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?}\n{text}"));
+            let x = text.lines().nth(y).and_then(|l| l.find(needle)).expect("x");
+            let x = text.lines().nth(y).expect("row")[..x].chars().count();
+            buffer[(x as u16, y as u16)].fg
+        };
+        assert_eq!(row("approve / deny / reply"), app.theme.dim);
+        assert_ne!(row("stop / restart agent"), app.theme.dim);
+        assert_ne!(row("new agent"), app.theme.dim);
+    }
+
+    #[test]
+    fn the_status_bar_starts_with_what_the_agent_needs() {
+        let p = project("p");
+        let (app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Stopped)]);
+        let (text, _) = render(&app);
+        let status = text.lines().last().expect("status");
+        assert!(status.starts_with("r start · ? help"), "{status}");
+        let (app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Exited(1))]);
+        let (text, _) = render(&app);
+        let status = text.lines().last().expect("status");
+        assert!(status.starts_with("r restart · ? help"), "{status}");
     }
 
     #[test]

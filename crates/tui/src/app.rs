@@ -420,6 +420,8 @@ pub struct App {
     pub keymap: Keymap,
     pub presets: Vec<PresetDef>,
     pub commands: Vec<CustomCommand>,
+    /// What the help popup is filtered by while it is open.
+    pub help_filter: String,
     /// Review comments per agent, kept until they are sent.
     pub comments: HashMap<AgentId, Vec<Comment>>,
     pub theme: Theme,
@@ -467,6 +469,7 @@ impl App {
             presets: config.presets,
             commands: config.commands,
             comments: HashMap::new(),
+            help_filter: String::new(),
             theme: config.theme,
             cwd,
             home,
@@ -1746,6 +1749,10 @@ impl App {
         let Some(action) = self.keymap.sidebar(&key) else {
             return Vec::new();
         };
+        if let Some(reason) = self.unavailable(action) {
+            self.fail(reason);
+            return Vec::new();
+        }
         match action {
             Action::Quit => return vec![Effect::Quit],
             Action::StopDaemon => {
@@ -1754,7 +1761,10 @@ impl App {
                     action: Confirmed::StopDaemon,
                 });
             }
-            Action::Help => self.popup = Some(Popup::Help),
+            Action::Help => {
+                self.help_filter.clear();
+                self.popup = Some(Popup::Help);
+            }
             Action::Down => self.step(1),
             Action::Up => self.step(-1),
             Action::FocusProjects => self.focus = Focus::Projects,
@@ -1853,31 +1863,18 @@ impl App {
                 } else {
                     protocol::KeyCode::Esc
                 };
-                match self.selected_agent() {
-                    Some(agent) if agent.status == Status::NeedsInput => {
-                        return vec![press(agent.id, answer)];
-                    }
-                    Some(agent) => {
-                        let message =
-                            format!("{} is not waiting for an answer", crate::ui::label(agent));
-                        self.fail(message);
-                    }
-                    None => {}
+                if let Some(agent) = self.selected_agent() {
+                    return vec![press(agent.id, answer)];
                 }
             }
-            Action::Reply => match self.selected_agent() {
-                Some(agent) if agent.status.is_running() => {
+            Action::Reply => {
+                if let Some(agent) = self.selected_agent() {
                     self.popup = Some(Popup::Reply {
                         agent: agent.id,
                         input: String::new(),
                     });
                 }
-                Some(agent) => {
-                    let message = format!("{} is not running", crate::ui::label(agent));
-                    self.fail(message);
-                }
-                None => {}
-            },
+            }
             Action::Filter => {
                 self.focus = Focus::Agents;
                 self.popup = Some(Popup::Filter);
@@ -2025,7 +2022,24 @@ impl App {
             return Vec::new();
         };
         match popup {
-            Popup::Help => Vec::new(),
+            Popup::Help => {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Backspace => {
+                        self.help_filter.pop();
+                        self.popup = Some(Popup::Help);
+                    }
+                    KeyCode::Char(c) if c != '?' && !ctrl => {
+                        self.help_filter.push(c);
+                        self.popup = Some(Popup::Help);
+                    }
+                    KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
+                        self.popup = Some(Popup::Help);
+                    }
+                    _ => self.help_filter.clear(),
+                }
+                Vec::new()
+            }
             Popup::Commands { index } => self.on_commands_key(index, key),
             Popup::Comment {
                 agent,
@@ -2597,6 +2611,53 @@ impl App {
             Ok(0) => {}
             Ok(code) => self.fail(format!("{title} exited with {code}")),
             Err(error) => self.fail(format!("{title} failed: {error}")),
+        }
+    }
+}
+
+impl App {
+    /// Why `action` cannot act on the selection, or `None` when it can. The help popup dims
+    /// such actions, and pressing one shows the reason instead.
+    pub fn unavailable(&self, action: Action) -> Option<String> {
+        let on_project = self.focus == Focus::Projects;
+        let needs_agent = match action {
+            Action::Open | Action::Remove => !on_project,
+            Action::Stop
+            | Action::Restart
+            | Action::Rename
+            | Action::Diff
+            | Action::Scroll
+            | Action::PeekDown
+            | Action::PeekUp
+            | Action::Approve
+            | Action::Deny
+            | Action::Reply => true,
+            _ => false,
+        };
+        if !needs_agent {
+            return None;
+        }
+        let Some(agent) = self.selected_agent() else {
+            return Some("no agent selected".to_string());
+        };
+        let name = crate::ui::label(agent);
+        let restart = self.keymap.first_key(Action::Restart);
+        match action {
+            Action::Open if !agent.status.is_running() => {
+                Some(format!("{name} is not running — {restart} restarts"))
+            }
+            Action::Stop | Action::Reply if !agent.status.is_running() => {
+                Some(format!("{name} is not running"))
+            }
+            Action::Scroll | Action::PeekDown | Action::PeekUp
+                if agent.status == Status::Stopped =>
+            {
+                Some(format!("{name} has no terminal yet — {restart} starts it"))
+            }
+            Action::Approve | Action::Deny if agent.status != Status::NeedsInput => {
+                Some(format!("{name} is not waiting for an answer"))
+            }
+            _ => None,
         }
     }
 }
@@ -4305,12 +4366,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn help_closes_on_any_key() {
-        let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('?'));
-        assert_eq!(app.popup, Some(Popup::Help));
-        let _ = app.on_key(key('z'));
-        assert_eq!(app.popup, None);
+    fn help_closes_on_escape_enter_or_question_mark() {
+        for close in [code(KeyCode::Esc), code(KeyCode::Enter), key('?')] {
+            let (mut app, _, _) = two_agents();
+            let _ = app.on_key(key('?'));
+            assert_eq!(app.popup, Some(Popup::Help));
+            let _ = app.on_key(key('z'));
+            assert_eq!(app.popup, Some(Popup::Help));
+            let _ = app.on_key(close);
+            assert_eq!(app.popup, None, "{close:?}");
+        }
     }
 
     #[test]
@@ -5118,7 +5183,7 @@ pub(crate) mod tests {
         assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
         assert_eq!(
             app.current_message(Instant::now()),
-            Some("nothing to scroll")
+            Some("stopped has no terminal yet — r starts it")
         );
     }
 
@@ -6124,5 +6189,70 @@ mod diff_comment_tests {
         let _ = app.on_key(key('D'));
         app.apply_diff(a.id, Ok(DIFF.into()));
         assert_eq!(texts(&app, a.id), ["why?"]);
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::tests::{agent, loaded, project};
+    use super::*;
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn stopped() -> App {
+        let p = project("p");
+        loaded(vec![p.clone()], vec![agent(&p, "api", Status::Stopped)]).0
+    }
+
+    #[test]
+    fn typing_in_the_help_filters_it_and_escape_closes_it() {
+        let mut app = stopped();
+        let _ = app.on_key(key('?'));
+        for c in "diff".chars() {
+            let _ = app.on_key(key(c));
+        }
+        assert_eq!(app.popup, Some(Popup::Help));
+        assert_eq!(app.help_filter, "diff");
+        let _ = app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.help_filter, "dif");
+        let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.popup, None);
+        let _ = app.on_key(key('?'));
+        assert_eq!(app.help_filter, "");
+        let _ = app.on_key(key('?'));
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn an_action_that_does_not_apply_says_why() {
+        for (pressed, why) in [
+            ('x', "api is not running"),
+            ('s', "api has no terminal yet — r starts it"),
+            ('J', "api has no terminal yet — r starts it"),
+            ('y', "api is not waiting for an answer"),
+            ('i', "api is not running"),
+        ] {
+            let mut app = stopped();
+            assert!(app.on_key(key(pressed)).is_empty(), "{pressed}");
+            assert_eq!(app.current_message(Instant::now()), Some(why), "{pressed}");
+        }
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p], Vec::new());
+        let _ = app.on_key(key('x'));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("no agent selected")
+        );
+    }
+
+    #[test]
+    fn unavailable_reports_every_agent_action_that_cannot_run() {
+        let app = stopped();
+        assert!(app.unavailable(Action::Stop).is_some());
+        assert!(app.unavailable(Action::Restart).is_none());
+        assert!(app.unavailable(Action::NewAgent).is_none());
+        assert!(app.unavailable(Action::Help).is_none());
     }
 }
