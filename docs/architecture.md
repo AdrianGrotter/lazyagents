@@ -155,6 +155,15 @@ contains `.envrc` and `direnv` is on `PATH`, the command is wrapped as
 `direnv exec <dir> <cmd...>` so nix/direnv environments load. The user's `claude` shell
 function is not used; the binary on `PATH` is.
 
+The daemon's environment is that of the process that started it, which may be a shell
+where direnv loaded some other project's `.envrc`. `direnv exec` reverts that diff before
+loading, so agents with an `.envrc` of their own never see it. For the rest, the daemon
+runs `direnv export json` in `/` once at startup; when that prints a revert, every agent
+without an `.envrc` runs as `direnv exec / <cmd...>` (direnv keeps the working directory)
+and sees the variables as they were before direnv loaded (ADR 0015). With no `direnv` on
+`PATH`, no inherited diff, or a `DIRENV_DIFF` direnv cannot read (logged), agents start
+without the wrapper.
+
 ### Worktrees
 
 The daemon runs every git command through the git CLI (`crates/daemon/src/git.rs`), so the

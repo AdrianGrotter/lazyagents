@@ -24,6 +24,9 @@ pub struct SpawnContext<'a> {
     pub paths: &'a StatePaths,
     pub project_root: &'a Path,
     pub direnv: Option<&'a Path>,
+    /// The daemon inherited a direnv-loaded `.envrc`'s changes; an agent with no `.envrc` of
+    /// its own then runs under `direnv exec /`, which reverts them.
+    pub revert_direnv: bool,
     pub prompt: Option<&'a str>,
     /// A project's worktree setup script, run in the agent's terminal before the agent.
     pub setup: Option<&'a str>,
@@ -65,7 +68,9 @@ pub fn spawn_spec(record: &AgentRecord, launch: Launch, ctx: &SpawnContext<'_>) 
         argv = wrapped;
     }
 
-    let (program, args) = match ctx.direnv.zip(find_envrc(&record.cwd, ctx.project_root)) {
+    let envrc_dir = find_envrc(&record.cwd, ctx.project_root)
+        .or_else(|| ctx.revert_direnv.then(|| PathBuf::from("/")));
+    let (program, args) = match ctx.direnv.zip(envrc_dir) {
         Some((direnv, dir)) => {
             let mut args = vec!["exec".to_string(), dir.display().to_string()];
             args.extend(argv);
@@ -214,6 +219,7 @@ mod tests {
             paths,
             project_root: root,
             direnv,
+            revert_direnv: false,
             prompt: None,
             setup: None,
         }
@@ -390,6 +396,34 @@ mod tests {
                 root.path().display().to_string(),
                 "sh".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn an_inherited_direnv_environment_is_reverted_where_no_envrc_loads() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = StatePaths::new("/s");
+        let rec = record(AgentKind::Generic, &["sh"], root.path());
+        let reverting = SpawnContext {
+            revert_direnv: true,
+            ..ctx(&paths, root.path(), Some(Path::new("/nix/direnv")))
+        };
+        let spec = spawn_spec(&rec, Launch::Fresh, &reverting);
+        assert_eq!(spec.program, "/nix/direnv");
+        assert_eq!(spec.args, ["exec", "/", "sh"]);
+        assert_eq!(spec.cwd, root.path());
+
+        std::fs::write(root.path().join(".envrc"), "use flake\n").expect("envrc");
+        let spec = spawn_spec(&rec, Launch::Fresh, &reverting);
+        assert_eq!(spec.args[1], root.path().display().to_string());
+
+        let without_direnv = SpawnContext {
+            revert_direnv: true,
+            ..ctx(&paths, root.path(), None)
+        };
+        assert_eq!(
+            spawn_spec(&rec, Launch::Fresh, &without_direnv).program,
+            "sh"
         );
     }
 

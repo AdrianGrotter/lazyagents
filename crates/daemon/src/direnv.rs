@@ -1,8 +1,8 @@
 //! Allows a new worktree's `.envrc` when the user already allowed the same content in
-//! the project.
+//! the project, and tells whether the daemon inherited a direnv-loaded environment.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::Context;
 use serde_json::Value;
@@ -61,6 +61,24 @@ pub fn allow(direnv: &Path, dir: &Path, env: Env) -> anyhow::Result<()> {
         String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(())
+}
+
+/// True when the daemon's environment holds changes a direnv-loaded `.envrc` made, which
+/// `direnv export json` run outside any `.envrc` then prints the revert of. An error means
+/// direnv could not read them, such as a corrupt `DIRENV_DIFF`.
+pub fn inherited_env(direnv: &Path) -> anyhow::Result<bool> {
+    let output = Command::new(direnv)
+        .args(["export", "json"])
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("running {} export", direnv.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "direnv export failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(!output.stdout.trim_ascii().is_empty())
 }
 
 /// Runs `direnv allow` on `worktree` when its `.envrc` matches the project's allowed one;

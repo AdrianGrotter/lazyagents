@@ -35,8 +35,9 @@ pub struct Config {
     pub exe: PathBuf,
     /// Exit after this long with no client connected and no agent running.
     pub idle_exit: Option<Duration>,
-    /// The direnv binary that wraps agents in a directory with an `.envrc` and decides
-    /// whether a new worktree's `.envrc` is allowed automatically.
+    /// The direnv binary that wraps agents in a directory with an `.envrc`, reverts a
+    /// direnv-loaded environment the daemon inherited, and decides whether a new worktree's
+    /// `.envrc` is allowed automatically.
     pub direnv: Option<PathBuf>,
     /// Claude Code's user config directory, whose `settings.json` may hold the user's status
     /// line; `None` reads no user settings.
@@ -114,6 +115,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let mut writers = JoinSet::new();
     let mut daemon = Daemon::new(paths.clone(), config.exe, config.direnv, state, events_tx);
     daemon.claude_config = config.claude_config;
+    daemon.revert_direnv = daemon.direnv.as_deref().is_some_and(inherits_direnv_env);
     let mut next_client: ClientId = 1;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -351,6 +353,7 @@ struct Daemon {
     leftovers: Vec<(AgentId, Tracked)>,
     leftovers_retried: Option<Instant>,
     claude_config: Option<PathBuf>,
+    revert_direnv: bool,
 }
 
 impl Drop for Daemon {
@@ -386,6 +389,7 @@ impl Daemon {
             leftovers: Vec::new(),
             leftovers_retried: None,
             claude_config: None,
+            revert_direnv: false,
         }
     }
 
@@ -806,6 +810,7 @@ impl Daemon {
             paths: &self.paths,
             project_root: &project_root,
             direnv: self.direnv.as_deref(),
+            revert_direnv: self.revert_direnv,
             prompt: claude_prompt.as_deref(),
             setup: setup.as_deref(),
         };
@@ -1474,6 +1479,21 @@ fn note_blocked_envrc(agent: &mut Agent) -> bool {
 
 /// Room left in a frame for everything in a diff response but the text.
 const RESPONSE_OVERHEAD: usize = 1024;
+
+fn inherits_direnv_env(direnv: &Path) -> bool {
+    match direnv::inherited_env(direnv) {
+        Ok(inherited) => {
+            if inherited {
+                tracing::info!("reverting the inherited direnv environment for agents");
+            }
+            inherited
+        }
+        Err(e) => {
+            tracing::warn!("leaving the inherited environment as is: {e:#}");
+            false
+        }
+    }
+}
 
 fn run_git_query(dir: &Path, base: Option<&str>, query: GitQuery) -> Result<Response, String> {
     match query {

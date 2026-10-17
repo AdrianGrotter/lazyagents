@@ -25,6 +25,10 @@ impl TestEnv {
     fn run_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
         Command::new(BIN)
             .args(args)
+            .env_remove("DIRENV_DIFF")
+            .env_remove("DIRENV_DIR")
+            .env_remove("DIRENV_FILE")
+            .env_remove("DIRENV_WATCHES")
             .envs(env.iter().copied())
             .env("LAZYAGENTS_STATE_DIR", self.state.path())
             .current_dir(self.project.path())
@@ -886,4 +890,97 @@ fn no_subcommand_without_a_terminal_fails_cleanly() {
         "{out:?}"
     );
     assert!(!env.socket().exists());
+}
+
+/// direnv's home, data, config and cache dirs inside `root`, so the user's allow list and
+/// config are never read or written.
+fn isolated_direnv_home(root: &Path) -> Vec<(String, String)> {
+    ["data", "config", "cache"]
+        .iter()
+        .map(|name| root.join(name))
+        .for_each(|dir| std::fs::create_dir_all(dir).expect("xdg dir"));
+    let path = |name: &str| root.join(name).display().to_string();
+    vec![
+        ("HOME".into(), root.display().to_string()),
+        ("XDG_DATA_HOME".into(), path("data")),
+        ("XDG_CONFIG_HOME".into(), path("config")),
+        ("XDG_CACHE_HOME".into(), path("cache")),
+        ("DIRENV_CONFIG".into(), path("config")),
+    ]
+}
+
+/// The variables a shell's direnv hook sets on entering `dir`, after allowing its `.envrc`.
+fn direnv_loaded_env(dir: &Path, base: &[(String, String)]) -> Vec<(String, String)> {
+    let direnv = daemon::find_in_path("direnv").expect("direnv in the nix dev shell");
+    let direnv_command = || {
+        let mut command = Command::new(&direnv);
+        command
+            .env_remove("DIRENV_DIFF")
+            .env_remove("DIRENV_DIR")
+            .env_remove("DIRENV_FILE")
+            .env_remove("DIRENV_WATCHES")
+            .envs(base.iter().map(|(k, v)| (k, v)))
+            .current_dir(dir)
+            .stdin(Stdio::null());
+        command
+    };
+    let allowed = direnv_command()
+        .arg("allow")
+        .output()
+        .expect("direnv allow");
+    assert!(allowed.status.success(), "{allowed:?}");
+    let exported = direnv_command()
+        .args(["export", "json"])
+        .output()
+        .expect("direnv export");
+    assert!(exported.status.success(), "{exported:?}");
+    let vars: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&exported.stdout).expect("export json sets every variable");
+    vars.into_iter().collect()
+}
+
+#[test]
+fn agents_do_not_inherit_the_direnv_environment_the_daemon_started_in() {
+    let env = TestEnv::new();
+    let home = tempfile::tempdir().expect("direnv home");
+    let mut base = isolated_direnv_home(home.path());
+    base.push(("LAZYAGENTS_TEST_ORIG".into(), "original".into()));
+    let other = tempfile::tempdir().expect("other project");
+    std::fs::write(
+        other.path().join(".envrc"),
+        "export LAZYAGENTS_TEST_LEAK=leaked\nexport LAZYAGENTS_TEST_ORIG=changed\n",
+    )
+    .expect("write .envrc");
+    let loaded = direnv_loaded_env(other.path(), &base);
+    assert!(loaded.iter().any(|(k, _)| k == "DIRENV_DIFF"), "{loaded:?}");
+    let shell: Vec<(&str, &str)> = base
+        .iter()
+        .chain(&loaded)
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let seen = env.project.path().join("seen");
+    let script = format!(
+        "echo \"${{LAZYAGENTS_TEST_LEAK-unset}} ${{LAZYAGENTS_TEST_ORIG-unset}}\" > '{0}.tmp'; mv '{0}.tmp' '{0}'",
+        seen.display()
+    );
+    let out = env.run_with_env(&["new", "seer", "--", "sh", "-c", &script], &shell);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(wait_for_file(&seen).trim(), "unset original");
+}
+
+#[test]
+fn an_unreadable_direnv_diff_still_starts_agents() {
+    let env = TestEnv::new();
+    let home = tempfile::tempdir().expect("direnv home");
+    let base = isolated_direnv_home(home.path());
+    let mut shell: Vec<(&str, &str)> = base.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    shell.extend([("DIRENV_DIFF", "garbage"), ("DIRENV_DIR", "-/nowhere")]);
+    let started = env.project.path().join("started");
+    let script = format!(
+        "echo started > '{0}.tmp'; mv '{0}.tmp' '{0}'",
+        started.display()
+    );
+    let out = env.run_with_env(&["new", "starter", "--", "sh", "-c", &script], &shell);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(wait_for_file(&started).trim(), "started");
 }
