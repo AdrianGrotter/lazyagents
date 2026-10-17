@@ -53,9 +53,12 @@ async fn deliver(kind: HookKind, agent: Uuid, socket: PathBuf, mut input: impl A
                 .as_ref()
                 .and_then(|value| value.get(name)?.as_str().map(str::to_owned))
         };
+        let Some(kind) = effective_kind(kind, payload.as_ref()) else {
+            return Ok(());
+        };
         let request = Request::Hook {
             id: AgentId(agent),
-            kind: effective_kind(kind, payload.as_ref()),
+            kind,
             session_id: field("session_id"),
             source: field("source"),
         };
@@ -64,17 +67,26 @@ async fn deliver(kind: HookKind, agent: Uuid, socket: PathBuf, mut input: impl A
     .await;
 }
 
-/// Claude's idle-prompt `Notification` means it is waiting at an empty prompt, not
-/// blocked on a question, so it is forwarded as `Stop`.
-fn effective_kind(kind: HookKind, payload: Option<&serde_json::Value>) -> HookKind {
+/// The hook to forward for a Claude hook event, or `None` for a notification that says
+/// nothing about whether Claude waits for the user. An idle-prompt `Notification` means
+/// Claude waits at an empty prompt, not on a question, so it is forwarded as `Stop`.
+/// Unknown notification types count as questions.
+fn effective_kind(kind: HookKind, payload: Option<&serde_json::Value>) -> Option<HookKind> {
+    if kind != HookKind::Notification {
+        return Some(kind);
+    }
     let text = |name: &str| payload.and_then(|value| value.get(name)?.as_str());
-    let idle_prompt = text("notification_type") == Some("idle_prompt")
-        || text("message")
-            .is_some_and(|message| message.to_lowercase().contains("waiting for your input"));
-    if kind == HookKind::Notification && idle_prompt {
-        HookKind::Stop
-    } else {
-        kind
+    let kind_of_notification = text("notification_type").unwrap_or_default();
+    let waiting_message = text("message")
+        .is_some_and(|message| message.to_lowercase().contains("waiting for your input"));
+    match kind_of_notification {
+        "idle_prompt" => Some(HookKind::Stop),
+        "auth_success" | "elicitation_complete" | "elicitation_response" | "agent_completed" => {
+            None
+        }
+        quota if quota.starts_with("quota_") => None,
+        _ if waiting_message => Some(HookKind::Stop),
+        _ => Some(HookKind::Notification),
     }
 }
 
@@ -98,7 +110,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn notification(payload: serde_json::Value) -> HookKind {
+    fn notification(payload: serde_json::Value) -> Option<HookKind> {
         effective_kind(HookKind::Notification, Some(&payload))
     }
 
@@ -128,7 +140,7 @@ mod tests {
     fn idle_prompt_type_alone_is_stop() {
         assert_eq!(
             notification(json!({"notification_type": "idle_prompt"})),
-            HookKind::Stop
+            Some(HookKind::Stop)
         );
     }
 
@@ -136,7 +148,7 @@ mod tests {
     fn waiting_message_alone_is_stop() {
         assert_eq!(
             notification(json!({"message": "Claude is waiting for your input"})),
-            HookKind::Stop
+            Some(HookKind::Stop)
         );
     }
 
@@ -144,31 +156,57 @@ mod tests {
     fn waiting_message_is_matched_case_insensitively() {
         assert_eq!(
             notification(json!({"message": "CLAUDE IS WAITING FOR YOUR INPUT"})),
-            HookKind::Stop
+            Some(HookKind::Stop)
         );
     }
 
     #[test]
-    fn permission_notification_still_needs_input() {
-        assert_eq!(
-            notification(json!({
-                "notification_type": "permission_prompt",
-                "message": "Claude needs your permission to use Bash"
-            })),
-            HookKind::Notification
-        );
+    fn questions_and_unknown_notifications_need_input() {
+        for kind in [
+            "permission_prompt",
+            "elicitation_dialog",
+            "elicitation_url_dialog",
+            "agent_needs_input",
+            "some_future_type",
+        ] {
+            assert_eq!(
+                notification(json!({"notification_type": kind, "message": "?"})),
+                Some(HookKind::Notification),
+                "{kind}"
+            );
+        }
         assert_eq!(
             effective_kind(HookKind::Notification, None),
-            HookKind::Notification
+            Some(HookKind::Notification)
         );
+    }
+
+    #[test]
+    fn informational_notifications_are_dropped() {
+        for kind in [
+            "auth_success",
+            "elicitation_complete",
+            "elicitation_response",
+            "agent_completed",
+            "quota_auto_resume_scheduled",
+        ] {
+            assert_eq!(
+                notification(json!({"notification_type": kind})),
+                None,
+                "{kind}"
+            );
+        }
     }
 
     #[test]
     fn other_hooks_are_unchanged() {
-        let idle = json!({"notification_type": "idle_prompt"});
-        assert_eq!(
-            effective_kind(HookKind::PreToolUse, Some(&idle)),
-            HookKind::PreToolUse
-        );
+        let idle = json!({"notification_type": "auth_success"});
+        for kind in [
+            HookKind::PreToolUse,
+            HookKind::PermissionRequest,
+            HookKind::StopFailure,
+        ] {
+            assert_eq!(effective_kind(kind, Some(&idle)), Some(kind));
+        }
     }
 }

@@ -130,16 +130,20 @@ pub enum HookKind {
     PostToolUse,
     Notification,
     Stop,
+    PermissionRequest,
+    StopFailure,
 }
 
 impl HookKind {
-    pub const ALL: [HookKind; 6] = [
+    pub const ALL: [HookKind; 8] = [
         HookKind::SessionStart,
         HookKind::UserPromptSubmit,
         HookKind::PreToolUse,
         HookKind::PostToolUse,
         HookKind::Notification,
         HookKind::Stop,
+        HookKind::PermissionRequest,
+        HookKind::StopFailure,
     ];
 
     pub fn name(self) -> &'static str {
@@ -150,6 +154,8 @@ impl HookKind {
             HookKind::PostToolUse => "PostToolUse",
             HookKind::Notification => "Notification",
             HookKind::Stop => "Stop",
+            HookKind::PermissionRequest => "PermissionRequest",
+            HookKind::StopFailure => "StopFailure",
         }
     }
 
@@ -167,6 +173,14 @@ mod tests {
         for kind in HookKind::ALL {
             assert_eq!(HookKind::from_name(kind.name()), Some(kind));
         }
+        assert_eq!(
+            HookKind::from_name("PermissionRequest"),
+            Some(HookKind::PermissionRequest)
+        );
+        assert_eq!(
+            HookKind::from_name("StopFailure"),
+            Some(HookKind::StopFailure)
+        );
         assert_eq!(HookKind::from_name("SubagentStop"), None);
     }
 

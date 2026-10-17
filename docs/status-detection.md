@@ -15,10 +15,15 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   - `SessionStart` → `Idle`
   - `UserPromptSubmit`, `PreToolUse`, `PostToolUse` → `Working` (`PostToolUse` moves an
     agent out of `NeedsInput` once an approved tool finishes)
-  - `Notification` → `NeedsInput`, except an idle-prompt notification
-    (`notification_type` `idle_prompt`, or a `message` containing
-    "waiting for your input", case-insensitive), which the hook forwards as `Stop`
-  - `Stop` → `Idle`
+  - `PermissionRequest` → `NeedsInput`, the moment Claude is about to ask
+  - `Notification` → `NeedsInput` for a question: `notification_type`
+    `permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog`,
+    `agent_needs_input`, or a type lazyagents does not know. The hook forwards an
+    idle-prompt notification (`idle_prompt`, or a `message` containing "waiting for your
+    input", case-insensitive) as `Stop`, and drops the informational ones
+    (`auth_success`, `elicitation_complete`, `elicitation_response`, `agent_completed`
+    and every `quota_*`) without telling the daemon
+  - `Stop`, `StopFailure` (a turn ended by an API error) → `Idle`
 - **Claude silence**: a `Working` Claude agent with no output for 10 s becomes `Idle`.
   The 10 s count from the latest of its start, its last output and its last hook (every
   hook counts, even one that leaves the status unchanged), so a prompt submitted after a

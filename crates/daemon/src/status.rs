@@ -11,11 +11,11 @@ pub const CLAUDE_STARTUP_SILENCE: Duration = Duration::from_secs(30);
 
 pub fn on_hook(kind: HookKind) -> Status {
     match kind {
-        HookKind::SessionStart | HookKind::Stop => Status::Idle,
+        HookKind::SessionStart | HookKind::Stop | HookKind::StopFailure => Status::Idle,
         HookKind::UserPromptSubmit | HookKind::PreToolUse | HookKind::PostToolUse => {
             Status::Working
         }
-        HookKind::Notification => Status::NeedsInput,
+        HookKind::Notification | HookKind::PermissionRequest => Status::NeedsInput,
     }
 }
 
@@ -80,6 +80,8 @@ mod tests {
         assert_eq!(on_hook(HookKind::PostToolUse), Status::Working);
         assert_eq!(on_hook(HookKind::Notification), Status::NeedsInput);
         assert_eq!(on_hook(HookKind::Stop), Status::Idle);
+        assert_eq!(on_hook(HookKind::PermissionRequest), Status::NeedsInput);
+        assert_eq!(on_hook(HookKind::StopFailure), Status::Idle);
     }
 
     #[test]

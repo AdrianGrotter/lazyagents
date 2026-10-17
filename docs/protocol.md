@@ -1,6 +1,6 @@
 # Protocol
 
-Status: implemented in crates/protocol (version 3); that crate is the source of truth.
+Status: implemented in crates/protocol (version 4); that crate is the source of truth.
 
 ## Transport and framing
 

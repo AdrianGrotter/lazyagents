@@ -753,10 +753,9 @@ async fn claude_agents_get_sessions_hooks_and_resume() {
     let settings = StatePaths::new(daemon.path()).hook_settings(agent.id);
     assert_eq!(lines[3], settings.display().to_string());
     let settings_json = std::fs::read_to_string(&settings).expect("settings written");
-    assert!(
-        settings_json.contains("UserPromptSubmit"),
-        "{settings_json}"
-    );
+    for event in ["UserPromptSubmit", "PermissionRequest", "StopFailure"] {
+        assert!(settings_json.contains(event), "{event}: {settings_json}");
+    }
 
     conn.request(Request::Hook {
         id: agent.id,
