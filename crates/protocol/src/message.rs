@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentId, AgentInfo, CreateAgent, Frame, GitStat, HookKind, InputEvent, Project, ProjectId,
+    Usage,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +75,11 @@ pub enum Request {
         /// message of a `Notification`.
         detail: Option<String>,
     },
+    /// From `lazyagents statusline`, each time Claude refreshes the agent's status line.
+    Usage {
+        id: AgentId,
+        usage: Usage,
+    },
     Shutdown,
 }
 
@@ -132,14 +138,23 @@ mod tests {
             command: vec!["claude".into()],
             cwd: "/tmp/p".into(),
             status: Status::Exited(2),
-            worktree: Some(WorktreeInfo {
+            worktree: Some(Box::new(WorktreeInfo {
                 path: "/tmp/p/.worktrees/api".into(),
                 branch: "agent/api".into(),
                 base: "main".into(),
-            }),
+            })),
             last_error: Some("no such file".into()),
             title: Some("Fix the parser".into()),
             waiting_for: Some("Bash: ls".into()),
+            usage: Some(Box::new(Usage {
+                model: Some("Opus".into()),
+                cost_micros: Some(420_000),
+                context_percent: Some(23),
+                five_hour_percent: Some(24),
+                seven_day_percent: None,
+                pr_number: Some(7),
+                pr_review: Some("approved".into()),
+            })),
         }
     }
 
@@ -240,6 +255,10 @@ mod tests {
                 session_id: Some("s".into()),
                 source: Some("resume".into()),
                 detail: Some("Bash: ls".into()),
+            },
+            Request::Usage {
+                id,
+                usage: Usage::default(),
             },
             Request::Shutdown,
         ];

@@ -209,6 +209,63 @@ fn new_types_the_prompt_into_a_generic_agent() {
 }
 
 #[test]
+fn the_status_line_shows_the_users_and_reports_to_the_daemon() {
+    let env = TestEnv::new();
+    let claude_config = tempfile::tempdir().expect("claude config");
+    std::fs::write(
+        claude_config.path().join("settings.json"),
+        r#"{"statusLine": {"type": "command", "command": "printf 'mine:'; head -c 11; exit 3"}}"#,
+    )
+    .expect("settings");
+    env.ok(&[
+        "new",
+        "c",
+        "--kind",
+        "claude",
+        "--",
+        "sh",
+        "-c",
+        "exec sleep 30",
+    ]);
+    let state = std::fs::read_to_string(env.state.path().join("state.toml")).expect("state");
+    let id = state
+        .lines()
+        .skip_while(|line| line.trim() != "[[agents]]")
+        .find_map(|line| line.strip_prefix("id = \""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .filter(|id| id.len() == 36)
+        .expect("agent id");
+    let payload =
+        r#"{"model":{"display_name":"Opus"},"cost":{"total_cost_usd":0.42},"cwd":"/nowhere"}"#;
+    let mut child = Command::new(BIN)
+        .arg("statusline")
+        .env("CLAUDE_CONFIG_DIR", claude_config.path())
+        .env("LAZYAGENTS_AGENT_ID", id)
+        .env("LAZYAGENTS_SOCKET", env.socket())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("statusline");
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write");
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "mine:{\"model\":{\"");
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        wait_until(Duration::from_secs(5), || env
+            .ok(&["ls"])
+            .contains("(Opus · $0.42)")),
+        "{}",
+        env.ok(&["ls"])
+    );
+}
+
+#[test]
 fn send_types_a_line_into_an_agent() {
     let env = TestEnv::new();
     let typed = env.project.path().join("typed");

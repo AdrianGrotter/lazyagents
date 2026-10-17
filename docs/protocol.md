@@ -65,6 +65,8 @@ is rejected.
   `tool_name` and the first of its `tool_input`'s `command`, `file_path`, `path`, `url`,
   `pattern`, `query`, `description` or `prompt` (`Bash: npm test`), or a
   `Notification`'s `message`
+- `Usage { id, usage }`: from `lazyagents statusline`; ignored, like a `Hook`, for an agent
+  that is not a running Claude agent
 - `Shutdown`: answered after every agent's process tree has exited
 
 `Response`:
@@ -94,6 +96,12 @@ is rejected.
 work for any agent that still has a terminal, including an exited one, and are rejected
 for a stopped agent, which has none. `Subscribe` succeeds for any known agent.
 A `Hook` for an agent that is not running, or is not a Claude agent, is ignored.
+
+`AgentInfo.usage` is the last `Usage` a Claude agent's status line reported: `model` (the
+model's display name), `cost_micros` (the session's estimated cost in millionths of a
+dollar), `context_percent`, `five_hour_percent` and `seven_day_percent` (the plan's limits,
+rounded to whole percent), `pr_number` and `pr_review`. Each is `None` when Claude left it
+out, and the whole is `None` until the first report. It is kept in memory only.
 
 `AgentInfo.waiting_for` says what a Claude agent in `NeedsInput` waits for: the `detail`
 of the `PermissionRequest` that made it wait, else of the `Notification`, or `trusting

@@ -27,6 +27,15 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
     (`auth_success`, `elicitation_complete`, `elicitation_response`, `agent_completed`
     and every `quota_*`) without telling the daemon
   - `Stop`, `StopFailure` (a turn ended by an API error) → `Idle`
+- **Status line**: when the user has a Claude status line of their own (a `command` one,
+  from the agent directory's `.claude/settings.local.json`, else `.claude/settings.json`,
+  else `$CLAUDE_CONFIG_DIR/settings.json` or `~/.claude/settings.json`), the generated
+  settings also carry `statusLine` with the same settings and the command `lazyagents
+  statusline`, since a `statusLine` in `--settings` replaces theirs. That command runs
+  theirs with Claude's JSON, so their line shows unchanged with its exit code, and sends the
+  daemon the usage figures in the JSON within 200 ms. Without a status line of their own an
+  agent gets none, and reports no usage. The lookup happens when the agent starts; changes
+  to the status line's other settings apply on restart, changes to their script at once.
 - **Claude silence**: a `Working` Claude agent with no output for 10 s becomes `Idle`.
   The 10 s count from the latest of its start, its last output and its last hook (every
   hook counts, even one that leaves the status unchanged), so a prompt submitted after a

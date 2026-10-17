@@ -1,6 +1,7 @@
 mod commands;
 mod daemon_cmd;
 mod hook;
+mod statusline;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -24,6 +25,9 @@ pub enum Command {
     /// Forward a Claude Code hook event to the daemon
     #[command(hide = true)]
     Hook { event: String },
+    /// Show the user's Claude status line and report its figures to the daemon
+    #[command(hide = true)]
+    Statusline,
     /// List projects and agents
     Ls,
     /// Manage projects
@@ -98,6 +102,7 @@ fn main() -> ExitCode {
             hook::run(&event);
             Ok(())
         }
+        Some(Command::Statusline) => return statusline::run(),
         Some(Command::Daemon) => daemon_cmd::run(),
         Some(command) => tokio::runtime::Builder::new_current_thread()
             .enable_all()

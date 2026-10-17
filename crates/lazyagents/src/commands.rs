@@ -125,7 +125,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
             )?;
             println!("renamed {} to {}", info.name, renamed.name);
         }
-        Command::Daemon | Command::Hook { .. } | Command::Shutdown => {
+        Command::Daemon | Command::Hook { .. } | Command::Statusline | Command::Shutdown => {
             unreachable!("dispatched in main")
         }
     }
@@ -284,8 +284,15 @@ fn format_ls(projects: &[Project], agents: &[AgentInfo]) -> String {
             } else {
                 agent.command.join(" ")
             };
+            let usage = agent
+                .usage
+                .as_ref()
+                .map(|usage| usage.summary())
+                .filter(|summary| !summary.is_empty())
+                .map(|summary| format!("  ({summary})"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "  {:width$}  {:12}  {command}\n",
+                "  {:width$}  {:12}  {command}{usage}\n",
                 agent.name,
                 agent.status.label()
             ));
@@ -320,6 +327,7 @@ mod tests {
             last_error: None,
             title: None,
             waiting_for: None,
+            usage: None,
         }
     }
 
@@ -371,14 +379,29 @@ mod tests {
         let plain = agent(&p, "plain");
         assert_eq!(removed_message(&plain), "removed plain");
         let mut wt = agent(&p, "wt");
-        wt.worktree = Some(protocol::WorktreeInfo {
+        wt.worktree = Some(Box::new(protocol::WorktreeInfo {
             path: "/s/worktrees/p-1234abcd/wt".into(),
             branch: "lazyagents/wt".into(),
             base: "main".into(),
-        });
+        }));
         assert_eq!(
             removed_message(&wt),
             "removed wt; kept worktree /s/worktrees/p-1234abcd/wt (branch lazyagents/wt)"
+        );
+    }
+
+    #[test]
+    fn ls_adds_what_a_claude_status_line_reported() {
+        let p = project("lazyagents", "/git/lazyagents");
+        let mut a = agent(&p, "api");
+        a.usage = Some(Box::new(protocol::Usage {
+            model: Some("Opus".into()),
+            cost_micros: Some(420_000),
+            ..protocol::Usage::default()
+        }));
+        assert_eq!(
+            format_ls(&[p], &[a]),
+            "lazyagents  /git/lazyagents\n  api  idle          sh  (Opus · $0.42)\n"
         );
     }
 

@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::UnixStream;
 use uuid::Uuid;
 
-const BUDGET: Duration = Duration::from_millis(200);
+pub(crate) const BUDGET: Duration = Duration::from_millis(200);
 
 pub fn run(event: &str) {
     std::panic::set_hook(Box::new(|_| {}));
@@ -130,7 +130,7 @@ fn effective_kind(kind: HookKind, payload: Option<&serde_json::Value>) -> Option
     }
 }
 
-async fn send(socket: PathBuf, request: Request) -> std::io::Result<()> {
+pub(crate) async fn send(socket: PathBuf, request: Request) -> std::io::Result<()> {
     let mut stream = UnixStream::connect(socket).await?;
     let _welcome: Option<ServerMessage> = read_message(&mut stream).await?;
     write_message(

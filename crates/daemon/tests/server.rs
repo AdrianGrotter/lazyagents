@@ -91,6 +91,7 @@ fn config(dir: &Path) -> Config {
         exe: PathBuf::from("/usr/bin/true"),
         idle_exit: None,
         direnv: None,
+        claude_config: None,
     }
 }
 
@@ -1153,6 +1154,98 @@ async fn a_waiting_agent_says_what_it_waits_for_until_it_moves_on() {
     assert_eq!(
         waiting_for(&mut conn, agent.id).await.as_deref(),
         Some("Pick a colour")
+    );
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_agent_reports_its_usage_and_a_generic_one_does_not() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let claude = create(
+        &mut conn,
+        &project,
+        "c",
+        AgentKind::Claude,
+        &["sh", "-c", "exec sleep 30"],
+    )
+    .await
+    .expect("create");
+    let generic = create(
+        &mut conn,
+        &project,
+        "g",
+        AgentKind::Generic,
+        &["sleep", "30"],
+    )
+    .await
+    .expect("create");
+    let usage = protocol::Usage {
+        model: Some("Opus".into()),
+        cost_micros: Some(420_000),
+        context_percent: Some(23),
+        ..protocol::Usage::default()
+    };
+    for id in [claude.id, generic.id] {
+        conn.request(Request::Usage {
+            id,
+            usage: usage.clone(),
+        })
+        .await
+        .expect("usage");
+    }
+    conn.wait_for(|m| {
+        matches!(m, ServerMessage::AgentUpdated(info) if info.id == claude.id && info.usage.is_some())
+    })
+    .await;
+    let agents = list_agents(&mut conn).await;
+    let usage_of = |id| {
+        agents
+            .iter()
+            .find(|a| a.id == id)
+            .and_then(|a| a.usage.as_deref().cloned())
+    };
+    assert_eq!(usage_of(claude.id), Some(usage));
+    assert_eq!(usage_of(generic.id), None);
+    for id in [claude.id, generic.id] {
+        conn.request(Request::KillAgent { id }).await.expect("kill");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_users_status_line_is_taken_over_in_the_generated_settings() {
+    let claude_config = tempfile::tempdir().expect("claude config");
+    std::fs::write(
+        claude_config.path().join("settings.json"),
+        r#"{"statusLine": {"type": "command", "command": "mine.sh", "padding": 2}}"#,
+    )
+    .expect("settings");
+    let dir = claude_config.path().to_path_buf();
+    let daemon = TestDaemon::start_configured(move |config| Config {
+        claude_config: Some(dir),
+        ..config
+    })
+    .await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "c",
+        AgentKind::Claude,
+        &["sh", "-c", "exec sleep 30"],
+    )
+    .await
+    .expect("create");
+    let settings = StatePaths::new(daemon.path()).hook_settings(agent.id);
+    let generated: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(settings).expect("read")).expect("json");
+    assert_eq!(
+        generated["statusLine"],
+        serde_json::json!({"type": "command", "command": "'/usr/bin/true' statusline", "padding": 2})
     );
     conn.request(Request::KillAgent { id: agent.id })
         .await

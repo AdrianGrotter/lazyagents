@@ -2695,6 +2695,7 @@ pub(crate) mod tests {
             last_error: None,
             title: None,
             waiting_for: None,
+            usage: None,
         }
     }
 
@@ -4004,6 +4005,7 @@ pub(crate) mod tests {
             last_error: None,
             title: None,
             waiting_for: None,
+            usage: None,
         }
     }
 
@@ -4448,11 +4450,11 @@ pub(crate) mod tests {
     pub(crate) fn worktree_agent(project: &Project, name: &str) -> AgentInfo {
         AgentInfo {
             cwd: format!("/s/worktrees/{name}").into(),
-            worktree: Some(protocol::WorktreeInfo {
+            worktree: Some(Box::new(protocol::WorktreeInfo {
                 path: format!("/s/worktrees/{name}").into(),
                 branch: format!("lazyagents/{name}"),
                 base: "main".into(),
-            }),
+            })),
             ..agent(project, name, Status::Idle)
         }
     }
@@ -4934,11 +4936,11 @@ pub(crate) mod tests {
     fn filter_app() -> App {
         let p = project("p");
         let api = AgentInfo {
-            worktree: Some(protocol::WorktreeInfo {
+            worktree: Some(Box::new(protocol::WorktreeInfo {
                 path: "/w/api".into(),
                 branch: "lazyagents/api".into(),
                 base: "main".into(),
-            }),
+            })),
             ..agent(&p, "api", Status::Idle)
         };
         let docs = AgentInfo {
@@ -5608,11 +5610,11 @@ mod command_tests {
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         let p = project("p");
         let a = AgentInfo {
-            worktree: Some(protocol::WorktreeInfo {
+            worktree: Some(Box::new(protocol::WorktreeInfo {
                 path: "/w/api".into(),
                 branch: "lazyagents/api".into(),
                 base: "main".into(),
-            }),
+            })),
             cwd: "/w/api".into(),
             ..agent(&p, "api", Status::Idle)
         };

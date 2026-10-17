@@ -392,6 +392,19 @@ pub fn info_lines(app: &App) -> Vec<String> {
             {
                 lines.push(format!("waiting: {waiting}"));
             }
+            if let Some(usage) = &agent.usage {
+                let summary = usage.summary();
+                if !summary.is_empty() {
+                    lines.push(summary);
+                }
+                lines.extend(usage.plan().map(|plan| format!("plan: {plan}")));
+                if let Some(number) = usage.pr_number {
+                    lines.push(match &usage.pr_review {
+                        Some(review) => format!("PR #{number} · {}", review.replace('_', " ")),
+                        None => format!("PR #{number}"),
+                    });
+                }
+            }
             if let Some(worktree) = &agent.worktree {
                 lines.push(format!("branch: {}", worktree.branch));
             }
@@ -1182,6 +1195,32 @@ mod tests {
         assert!(text.contains("● docs  idle"), "{text}");
         assert!(text.contains(" api · generic · needs input "), "{text}");
         assert!(text.contains("status: needs input"), "{text}");
+    }
+
+    #[test]
+    fn the_info_box_shows_what_the_status_line_reported() {
+        let p = project("p");
+        let reported = AgentInfo {
+            usage: Some(Box::new(protocol::Usage {
+                model: Some("Opus".into()),
+                cost_micros: Some(420_000),
+                context_percent: Some(23),
+                five_hour_percent: Some(24),
+                seven_day_percent: Some(41),
+                pr_number: Some(7),
+                pr_review: Some("approved".into()),
+            })),
+            ..agent(&p, "api", Status::Idle)
+        };
+        let (app, _) = loaded(vec![p], vec![reported]);
+        let lines = info_lines(&app);
+        for expected in [
+            "Opus · 23% context · $0.42",
+            "plan: 5h 24% · 7d 41%",
+            "PR #7 · approved",
+        ] {
+            assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
+        }
     }
 
     #[test]

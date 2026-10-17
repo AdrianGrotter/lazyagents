@@ -15,7 +15,7 @@ pub use paths::StatePaths;
 pub use screen::{Cell, Color, Frame, Row, Screen, Style};
 pub use types::{
     AgentId, AgentInfo, AgentKind, CreateAgent, GitStat, HookKind, Project, ProjectId, Status,
-    WorktreeInfo, WorktreeRequest,
+    Usage, WorktreeInfo, WorktreeRequest,
 };
 
 pub const PROTOCOL_VERSION: u32 = 5;

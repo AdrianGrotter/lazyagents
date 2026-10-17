@@ -1,5 +1,6 @@
 //! The lazyagents daemon: owns agent processes, their terminals, and persisted state.
 
+pub mod claude_settings;
 pub mod direnv;
 pub mod encode;
 pub mod git;

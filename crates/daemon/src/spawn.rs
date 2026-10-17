@@ -106,7 +106,10 @@ pub fn blocked_envrc_hint(screen: &str, worktree: &Path) -> Option<String> {
         })
 }
 
-pub fn hook_settings(exe: &Path) -> Value {
+/// The `--settings` lazyagents gives a Claude agent: its hooks and, when the user has a
+/// status line, lazyagents' own in its place, which runs theirs and keeps its other
+/// settings, since a `statusLine` here replaces theirs rather than merging with it.
+pub fn hook_settings(exe: &Path, status_line: Option<&serde_json::Map<String, Value>>) -> Value {
     let exe = shell_quote(&exe.display().to_string());
     let hooks: serde_json::Map<String, Value> = HookKind::ALL
         .into_iter()
@@ -117,7 +120,13 @@ pub fn hook_settings(exe: &Path) -> Value {
             (kind.name().to_string(), entry)
         })
         .collect();
-    json!({ "hooks": hooks })
+    let mut settings = json!({ "hooks": hooks });
+    if let Some(theirs) = status_line {
+        let mut ours = theirs.clone();
+        ours.insert("command".into(), Value::String(format!("{exe} statusline")));
+        settings["statusLine"] = Value::Object(ours);
+    }
+    settings
 }
 
 pub fn shell_quote(value: &str) -> String {
@@ -313,7 +322,7 @@ mod tests {
 
     #[test]
     fn hook_settings_cover_every_event_with_quoted_exe() {
-        let value = hook_settings(Path::new("/opt/my apps/lazyagents"));
+        let value = hook_settings(Path::new("/opt/my apps/lazyagents"), None);
         for kind in HookKind::ALL {
             let hook = &value["hooks"][kind.name()][0]["hooks"][0];
             assert_eq!(hook["type"], "command");
@@ -323,6 +332,24 @@ mod tests {
             );
             assert_eq!(hook["timeout"], 5);
         }
+    }
+
+    #[test]
+    fn the_users_status_line_is_taken_over_with_its_settings_kept() {
+        let exe = Path::new("/opt/my apps/lazyagents");
+        assert_eq!(hook_settings(exe, None).get("statusLine"), None);
+        let theirs =
+            json!({"type": "command", "command": "mine.sh", "padding": 2, "refreshInterval": 5});
+        let value = hook_settings(exe, theirs.as_object());
+        assert_eq!(
+            value["statusLine"],
+            json!({
+                "type": "command",
+                "command": "'/opt/my apps/lazyagents' statusline",
+                "padding": 2,
+                "refreshInterval": 5
+            })
+        );
     }
 
     #[test]

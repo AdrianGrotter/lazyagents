@@ -9,7 +9,8 @@ use anyhow::Context;
 use protocol::{
     AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, HookKind, InputEvent,
     MAX_MESSAGE_LEN, PROTOCOL_VERSION, Project, ProjectId, Request, Response, Screen,
-    ServerMessage, StatePaths, Status, WorktreeInfo, WorktreeRequest, read_message, write_message,
+    ServerMessage, StatePaths, Status, Usage, WorktreeInfo, WorktreeRequest, read_message,
+    write_message,
 };
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -19,6 +20,7 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
+use crate::claude_settings;
 use crate::encode::encode;
 use crate::lock::InstanceLock;
 use crate::reap::{self, ProcessTable, Tracked};
@@ -36,6 +38,9 @@ pub struct Config {
     /// The direnv binary that wraps agents in a directory with an `.envrc` and decides
     /// whether a new worktree's `.envrc` is allowed automatically.
     pub direnv: Option<PathBuf>,
+    /// Claude Code's user config directory, whose `settings.json` may hold the user's status
+    /// line; `None` reads no user settings.
+    pub claude_config: Option<PathBuf>,
 }
 
 type ClientId = u64;
@@ -108,6 +113,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let mut readers = JoinSet::new();
     let mut writers = JoinSet::new();
     let mut daemon = Daemon::new(paths.clone(), config.exe, config.direnv, state, events_tx);
+    daemon.claude_config = config.claude_config;
     let mut next_client: ClientId = 1;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -253,6 +259,7 @@ struct Agent {
     pending_prompt: Option<String>,
     /// What the agent waits for while it needs input; see `AgentInfo::waiting_for`.
     waiting_for: Option<String>,
+    usage: Option<Usage>,
 }
 
 impl Agent {
@@ -271,6 +278,7 @@ impl Agent {
             group: None,
             pending_prompt: None,
             waiting_for: None,
+            usage: None,
         }
     }
 
@@ -339,6 +347,7 @@ struct Daemon {
     reapers: Vec<Reaper>,
     leftovers: Vec<(AgentId, Tracked)>,
     leftovers_retried: Option<Instant>,
+    claude_config: Option<PathBuf>,
 }
 
 impl Drop for Daemon {
@@ -373,6 +382,7 @@ impl Daemon {
             reapers: Vec::new(),
             leftovers: Vec::new(),
             leftovers_retried: None,
+            claude_config: None,
         }
     }
 
@@ -471,6 +481,7 @@ impl Daemon {
             } => self
                 .hook(id, kind, session_id, source.as_deref(), detail)
                 .map(|()| Response::Ok),
+            Request::Usage { id, usage } => self.usage(id, usage).map(|()| Response::Ok),
             Request::Shutdown => {
                 self.stop_all();
                 Ok(Response::Ok)
@@ -545,10 +556,11 @@ impl Daemon {
             command: agent.record.command.clone(),
             cwd: agent.record.cwd.clone(),
             status: agent.status,
-            worktree: agent.record.worktree.clone(),
+            worktree: agent.record.worktree.clone().map(Box::new),
             last_error: agent.last_error.clone(),
             title: agent.record.title.clone(),
             waiting_for: agent.waiting_for.clone(),
+            usage: agent.usage.clone().map(Box::new),
         }
     }
 
@@ -756,8 +768,11 @@ impl Daemon {
                 agent.record.title = None;
             }
             let settings = self.paths.hook_settings(id);
+            let theirs =
+                claude_settings::status_line(&agent.record.cwd, self.claude_config.as_deref());
+            let generated = hook_settings(&self.exe, theirs.as_ref()).to_string();
             let written = std::fs::create_dir_all(self.paths.hooks_dir())
-                .and_then(|()| std::fs::write(&settings, hook_settings(&self.exe).to_string()));
+                .and_then(|()| std::fs::write(&settings, generated));
             if let Err(e) = written {
                 agent.set_status(Status::Exited(127));
                 let message = format!("writing {}: {e}", settings.display());
@@ -1044,6 +1059,23 @@ impl Daemon {
             (None, _) => {}
         }
         agent.dirty = true;
+        Ok(())
+    }
+
+    /// Ignored, like a hook, for an agent that is not a running Claude agent.
+    fn usage(&mut self, id: AgentId, usage: Usage) -> Result<(), String> {
+        let agent = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| format!("unknown agent {id}"))?;
+        if agent.record.kind != AgentKind::Claude
+            || !agent.status.is_running()
+            || agent.usage.as_ref() == Some(&usage)
+        {
+            return Ok(());
+        }
+        agent.usage = Some(usage);
+        self.announce(id);
         Ok(())
     }
 
