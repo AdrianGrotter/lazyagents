@@ -79,6 +79,12 @@ is rejected.
 - `Usage { id, usage }`: from `lazyagents statusline`; ignored, like a `Hook`, for an agent
   that is not a running Claude agent
 - `Shutdown`: answered after every agent's process tree has exited
+- `Approve { id }`: answers yes to what the agent waits for by typing into its terminal.
+  For a Claude agent whose screen shows the trust dialog, that is up or down from the
+  option carrying the `❯` cursor to the option starting `Yes,`, then `enter`; it is
+  rejected when the screen shows no cursor on an option or no yes option. Otherwise it is
+  `enter`. Each key is its own write, 100 ms apart. Rejected, like `Input`, for an agent
+  that is not running
 
 `Response`:
 

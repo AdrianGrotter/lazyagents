@@ -1,7 +1,7 @@
 # 0011. Answer waiting agents with keystrokes, not hook decisions
 
 Date: 2026-10-17
-Status: Accepted
+Status: Accepted; amended by 0016
 
 ## Context
 
@@ -35,3 +35,7 @@ gives scripts the reply half. It relies on Claude's dialog keeping yes as the hi
 default and `esc` as no; if that changes, `y` and `N` need new keys, not a new mechanism.
 `y` on an agent that waits for something other than a permission (an elicitation, the trust
 dialog) presses `enter` on whatever that dialog highlights.
+
+Amended by [0016](0016-daemon-picks-the-keys-that-approve.md): the trust dialog highlights
+"No, exit", so `y` now sends `Approve` and the daemon picks the keys, moving to "Yes, I
+trust this folder" before `enter`. Answers are still keystrokes.

@@ -45,7 +45,8 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   every new worktree asks for. A `Starting` Claude agent whose screen shows the trust
   dialog ("Yes, I trust this folder", or the older "Do you trust the files in this
   folder") becomes `NeedsInput`; the `SessionStart` that follows the answer makes it
-  `Idle`.
+  `Idle`. Approving it (`y`, `Approve`) moves the `❯` cursor to the option starting
+  `Yes,` before `enter`, since the dialog highlights "No, exit".
 - **Claude startup silence**: a `Starting` Claude agent that has fired no hook and
   printed nothing for 30 s becomes `Idle`, counted from the later of its start and its
   last output. Other Claude statuses are left to the hooks.

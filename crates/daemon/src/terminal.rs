@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
@@ -167,6 +168,22 @@ impl Terminal {
 
     pub fn write(&self, bytes: Vec<u8>) {
         let _ = self.sender.send(Msg::Input(bytes.into()));
+    }
+
+    /// Writes each of `keys` `gap` apart, so a program that takes each read as one
+    /// keypress sees every key rather than one unknown sequence.
+    pub fn write_keys(&self, keys: Vec<Vec<u8>>, gap: Duration) {
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(gap);
+                }
+                if sender.send(Msg::Input(key.into())).is_err() {
+                    return;
+                }
+            }
+        });
     }
 
     pub fn resize(&mut self, size: PaneSize) {

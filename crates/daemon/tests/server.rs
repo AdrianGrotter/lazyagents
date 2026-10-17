@@ -1316,6 +1316,119 @@ async fn a_claude_agent_at_the_trust_dialog_needs_input() {
         .expect("kill");
 }
 
+/// A shell script that shows `screen`, then prints the bytes it next receives in hex,
+/// followed by `|`.
+fn records_answer(screen: &str) -> String {
+    format!(
+        "stty -icanon -echo -icrnl min 8 time 5; printf '{screen}'; \
+         dd bs=64 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '|'; exec sleep 30"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approving_the_trust_dialog_moves_to_yes_and_confirms() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let script = records_answer(
+        " Quick safety check\\n\\n ❯ No, exit\\n   Yes, I trust this folder\\n\\n Enter to confirm\\n",
+    );
+    let agent = create(
+        &mut conn,
+        &project,
+        "untrusted",
+        AgentKind::Claude,
+        &["sh", "-c", &script],
+    )
+    .await
+    .expect("create");
+    conn.request(Request::Subscribe { id: agent.id })
+        .await
+        .expect("subscribe");
+    conn.wait_status(agent.id, Status::NeedsInput).await;
+    conn.request(Request::Approve { id: agent.id })
+        .await
+        .expect("approve");
+    conn.wait_text(agent.id, "1b5b420d|").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approving_the_trust_dialog_sends_each_key_as_its_own_read() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let script = "stty -icanon -echo -icrnl min 1 time 0; \
+                  printf ' ❯ No, exit\\n   Yes, I trust this folder\\n'; \
+                  for read in 1 2; do \
+                  dd bs=64 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '|'; \
+                  done; exec sleep 30";
+    let agent = create(
+        &mut conn,
+        &project,
+        "untrusted",
+        AgentKind::Claude,
+        &["sh", "-c", script],
+    )
+    .await
+    .expect("create");
+    conn.request(Request::Subscribe { id: agent.id })
+        .await
+        .expect("subscribe");
+    conn.wait_status(agent.id, Status::NeedsInput).await;
+    conn.request(Request::Approve { id: agent.id })
+        .await
+        .expect("approve");
+    conn.wait_text(agent.id, "1b5b42|0d|").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approving_an_ordinary_prompt_presses_enter() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let script = records_answer("Run npm test? ready\\n");
+    let agent = create(
+        &mut conn,
+        &project,
+        "asking",
+        AgentKind::Generic,
+        &["sh", "-c", &script],
+    )
+    .await
+    .expect("create");
+    conn.request(Request::Subscribe { id: agent.id })
+        .await
+        .expect("subscribe");
+    conn.wait_text(agent.id, "ready").await;
+    conn.request(Request::Approve { id: agent.id })
+        .await
+        .expect("approve");
+    conn.wait_text(agent.id, "0d|").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approving_a_trust_dialog_without_a_yes_option_is_an_error() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let script = records_answer(" Do you trust the files in this folder?\\n");
+    let agent = create(
+        &mut conn,
+        &project,
+        "untrusted",
+        AgentKind::Claude,
+        &["sh", "-c", &script],
+    )
+    .await
+    .expect("create");
+    conn.wait_status(agent.id, Status::NeedsInput).await;
+    let err = conn
+        .request(Request::Approve { id: agent.id })
+        .await
+        .expect_err("approve without a yes option");
+    assert!(err.contains("trust"), "{err}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn hook_for_unknown_agent_is_an_error() {
     let daemon = TestDaemon::start().await;

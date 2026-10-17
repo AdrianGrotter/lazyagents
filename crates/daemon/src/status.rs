@@ -2,7 +2,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
-use protocol::{AgentKind, HookKind, Status};
+use protocol::{AgentKind, HookKind, KeyCode, Status};
 
 pub const ACTIVITY_WINDOW: Duration = Duration::from_secs(2);
 pub const SETTLE_AFTER: Duration = Duration::from_secs(2);
@@ -24,6 +24,40 @@ pub fn on_hook(kind: HookKind) -> Status {
 pub fn awaits_trust(screen: &str) -> bool {
     let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
     squeezed.contains("Yes,Itrustthisfolder") || squeezed.contains("Doyoutrustthefiles")
+}
+
+/// The keys that answer the trust dialog on `screen` with yes: arrows from the option the
+/// `❯` cursor is on to the yes option, then enter. `None` when the screen shows no cursor on
+/// an option or no yes option.
+pub fn trust_keys(screen: &str) -> Option<Vec<KeyCode>> {
+    let options: Vec<(bool, &str)> = screen.lines().filter_map(trust_option).collect();
+    let cursor = options.iter().position(|(selected, _)| *selected)?;
+    let yes = options
+        .iter()
+        .position(|(_, label)| label.starts_with("Yes,"))?;
+    let step = if yes > cursor {
+        KeyCode::Down
+    } else {
+        KeyCode::Up
+    };
+    let mut keys = vec![step; yes.abs_diff(cursor)];
+    keys.push(KeyCode::Enter);
+    Some(keys)
+}
+
+/// Whether `line` starts a dialog option, as (carries the cursor, label). A wrapped
+/// option's later lines start with neither `Yes,` nor `No,`, so they are not options.
+fn trust_option(line: &str) -> Option<(bool, &str)> {
+    let line = line.trim_start();
+    let (selected, rest) = match line.strip_prefix('❯') {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, line),
+    };
+    let label = match rest.split_once(". ") {
+        Some((number, label)) if number.chars().all(|c| c.is_ascii_digit()) => label,
+        _ => rest,
+    };
+    (label.starts_with("Yes,") || label.starts_with("No,")).then_some((selected, label))
 }
 
 pub fn generic_status(last_output: Option<Instant>, now: Instant) -> Status {
@@ -283,6 +317,67 @@ mod tests {
         assert!(awaits_trust("Do you trust the files in this folder?"));
         assert!(!awaits_trust("✻ Welcome to Claude Code!\n> "));
         assert!(!awaits_trust("direnv: loading ~/p/.envrc"));
+    }
+
+    #[test]
+    fn trusting_moves_the_cursor_down_from_no_to_yes() {
+        let dialog = " Quick safety check: Is this a project you created or one you trust?\n\n \
+                      ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm";
+        assert_eq!(
+            trust_keys(dialog),
+            Some(vec![KeyCode::Down, KeyCode::Enter])
+        );
+    }
+
+    #[test]
+    fn trusting_with_the_cursor_on_yes_only_confirms() {
+        let dialog = " Quick safety check\n\n   No, exit\n ❯ Yes, I trust this folder\n";
+        assert_eq!(trust_keys(dialog), Some(vec![KeyCode::Enter]));
+    }
+
+    #[test]
+    fn trusting_moves_the_cursor_up_when_yes_is_listed_first() {
+        let dialog = " Quick safety check\n\n   Yes, I trust this folder\n ❯ No, exit\n";
+        assert_eq!(trust_keys(dialog), Some(vec![KeyCode::Up, KeyCode::Enter]));
+        let dialog = " Quick safety check\n\n ❯ Yes, I trust this folder\n   No, exit\n";
+        assert_eq!(trust_keys(dialog), Some(vec![KeyCode::Enter]));
+    }
+
+    #[test]
+    fn trusting_counts_options_not_wrapped_lines() {
+        let dialog = " Quick safety\n check\n\n ❯ No,\n exit\n   Yes, I trust\n this folder\n";
+        assert_eq!(
+            trust_keys(dialog),
+            Some(vec![KeyCode::Down, KeyCode::Enter])
+        );
+        let dialog = "   Yes, I\n trust this\n folder\n ❯ No, exit\n";
+        assert_eq!(trust_keys(dialog), Some(vec![KeyCode::Up, KeyCode::Enter]));
+    }
+
+    #[test]
+    fn trusting_reads_numbered_options() {
+        let dialog =
+            " Do you trust the files in this folder?\n\n ❯ 1. Yes, proceed\n   2. No, exit\n";
+        assert_eq!(trust_keys(dialog), Some(vec![KeyCode::Enter]));
+        let dialog = " ❯ 1. No, exit\n   2. Yes, I trust this folder\n";
+        assert_eq!(
+            trust_keys(dialog),
+            Some(vec![KeyCode::Down, KeyCode::Enter])
+        );
+    }
+
+    #[test]
+    fn trusting_needs_a_cursor_on_an_option_and_a_yes_option() {
+        assert_eq!(
+            trust_keys("   No, exit\n   Yes, I trust this folder\n"),
+            None
+        );
+        assert_eq!(trust_keys(" ❯ No, exit\n"), None);
+        assert_eq!(
+            trust_keys("   Yes, I trust this folder\n   No, exit\n ❯ Something else\n"),
+            None
+        );
+        assert_eq!(trust_keys("✻ Welcome to Claude Code!\n❯ "), None);
     }
 
     #[test]

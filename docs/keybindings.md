@@ -31,7 +31,7 @@ Two input modes:
 | `s` | scroll mode: browse the agent's terminal history (running or exited agents) |
 | `/` | filter the Agents box by name or branch (`s:<status>` by status): `enter` keeps the filter, `esc` clears it |
 | `c` | menu of the custom commands (`[[commands]]` in [configuration.md](configuration.md#commands)); `j`/`k` move, `enter` runs, `esc` closes. A command's own key runs it directly |
-| `y` / `N` | approve / deny what the selected agent waits for: sends `enter` / `esc` to its terminal, which answers Claude's permission dialog with its highlighted choice (yes) or no; only while the agent needs input |
+| `y` / `N` | approve / deny what the selected agent waits for; only while the agent needs input. `N` sends `esc`. `y` sends `enter`, which takes the highlighted choice (yes) of Claude's permission dialog; at Claude's trust dialog it first moves to "Yes, I trust this folder", whichever option is highlighted |
 | `i` | reply: type a line and `enter` sends it to the selected agent with `enter` after it, as if typed in its pane; `esc` cancels. A pasted newline becomes a space |
 | `J`/`K`, `pagedown`/`pageup` | scroll the selected agent's pane half a page down / up without leaving the sidebar |
 | `+` | screen mode: the pane beside a narrow sidebar, then the pane alone, then back. The sidebar keys keep working while it is hidden |

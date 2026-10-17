@@ -89,6 +89,10 @@ pub enum Request {
         usage: Usage,
     },
     Shutdown,
+    /// Answer yes to what the agent waits for, with the keys its screen calls for.
+    Approve {
+        id: AgentId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +288,7 @@ mod tests {
                 usage: Usage::default(),
             },
             Request::Shutdown,
+            Request::Approve { id },
         ];
         for request in requests {
             round_trip(&ClientMessage::Request { id: 7, request });

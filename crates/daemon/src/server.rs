@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use protocol::{
     AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, DiffScope, HookKind, InputEvent,
-    MAX_MESSAGE_LEN, PROTOCOL_VERSION, Project, ProjectId, Request, Response, Screen,
-    ServerMessage, StatePaths, Status, Usage, WorktreeInfo, WorktreeRequest, read_message,
-    write_message,
+    Key, KeyCode, MAX_MESSAGE_LEN, Modifiers, PROTOCOL_VERSION, Project, ProjectId, Request,
+    Response, Screen, ServerMessage, StatePaths, Status, Usage, WorktreeInfo, WorktreeRequest,
+    read_message, write_message,
 };
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -25,7 +25,7 @@ use crate::encode::encode;
 use crate::lock::InstanceLock;
 use crate::reap::{self, ProcessTable, Tracked};
 use crate::spawn::{Launch, SpawnContext, blocked_envrc_hint, hook_settings, spawn_spec};
-use crate::status::{awaits_trust, on_hook, settle};
+use crate::status::{awaits_trust, on_hook, settle, trust_keys};
 use crate::store::{self, AgentRecord, StoredState};
 use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent, session_title};
 use crate::{direnv, git};
@@ -83,6 +83,7 @@ const SNAPSHOT: Duration = Duration::from_secs(1);
 const SNAPSHOT_WAIT: Duration = Duration::from_secs(2);
 const SHUTDOWN_SNAPSHOT_WAIT: Duration = Duration::from_secs(10);
 const WHEEL_LINES: i32 = 3;
+const APPROVE_KEY_GAP: Duration = Duration::from_millis(100);
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let paths = config.paths;
@@ -477,6 +478,7 @@ impl Daemon {
                 Ok(Response::Ok)
             }
             Request::Input { id, event } => self.input(id, &event).map(|()| Response::Ok),
+            Request::Approve { id } => self.approve(id).map(|()| Response::Ok),
             Request::Resize { id, cols, rows } => self
                 .resize(id, PaneSize::new(cols, rows))
                 .map(|()| Response::Ok),
@@ -1145,6 +1147,28 @@ impl Daemon {
             }
             (None, _) => {}
         }
+        agent.dirty = true;
+        Ok(())
+    }
+
+    fn approve(&mut self, id: AgentId) -> Result<(), String> {
+        let agent = self.running_mut(id)?;
+        let Some(terminal) = agent.terminal.as_ref() else {
+            return Ok(());
+        };
+        terminal.scroll_to_bottom();
+        let screen = terminal.screen().text();
+        let keys = if agent.record.kind == AgentKind::Claude && awaits_trust(&screen) {
+            trust_keys(&screen).ok_or("cannot find the option that trusts this folder")?
+        } else {
+            vec![KeyCode::Enter]
+        };
+        let mode = terminal.mode();
+        let keys = keys
+            .into_iter()
+            .filter_map(|code| encode(&InputEvent::Key(Key::new(code, Modifiers::NONE)), mode))
+            .collect();
+        terminal.write_keys(keys, APPROVE_KEY_GAP);
         agent.dirty = true;
         Ok(())
     }

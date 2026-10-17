@@ -2008,14 +2008,14 @@ impl App {
             Action::Scroll => self.enter_scroll(false),
             Action::Commands => self.popup = Some(Popup::Commands { index: 0 }),
             Action::Finish => self.open_finish(),
-            Action::Approve | Action::Deny => {
-                let answer = if action == Action::Approve {
-                    protocol::KeyCode::Enter
-                } else {
-                    protocol::KeyCode::Esc
-                };
+            Action::Approve => {
                 if let Some(agent) = self.selected_agent() {
-                    return vec![press(agent.id, answer)];
+                    return vec![Effect::Send(Request::Approve { id: agent.id })];
+                }
+            }
+            Action::Deny => {
+                if let Some(agent) = self.selected_agent() {
+                    return vec![press(agent.id, protocol::KeyCode::Esc)];
                 }
             }
             Action::Reply => {
@@ -6375,7 +6375,10 @@ mod reply_tests {
     #[test]
     fn y_approves_and_capital_n_denies_a_waiting_agent() {
         let (mut app, a) = waiting();
-        assert_eq!(app.on_key(key('y')), vec![pressed(a.id, ProtoCode::Enter)]);
+        assert_eq!(
+            app.on_key(key('y')),
+            vec![Effect::Send(Request::Approve { id: a.id })]
+        );
         assert_eq!(app.on_key(key('N')), vec![pressed(a.id, ProtoCode::Esc)]);
         assert_eq!(app.focus, Focus::Agents);
     }
