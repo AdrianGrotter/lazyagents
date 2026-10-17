@@ -14,6 +14,9 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
 
 const WAIT: Duration = Duration::from_secs(10);
+/// Starting a daemon runs `ps` before it listens, which takes seconds when the machine is
+/// busy, as it is with the whole suite running in parallel.
+const STARTUP_WAIT: Duration = Duration::from_secs(30);
 
 struct TestDaemon {
     dir: tempfile::TempDir,
@@ -108,8 +111,8 @@ async fn spawn_configured(config: Config) -> JoinHandle<anyhow::Result<()>> {
             panic!("daemon stopped before listening: {:?}", task.await);
         }
         assert!(
-            started.elapsed() < WAIT,
-            "daemon never listened within {WAIT:?}"
+            started.elapsed() < STARTUP_WAIT,
+            "daemon never listened within {STARTUP_WAIT:?}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
