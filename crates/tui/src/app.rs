@@ -851,12 +851,15 @@ impl App {
                 let pending = self
                     .pending_select
                     .take_if(|p| p.project == info.project && p.name == info.name);
+                let is_create_reply = pending.is_some();
                 let undisturbed = pending.is_some_and(|p| p.interactions == self.interactions)
                     && self.popup.is_none();
                 if undisturbed && info.status.is_running() {
                     created = Some(info.id);
                 }
-                let _ = self.upsert_agent(info);
+                if is_create_reply && !self.agents.iter().any(|a| a.id == info.id) {
+                    let _ = self.upsert_agent(info);
+                }
             }
             Response::Done(message) => self.inform(message),
             Response::Ok | Response::GitStat(_) | Response::Diff(_) => {}
@@ -4470,6 +4473,43 @@ pub(crate) mod tests {
         let _ = app.apply_response(Response::Agent(info));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
         assert_eq!(app.focus, Focus::Agents);
+    }
+
+    #[test]
+    fn agent_reply_never_overwrites_newer_state_from_an_event() {
+        let (mut app, _, b) = two_agents();
+        let waiting = AgentInfo {
+            status: Status::NeedsInput,
+            ..b.clone()
+        };
+        let _ = app.apply_server(ServerMessage::AgentUpdated(waiting));
+        let stale = AgentInfo {
+            status: Status::Starting,
+            ..b.clone()
+        };
+        let _ = app.apply_response(Response::Agent(stale));
+        let status = app.agents.iter().find(|x| x.id == b.id).map(|x| x.status);
+        assert_eq!(status, Some(Status::NeedsInput));
+    }
+
+    #[test]
+    fn agent_reply_for_a_removed_agent_does_not_bring_it_back() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
+        let _ = app.apply_response(Response::Agent(a.clone()));
+        assert!(app.agents.iter().all(|x| x.id != a.id));
+    }
+
+    #[test]
+    fn create_reply_without_a_preceding_event_adds_and_selects_the_agent() {
+        let (mut app, _, _) = two_agents();
+        let info = submit_shell_agent(&mut app, "zed");
+        let _ = app.apply_response(Response::Agent(AgentInfo {
+            status: Status::Working,
+            ..info.clone()
+        }));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(info.id));
+        assert_eq!(app.focus, Focus::Pane);
     }
 
     #[test]
