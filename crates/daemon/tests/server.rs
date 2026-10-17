@@ -3149,10 +3149,10 @@ async fn a_name_is_reserved_while_its_worktree_is_created() {
         .await
         .expect_err("project in use");
     assert!(err.contains("remove the project's agents first"), "{err}");
-    let err = create_in_worktree(&mut other, &project, "twin", &["sleep", "30"])
+    let err = create_in_worktree(&mut other, &project, "Twin", &["sleep", "30"])
         .await
-        .expect_err("same name in a worktree");
-    assert!(err.contains("twin is being created"), "{err}");
+        .expect_err("the name in another case, in a worktree");
+    assert!(err.contains("Twin is being created"), "{err}");
     let err = create(
         &mut other,
         &project,
@@ -3186,6 +3186,16 @@ async fn a_name_is_reserved_while_its_worktree_is_created() {
         panic!("create failed")
     };
     assert_eq!(twin.name, "twin");
+    let err = create(
+        &mut other,
+        &project,
+        "TWIN",
+        AgentKind::Generic,
+        &["sleep", "30"],
+    )
+    .await
+    .expect_err("the name in another case");
+    assert!(err.contains("TWIN already exists"), "{err}");
     for id in [twin.id, plain.id] {
         conn.request(Request::KillAgent { id }).await.expect("kill");
     }

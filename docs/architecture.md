@@ -155,6 +155,9 @@ While such work is in flight the daemon keeps its state consistent (ADR 0018):
   the same name, or a rename to it, is refused with `an agent named <name> is being created
   in this project`, and the project cannot be removed meanwhile. The agent appears, and
   starts, only once its worktree is ready. A create without a worktree is answered at once.
+  Agent names in a project compare without regard to case, here and for existing agents,
+  because they name worktree directories and branches, which a case-insensitive file
+  system (the macOS default) cannot tell apart.
 - **Shutdown** first stops every agent, then waits for every request in flight and
   finishes it without starting anything: a kill answers as usual, a restart leaves its
   agent `Stopped` and answers `the daemon is shutting down`, a removal completes, and a

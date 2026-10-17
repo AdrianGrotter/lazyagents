@@ -692,6 +692,8 @@ impl Daemon {
         Ok(())
     }
 
+    /// Names that differ only in case count as the same: they name worktree directories and
+    /// branches, which a case-insensitive file system cannot tell apart.
     fn validate_name(
         &self,
         project: ProjectId,
@@ -710,18 +712,18 @@ impl Daemon {
             ));
         }
         let taken = self.agents.values().any(|a| {
-            a.record.project == project && a.record.name == name && Some(a.record.id) != except
+            a.record.project == project
+                && a.record.name.eq_ignore_ascii_case(name)
+                && Some(a.record.id) != except
         });
         if taken {
             return Err(format!(
                 "an agent named {name} already exists in this project"
             ));
         }
-        if self
-            .creating
-            .iter()
-            .any(|(reserved, reserved_name)| *reserved == project && reserved_name == name)
-        {
+        if self.creating.iter().any(|(reserved, reserved_name)| {
+            *reserved == project && reserved_name.eq_ignore_ascii_case(name)
+        }) {
             return Err(format!(
                 "an agent named {name} is being created in this project"
             ));
