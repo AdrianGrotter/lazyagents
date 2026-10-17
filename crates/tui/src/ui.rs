@@ -59,7 +59,10 @@ const SIDEBAR_HELP: [(&[Action], &str); 19] = [
         "focus Projects / Agents",
     ),
     (&[Action::ToggleFocus], "switch between Projects and Agents"),
-    (&[Action::Open], "open the agent's pane"),
+    (
+        &[Action::Open],
+        "open the agent's pane, restarting it if it is not running",
+    ),
     (&[Action::NewAgent], "new agent"),
     (&[Action::Stop, Action::Restart], "stop / restart agent"),
     (
@@ -513,6 +516,42 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     if let (true, Some(position)) = (focused, cursor) {
         frame.set_cursor_position(position);
     }
+    if !agent.status.is_running() && app.focus != Focus::Scroll {
+        draw_not_running(frame, app, agent, areas.pane_inner);
+    }
+}
+
+/// A bar over the pane's bottom row, so a frozen screen does not pass for a live one.
+fn draw_not_running(frame: &mut Frame, app: &App, agent: &AgentInfo, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let key = |action| app.keymap.first_key(action);
+    let verb = if agent.status == Status::Stopped {
+        "start"
+    } else {
+        "restart"
+    };
+    let text = format!(
+        " {} · {} {verb} · {} remove",
+        agent.status.label(),
+        key(Action::Open),
+        key(Action::Remove)
+    );
+    let colour = match agent.status {
+        Status::Exited(code) if code != 0 => app.theme.error,
+        _ => app.theme.dim,
+    };
+    let row = Rect {
+        y: area.bottom() - 1,
+        height: 1,
+        ..area
+    };
+    frame.render_widget(Clear, row);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::new().fg(Color::White).bg(colour)),
+        row,
+    );
 }
 
 fn draw_selection(selection: Selection, area: Rect, buf: &mut Buffer) {
@@ -1355,6 +1394,29 @@ mod tests {
         let (text, _) = render(&app);
         let status = text.lines().last().expect("status");
         assert!(status.starts_with("r restart · ? help"), "{status}");
+    }
+
+    #[test]
+    fn a_pane_whose_agent_is_not_running_says_how_to_bring_it_back() {
+        let p = project("p");
+        for (status, banner) in [
+            (Status::Exited(0), "exited (0) · enter restart · d remove"),
+            (
+                Status::Exited(130),
+                "exited (130) · enter restart · d remove",
+            ),
+            (Status::Stopped, "stopped · enter start · d remove"),
+        ] {
+            let (app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", status)]);
+            let (text, _) = render(&app);
+            let areas = layout(Rect::new(0, 0, 100, 30), &app);
+            let row = areas.pane_inner.y + areas.pane_inner.height - 1;
+            let line = text.lines().nth(row.into()).expect("banner row");
+            assert!(line.contains(banner), "{line}");
+        }
+        let (app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        let (text, _) = render(&app);
+        assert!(!text.contains("enter restart"), "{text}");
     }
 
     #[test]

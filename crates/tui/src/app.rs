@@ -460,6 +460,9 @@ pub struct App {
     stat_polled: Option<(AgentId, Instant)>,
     pending_remove: Option<PendingRemove>,
     pending_select: Option<PendingCreate>,
+    /// The agent `enter` restarted; its pane opens if the agent's next update shows it
+    /// running while it is still selected.
+    open_on_start: Option<AgentId>,
     interactions: u64,
     subscribed_running: bool,
     too_small: bool,
@@ -512,6 +515,7 @@ impl App {
             stat_polled: None,
             pending_remove: None,
             pending_select: None,
+            open_on_start: None,
             interactions: 0,
             subscribed_running: false,
             too_small: false,
@@ -971,6 +975,12 @@ impl App {
             self.unseen.remove(&id);
         }
         self.reselect(selected);
+        if self.open_on_start == Some(id) {
+            self.open_on_start = None;
+            if status.is_running() && selected == Some(id) && self.focus == Focus::Agents {
+                self.focus = Focus::Pane;
+            }
+        }
         let body = match (in_view, started_waiting, ended_turn) {
             (false, true, _) => format!("{name} needs input"),
             (false, _, true) => format!("{name} is done"),
@@ -1913,12 +1923,9 @@ impl App {
                 (Focus::Projects, _) => self.focus = Focus::Agents,
                 (_, Some(agent)) if agent.status.is_running() => self.focus = Focus::Pane,
                 (_, Some(agent)) => {
-                    let message = format!(
-                        "{} is not running — {} restarts",
-                        agent.name,
-                        self.keymap.first_key(Action::Restart)
-                    );
-                    self.fail(message);
+                    let id = agent.id;
+                    self.open_on_start = Some(id);
+                    return vec![self.restart(id)];
                 }
                 (_, None) => {}
             },
@@ -2840,9 +2847,6 @@ impl App {
         let name = crate::ui::label(agent);
         let restart = self.keymap.first_key(Action::Restart);
         match action {
-            Action::Open if !agent.status.is_running() => {
-                Some(format!("{name} is not running — {restart} restarts"))
-            }
             Action::Stop | Action::Reply if !agent.status.is_running() => {
                 Some(format!("{name} is not running"))
             }
@@ -4317,7 +4321,8 @@ pub(crate) mod tests {
             vec![p.clone()],
             vec![agent(&p, "a", Status::Stopped)],
         );
-        let _ = app.on_key(code(KeyCode::Enter));
+        let areas = screen_areas(&app);
+        let _ = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 1, 1)), &areas);
         assert_eq!(
             app.message.as_ref().map(|(m, _)| m.as_str()),
             Some("a is not running — ctrl-r restarts")
@@ -4442,16 +4447,56 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn enter_on_a_stopped_agent_stays_in_the_sidebar() {
+    fn enter_on_an_exited_agent_restarts_it_and_opens_the_pane_once_it_runs() {
+        for status in [Status::Exited(0), Status::Stopped] {
+            let p = project("p");
+            let a = agent(&p, "alpha", status);
+            let (mut app, _) = loaded(vec![p], vec![a.clone()]);
+            let _ = app.set_pane_size(80, 20);
+            assert_eq!(
+                app.on_key(code(KeyCode::Enter)),
+                vec![Effect::Send(Request::RestartAgent {
+                    id: a.id,
+                    cols: 80,
+                    rows: 20
+                })],
+                "{status:?}"
+            );
+            assert_eq!(app.focus, Focus::Agents, "{status:?}");
+            let started = AgentInfo {
+                status: Status::Starting,
+                ..a.clone()
+            };
+            let _ = app.apply_server(ServerMessage::AgentUpdated(started));
+            assert_eq!(app.focus, Focus::Pane, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_restart_from_enter_opens_the_pane_only_for_its_own_start() {
         let p = project("p");
-        let a = agent(&p, "alpha", Status::Exited(1));
-        let (mut app, _) = loaded(vec![p], vec![a]);
+        let a = agent(&p, "alpha", Status::Exited(0));
+        let (mut app, _) = loaded(vec![p.clone()], vec![a.clone()]);
         let _ = app.on_key(code(KeyCode::Enter));
+        let failed = AgentInfo {
+            status: Status::Exited(127),
+            last_error: Some("not found".into()),
+            ..a.clone()
+        };
+        let _ = app.apply_server(ServerMessage::AgentUpdated(failed));
+        let started = AgentInfo {
+            status: Status::Starting,
+            ..a.clone()
+        };
+        let _ = app.apply_server(ServerMessage::AgentUpdated(started.clone()));
         assert_eq!(app.focus, Focus::Agents);
-        assert_eq!(
-            app.message.as_ref().map(|(m, _)| m.as_str()),
-            Some("alpha is not running — r restarts")
-        );
+
+        let b = agent(&p, "beta", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a, b]);
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(key('j'));
+        let _ = app.apply_server(ServerMessage::AgentUpdated(started));
+        assert_eq!(app.focus, Focus::Agents);
     }
 
     #[test]

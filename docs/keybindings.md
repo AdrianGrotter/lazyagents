@@ -18,7 +18,7 @@ Two input modes:
 | `j`/`k`, `↑`/`↓` | move within the focused box |
 | `h`/`l`, `←`/`→`, `tab`/`shift-tab` | switch between Projects and Agents |
 | `1`/`2` | focus Projects / Agents |
-| `enter` | focus main pane (pane mode) |
+| `enter` | focus main pane (pane mode); on a stopped or exited agent, start it (Claude: resume session) and focus the pane once it runs |
 | `n` | new agent popup: name (optional), preset (`claude`, `shell`, custom command), worktree toggle, base branch and first prompt |
 | `x` | stop agent (confirm) |
 | `r` | restart agent (confirm while it is running; Claude: resume session) |
@@ -42,11 +42,15 @@ Two input modes:
 
 Actions that cannot act on the selected agent are dimmed in the help popup, and pressing one
 says why in the status bar instead of doing nothing: `no agent selected`, `<agent> is not
-running` (open, stop, reply), `<agent> has no terminal yet — r starts it` (scroll mode and
+running` (stop, reply), `<agent> has no terminal yet — r starts it` (scroll mode and
 `J`/`K` on a stopped agent), `<agent> is not waiting for an answer` (`y`, `N`). The status
 bar starts with what the selected agent's state calls for: the answers to a waiting agent,
 `r start` for a stopped one, `r restart` for an exited one, and `D <n> comments to send`
 while it has review comments.
+
+The pane of a stopped or exited agent keeps its last screen, with a bar over the bottom row
+naming the state and the way back: `exited (<code>) · enter restart · d remove` (red for a
+non-zero code), or `stopped · enter start · d remove`. Scroll mode hides the bar.
 
 An agent whose turn ends (working or needs input → idle) while it is out of view is
 listed as `done`, with a blue dot, until you view it: select it, or, for the agent already
