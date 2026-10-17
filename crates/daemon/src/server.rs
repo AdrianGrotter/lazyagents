@@ -1030,6 +1030,7 @@ impl Daemon {
         }
         let snapshot = self.snapshot_waiter(&[id]);
         let (trees, groups, mut tracked) = self.capture(&[id]);
+        let handed = tracked.clone();
         self.off_loop(
             "stop",
             move || {
@@ -1043,8 +1044,11 @@ impl Daemon {
                 let (unverified, value) = match done {
                     Some((unverified, value)) => (unverified, Some(value)),
                     None => {
-                        tracing::error!(agent = %id, "stopping the agent panicked");
-                        (Vec::new(), None)
+                        tracing::error!(
+                            agent = %id,
+                            "stopping the agent panicked; its tracked processes are kept to retry"
+                        );
+                        (handed, None)
                     }
                 };
                 daemon.stopped(&[id], unverified);
@@ -2257,6 +2261,34 @@ mod tests {
         daemon.apply_snapshot(vec![(id, 0, vec![tracked])]);
         assert!(child.exits_within(WAIT), "child survived");
         assert!(daemon.agents[&id].tracked.is_empty());
+    }
+
+    #[test]
+    fn a_stop_that_panics_keeps_its_processes_as_leftovers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut daemon = test_daemon(dir.path());
+        let id = add_agent(&mut daemon, Status::Exited(0));
+        let tracked = Tracked {
+            pid: 4242,
+            start: "Thu Oct 15 10:00:00 2026".into(),
+        };
+        if let Some(agent) = daemon.agents.get_mut(&id) {
+            agent.tracked = vec![tracked.clone()];
+        }
+        daemon.begin_stop(
+            id,
+            "stopping",
+            || panic!("stop failed"),
+            |_, _: Option<()>| {},
+        );
+        let deadline = Instant::now() + WAIT;
+        while !daemon.jobs.iter().all(|job| job.is_finished()) {
+            assert!(Instant::now() < deadline, "the stop never finished");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        daemon.finish_jobs();
+        assert_eq!(daemon.leftovers, vec![(id, tracked)]);
+        assert_eq!(daemon.agents[&id].busy, None);
     }
 
     #[test]
