@@ -47,8 +47,9 @@ Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the new ag
 custom preset), Worktree (`space`/`←`/`→` toggle it) and Base (only while Worktree is on).
 Spaces in an agent's name (new agent form and rename) become dashes: `my new agent` is
 stored as `my-new-agent`. An empty name becomes `<preset>-<n>` with the lowest number no
-agent in the project uses (`claude-1`, `shell-2`). The Agents box lists a Claude agent by
-its session title once Claude has set one, and by its name until then; the name stays
+agent in the project uses (`claude-1`, `shell-2`). The Agents box and the pane's header
+show a Claude agent by its session title once Claude has set one, and by its name until
+then; the name stays
 the agent's identity for the CLI and its worktree branch, and the Info box shows it.
 With Worktree on, the agent runs in a new git worktree on branch `lazyagents/<name>`, made
 from Base; an empty Base means the project's current branch. Removing an agent never

@@ -389,7 +389,7 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     let focused = app.focus == Focus::Pane;
     let agent = app.selected_agent();
     if let (Some(view), Some(agent)) = (&app.diff, agent) {
-        let title = format!(" diff · {} ", agent.name);
+        let title = format!(" diff · {} ", label(agent));
         frame.render_widget(block(title, true, &app.theme), areas.pane);
         frame.render_widget(
             diff_text(view, &app.theme, areas.pane_inner.height),
@@ -400,7 +400,7 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     let title = match agent {
         Some(agent) => format!(
             " {} · {} · {} ",
-            agent.name,
+            label(agent),
             kind_label(agent.kind),
             agent.status.label()
         ),
@@ -917,6 +917,7 @@ mod tests {
         assert!(text.contains("● claude-2  idle"), "{text}");
         assert!(text.contains("● sh  idle"), "{text}");
         assert!(!text.contains("~/git/x"), "{text}");
+        assert!(text.contains(" Fix it · claude · idle "), "{text}");
         assert!(info_lines(&app).contains(&"name: claude-1".to_string()));
 
         let _ = app.on_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
