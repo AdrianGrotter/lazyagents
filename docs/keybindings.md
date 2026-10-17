@@ -209,7 +209,7 @@ agent is removed or stopped, or if the selection moves to another agent; in that
 the agent it leaves is scrolled back to the bottom. The mouse wheel scrolls the history
 three lines at a time instead of reaching the agent.
 
-**Mouse**: clicks and drags never reach the agent; the wheel may.
+**Mouse**: drags never reach the agent; clicks in the pane and the wheel may.
 
 | Action | Effect |
 |---|---|
@@ -217,6 +217,7 @@ three lines at a time instead of reaching the agent.
 | click an Agents row | select that agent and focus Agents (never the pane) |
 | click elsewhere in the Projects or Agents box | focus that box |
 | click in the pane | focus the pane if the agent is running; otherwise the status bar says `<name> is not running — r restarts` |
+| release in the cell the click started in | send the click to a running agent that enabled mouse reporting, such as Claude Code's subagent list; outside scroll mode only |
 | drag in the pane | select text, shown reversed; the selection stays inside the pane |
 | release after a drag | copy the selected text and show `copied N characters` (in the `accent` colour) |
 | click outside an open popup | close it, like `esc` |
@@ -224,7 +225,9 @@ three lines at a time instead of reaching the agent.
 
 The selection runs in reading order from where the drag started to where it ends, whole
 lines in between; trailing spaces are trimmed from each line. A click without a drag
-copies nothing. Clicking a sidebar row also closes the diff view, or scroll mode (scrolling
+copies nothing. The agent gets its click, press and release together, when the button
+is released, and only if the release lands in the cell the press did; a drag that leaves
+that cell and comes back still counts as a click. Clicking a sidebar row also closes the diff view, or scroll mode (scrolling
 its agent back to the bottom). In scroll mode a click or drag in the pane selects from the
 history on screen and keeps scroll mode; in the diff view it does nothing.
 

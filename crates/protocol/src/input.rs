@@ -68,4 +68,5 @@ pub enum InputEvent {
     Key(Key),
     Paste(String),
     Wheel { up: bool, col: u16, row: u16 },
+    Click { col: u16, row: u16 },
 }

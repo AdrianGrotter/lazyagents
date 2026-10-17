@@ -6,6 +6,7 @@ pub fn encode(event: &InputEvent, mode: TermMode) -> Option<Vec<u8>> {
         InputEvent::Key(key) => encode_key(*key, mode),
         InputEvent::Paste(text) => Some(encode_paste(text, mode)),
         InputEvent::Wheel { up, col, row } => encode_wheel(*up, *col, *row, mode),
+        InputEvent::Click { col, row } => encode_click(*col, *row, mode),
     }
 }
 
@@ -55,22 +56,37 @@ fn encode_paste(text: &str, mode: TermMode) -> Vec<u8> {
     }
 }
 
+fn encode_click(col: u16, row: u16, mode: TermMode) -> Option<Vec<u8>> {
+    if !mode.intersects(TermMode::MOUSE_MODE) {
+        return None;
+    }
+    let press = mouse_report(0, true, col, row, mode);
+    let release = if mode.contains(TermMode::SGR_MOUSE) {
+        mouse_report(0, false, col, row, mode)
+    } else {
+        mouse_report(3, true, col, row, mode)
+    };
+    Some([press, release].concat())
+}
+
+fn mouse_report(button: u8, press: bool, col: u16, row: u16, mode: TermMode) -> Vec<u8> {
+    if mode.contains(TermMode::SGR_MOUSE) {
+        format!(
+            "\x1b[<{button};{};{}{}",
+            col.saturating_add(1),
+            row.saturating_add(1),
+            if press { 'M' } else { 'm' }
+        )
+        .into_bytes()
+    } else {
+        let coord = |v: u16| u8::try_from(v.saturating_add(33)).unwrap_or(u8::MAX);
+        vec![0x1b, b'[', b'M', 32 + button, coord(col), coord(row)]
+    }
+}
+
 fn encode_wheel(up: bool, col: u16, row: u16, mode: TermMode) -> Option<Vec<u8>> {
     if mode.intersects(TermMode::MOUSE_MODE) {
-        let button: u8 = if up { 64 } else { 65 };
-        if mode.contains(TermMode::SGR_MOUSE) {
-            Some(
-                format!(
-                    "\x1b[<{button};{};{}M",
-                    col.saturating_add(1),
-                    row.saturating_add(1)
-                )
-                .into_bytes(),
-            )
-        } else {
-            let coord = |v: u16| u8::try_from(v.saturating_add(33)).unwrap_or(u8::MAX);
-            Some(vec![0x1b, b'[', b'M', 32 + button, coord(col), coord(row)])
-        }
+        Some(mouse_report(if up { 64 } else { 65 }, true, col, row, mode))
     } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
         let arrow = cursor_key(
             if up { b'A' } else { b'B' },
@@ -423,5 +439,29 @@ mod tests {
         )
         .expect("bytes");
         assert_eq!(bytes, b"\x1bOB\x1bOB\x1bOB");
+    }
+
+    #[test]
+    fn click_is_dropped_without_mouse_mode() {
+        let mode = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
+        assert_eq!(encode(&InputEvent::Click { col: 1, row: 1 }, mode), None);
+    }
+
+    #[test]
+    fn sgr_click_presses_and_releases() {
+        let mode = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        assert_eq!(
+            encode(&InputEvent::Click { col: 4, row: 9 }, mode).as_deref(),
+            Some(b"\x1b[<0;5;10M\x1b[<0;5;10m".as_slice())
+        );
+    }
+
+    #[test]
+    fn x10_click_presses_and_releases() {
+        let mode = TermMode::MOUSE_DRAG;
+        assert_eq!(
+            encode(&InputEvent::Click { col: 0, row: 1 }, mode).as_deref(),
+            Some([0x1b, b'[', b'M', 32, 33, 34, 0x1b, b'[', b'M', 35, 33, 34].as_slice())
+        );
     }
 }

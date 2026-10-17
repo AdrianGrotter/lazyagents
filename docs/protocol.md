@@ -1,6 +1,6 @@
 # Protocol
 
-Status: implemented in crates/protocol (version 5); that crate is the source of truth.
+Status: implemented in crates/protocol (version 6); that crate is the source of truth.
 
 ## Transport and framing
 
@@ -155,5 +155,7 @@ frames carry only the changed rows plus the cursor position. `Frame` has the fie
 `agent`, `cols`, `rows`, `full`, `lines` and `cursor`. A cell with an empty `text`
 is the spacer that follows a wide character.
 
-`InputEvent` is `Key`, `Paste(String)` or `Wheel { up, col, row }`; see
-`crates/protocol/src/input.rs`.
+`InputEvent` is `Key`, `Paste(String)`, `Wheel { up, col, row }` or `Click { col, row }`;
+see `crates/protocol/src/input.rs`. `Click` is a left-button press and release at one cell
+of the agent's screen; the daemon reports it only when the agent enabled mouse reporting
+and drops it otherwise.

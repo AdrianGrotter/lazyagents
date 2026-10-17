@@ -18,7 +18,7 @@ pub use types::{
     Status, Usage, WorktreeInfo, WorktreeRequest,
 };
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// How long a client waits for the daemon to stop. It covers the daemon's slowest
 /// clean shutdown: waiting out a running process snapshot, then the agents' grace

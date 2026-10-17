@@ -262,6 +262,10 @@ mod tests {
                     row: 4,
                 },
             },
+            Request::Input {
+                id,
+                event: InputEvent::Click { col: 5, row: 6 },
+            },
             Request::Resize {
                 id,
                 cols: 100,

@@ -267,8 +267,10 @@ daemon last told it.
 - **Mouse** (`app.rs`): the TUI captures the mouse. A click selects a row or focuses a box
   or the pane, a drag selects pane cells and copies them on release, a click outside a
   popup closes it, and the wheel scrolls the diff, the scroll-mode history or the pane's
-  scrollback, or goes to the agent when it enabled mouse reporting. Clicks and drags never
-  reach the agent. See [keybindings.md](keybindings.md#mouse).
+  scrollback, or goes to the agent when it enabled mouse reporting. A click in the pane
+  that ends in the cell it started in also goes to the agent, which the daemon reports
+  only when the agent enabled mouse reporting; drags never reach the agent (ADR 0015). See
+  [keybindings.md](keybindings.md#mouse).
 - **Connection actor** (`connection.rs`): a task owning the `Client`. It forwards
   responses, errors and server events (agent list changes, screen frames) on one channel.
   `GitStat` and `GitDiff` go out without waiting for their replies, which the daemon may

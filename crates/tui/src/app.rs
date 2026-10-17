@@ -1732,7 +1732,7 @@ impl App {
                 };
                 selection.end = clamped(at, pane);
                 if selection.anchor == selection.end {
-                    return Vec::new();
+                    return self.click_agent(selection.end);
                 }
                 let text = selection.text(&self.screen);
                 if text.is_empty() {
@@ -1741,6 +1741,18 @@ impl App {
                 self.inform(format!("copied {} characters", text.chars().count()));
                 vec![Effect::Copy(text)]
             }
+        }
+    }
+
+    fn click_agent(&self, (col, row): (u16, u16)) -> Vec<Effect> {
+        match self.selected_agent() {
+            Some(agent) if self.focus == Focus::Pane && agent.status.is_running() => {
+                vec![Effect::Send(Request::Input {
+                    id: agent.id,
+                    event: InputEvent::Click { col, row },
+                })]
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -5771,8 +5783,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn click_pane_focuses_running_agent() {
-        let (mut app, _, _) = two_agents();
+    fn click_pane_focuses_running_agent_and_reaches_it() {
+        let (mut app, a, _) = two_agents();
         let areas = screen_areas(&app);
         let at = in_pane(&areas, 4, 2);
         assert!(app.on_mouse(mouse(MouseKind::Down, at), &areas).is_empty());
@@ -5784,7 +5796,13 @@ pub(crate) mod tests {
                 end: (4, 2)
             })
         );
-        assert!(app.on_mouse(mouse(MouseKind::Up, at), &areas).is_empty());
+        assert_eq!(
+            app.on_mouse(mouse(MouseKind::Up, at), &areas),
+            vec![Effect::Send(Request::Input {
+                id: a.id,
+                event: InputEvent::Click { col: 4, row: 2 }
+            })]
+        );
         assert_eq!((app.focus, app.selection), (Focus::Pane, None));
 
         let p = project("p");
@@ -5810,6 +5828,8 @@ pub(crate) mod tests {
             app.current_message(Instant::now()),
             Some("alpha is not running — r restarts")
         );
+        let effects = app.on_mouse(mouse(MouseKind::Up, in_pane(&areas, 1, 1)), &areas);
+        assert!(effects.is_empty(), "{effects:?}");
     }
 
     #[test]
@@ -5853,18 +5873,34 @@ pub(crate) mod tests {
 
     #[test]
     fn plain_click_copies_nothing() {
-        let (mut app, _, _) = two_agents();
+        let (mut app, a, _) = two_agents();
         let areas = screen_areas(&app);
         app.screen = screen_of(&["hello"]);
         let at = in_pane(&areas, 1, 0);
+        let click = vec![Effect::Send(Request::Input {
+            id: a.id,
+            event: InputEvent::Click { col: 1, row: 0 },
+        })];
         let _ = app.on_mouse(mouse(MouseKind::Down, at), &areas);
-        assert!(app.on_mouse(mouse(MouseKind::Up, at), &areas).is_empty());
+        assert_eq!(app.on_mouse(mouse(MouseKind::Up, at), &areas), click);
         let _ = app.on_mouse(mouse(MouseKind::Down, at), &areas);
         let _ = app.on_mouse(mouse(MouseKind::Drag, in_pane(&areas, 3, 0)), &areas);
         let _ = app.on_mouse(mouse(MouseKind::Drag, at), &areas);
-        assert!(app.on_mouse(mouse(MouseKind::Up, at), &areas).is_empty());
+        assert_eq!(app.on_mouse(mouse(MouseKind::Up, at), &areas), click);
         assert_eq!(app.selection, None);
         assert_eq!(app.current_message(Instant::now()), None);
+    }
+
+    #[test]
+    fn a_click_in_scroll_mode_stays_out_of_the_agent() {
+        let (mut app, _, _) = two_agents();
+        let areas = screen_areas(&app);
+        let _ = app.on_key(key('s'));
+        let at = in_pane(&areas, 1, 0);
+        let _ = app.on_mouse(mouse(MouseKind::Down, at), &areas);
+        let effects = app.on_mouse(mouse(MouseKind::Up, at), &areas);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(app.focus, Focus::Scroll);
     }
 
     #[test]
