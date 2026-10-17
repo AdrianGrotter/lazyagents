@@ -83,7 +83,7 @@ const COLOR_VARIANTS: usize = 3;
 const SCOPE_VARIANTS: usize = 3;
 const AGENT_KIND_VARIANTS: usize = 2;
 const INPUT_EVENT_VARIANTS: usize = 4;
-const HOOK_KIND_VARIANTS: usize = 8;
+const HOOK_KIND_VARIANTS: usize = 10;
 
 fn status_slot(status: &Status) -> usize {
     match status {
@@ -160,6 +160,8 @@ fn hook_kind_slot(kind: &HookKind) -> usize {
         HookKind::Stop => 5,
         HookKind::PermissionRequest => 6,
         HookKind::StopFailure => 7,
+        HookKind::SubagentStart => 8,
+        HookKind::SubagentStop => 9,
     }
 }
 
@@ -223,6 +225,8 @@ fn all_hook_kinds() -> Vec<HookKind> {
         HookKind::Stop,
         HookKind::PermissionRequest,
         HookKind::StopFailure,
+        HookKind::SubagentStart,
+        HookKind::SubagentStop,
     ]
 }
 
@@ -420,6 +424,7 @@ fn requests() -> Vec<(String, Request)> {
                 session_id: Some("s".into()),
                 source: Some("resume".into()),
                 detail: Some("Bash: ls".into()),
+                subagent: Some("a853c9dd5f0c291b7".into()),
             },
         ),
         (
@@ -430,6 +435,7 @@ fn requests() -> Vec<(String, Request)> {
                 session_id: None,
                 source: None,
                 detail: None,
+                subagent: None,
             },
         ),
         (
@@ -479,6 +485,7 @@ fn requests() -> Vec<(String, Request)> {
                 session_id: None,
                 source: None,
                 detail: None,
+                subagent: None,
             },
         ));
     }

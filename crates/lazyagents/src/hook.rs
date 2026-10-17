@@ -62,6 +62,7 @@ async fn deliver(kind: HookKind, agent: Uuid, socket: PathBuf, mut input: impl A
             session_id: field("session_id"),
             source: field("source"),
             detail: detail(kind, payload.as_ref()),
+            subagent: field("agent_id"),
         };
         send(socket, request).await
     })

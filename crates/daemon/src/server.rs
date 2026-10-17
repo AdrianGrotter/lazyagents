@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -289,6 +289,10 @@ struct Agent {
     /// What a stop or removal running off the event loop is doing to the agent; while set,
     /// kill, restart, remove, merge and rename are refused.
     busy: Option<&'static str>,
+    /// The `agent_id`s of the subagents that reported `SubagentStart` and have not yet
+    /// reported `SubagentStop`. Only these count: Claude also stops helpers it never
+    /// reported starting.
+    subagents: HashSet<String>,
 }
 
 impl Agent {
@@ -311,6 +315,7 @@ impl Agent {
             at_trust_dialog: false,
             usage: None,
             busy: None,
+            subagents: HashSet::new(),
         }
     }
 
@@ -323,13 +328,34 @@ impl Agent {
             self.waiting_for = None;
             self.at_trust_dialog = false;
         }
+        if status != Status::Working {
+            self.subagents.clear();
+        }
     }
 
     /// A hook counts as activity even when it leaves the status unchanged. A
     /// `PermissionRequest` names the tool call, which beats the generic message of the
     /// `Notification` that follows it.
-    fn hooked(&mut self, kind: HookKind, detail: Option<String>, now: Instant) {
-        self.status = on_hook(kind);
+    fn hooked(
+        &mut self,
+        kind: HookKind,
+        subagent: Option<String>,
+        detail: Option<String>,
+        now: Instant,
+    ) {
+        match (kind, subagent) {
+            (HookKind::SubagentStart, Some(id)) => {
+                self.subagents.insert(id);
+            }
+            (HookKind::SubagentStop, Some(id)) => {
+                self.subagents.remove(&id);
+            }
+            (HookKind::SessionStart, _) => self.subagents.clear(),
+            _ => {}
+        }
+        if let Some(status) = on_hook(kind, !self.subagents.is_empty()) {
+            self.status = status;
+        }
         self.status_since = now;
         self.at_trust_dialog = false;
         self.waiting_for = match (self.status, kind) {
@@ -337,6 +363,23 @@ impl Agent {
             (Status::NeedsInput, _) => self.waiting_for.take().or(detail),
             _ => None,
         };
+    }
+
+    /// Moves the agent to the status its output timing calls for, returning whether it moved.
+    fn settle(&mut self, now: Instant) -> bool {
+        let Some(status) = settle(
+            self.record.kind,
+            self.status,
+            self.started,
+            self.status_since,
+            self.last_output,
+            !self.subagents.is_empty(),
+            now,
+        ) else {
+            return false;
+        };
+        self.set_status(status);
+        true
     }
 }
 
@@ -524,8 +567,9 @@ impl Daemon {
                 session_id,
                 source,
                 detail,
+                subagent,
             } => self
-                .hook(id, kind, session_id, source.as_deref(), detail)
+                .hook(id, kind, session_id, source.as_deref(), detail, subagent)
                 .map(|()| Response::Ok),
             Request::Usage { id, usage } => self.usage(id, usage).map(|()| Response::Ok),
             Request::Shutdown => {
@@ -1476,6 +1520,7 @@ impl Daemon {
         session_id: Option<String>,
         source: Option<&str>,
         detail: Option<String>,
+        subagent: Option<String>,
     ) -> Result<(), String> {
         let agent = self
             .agents
@@ -1503,7 +1548,7 @@ impl Daemon {
             }
             changed_record = true;
         }
-        agent.hooked(kind, detail, Instant::now());
+        agent.hooked(kind, subagent, detail, Instant::now());
         if changed_record {
             self.persist();
         }
@@ -1718,15 +1763,7 @@ impl Daemon {
             if agent.terminal.is_none() {
                 continue;
             }
-            if let Some(status) = settle(
-                agent.record.kind,
-                agent.status,
-                agent.started,
-                agent.status_since,
-                agent.last_output,
-                now,
-            ) {
-                agent.set_status(status);
+            if agent.settle(now) {
                 changed.push(*id);
             }
         }
@@ -1973,7 +2010,7 @@ fn take_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status::CLAUDE_SILENCE;
+    use crate::status::{CLAUDE_SILENCE, CLAUDE_SUBAGENT_SILENCE};
 
     const WAIT: Duration = Duration::from_secs(10);
 
@@ -2349,9 +2386,9 @@ mod tests {
     fn a_hook_that_keeps_the_status_still_counts_as_activity() {
         let mut agent = claude_agent();
         let started = agent.started;
-        agent.hooked(HookKind::PreToolUse, None, started);
+        agent.hooked(HookKind::PreToolUse, None, None, started);
         let again = started + Duration::from_secs(9);
-        agent.hooked(HookKind::PreToolUse, None, again);
+        agent.hooked(HookKind::PreToolUse, None, None, again);
         assert_eq!(agent.status, Status::Working);
         let after_first_silence = started + CLAUDE_SILENCE + Duration::from_secs(1);
         assert_eq!(
@@ -2361,6 +2398,7 @@ mod tests {
                 agent.started,
                 agent.status_since,
                 agent.last_output,
+                false,
                 after_first_silence,
             ),
             None
@@ -2372,9 +2410,92 @@ mod tests {
                 agent.started,
                 agent.status_since,
                 agent.last_output,
+                false,
                 again + CLAUDE_SILENCE,
             ),
             Some(Status::Idle)
         );
+    }
+
+    fn subagent(id: &str) -> Option<String> {
+        Some(id.to_string())
+    }
+
+    #[test]
+    fn a_stop_while_a_subagent_runs_keeps_the_agent_working() {
+        let mut agent = claude_agent();
+        let now = agent.started;
+        agent.hooked(HookKind::SubagentStart, subagent("a1"), None, now);
+        agent.hooked(HookKind::Stop, None, None, now);
+        assert_eq!(agent.status, Status::Working);
+    }
+
+    #[test]
+    fn a_stop_after_the_last_subagent_stops_makes_the_agent_idle() {
+        let mut agent = claude_agent();
+        let now = agent.started;
+        agent.hooked(HookKind::SubagentStart, subagent("a1"), None, now);
+        agent.hooked(HookKind::SubagentStart, subagent("a2"), None, now);
+        agent.hooked(HookKind::SubagentStop, subagent("a1"), None, now);
+        agent.hooked(HookKind::Stop, None, None, now);
+        assert_eq!(agent.status, Status::Working);
+        agent.hooked(HookKind::SubagentStop, subagent("a2"), None, now);
+        agent.hooked(HookKind::Stop, None, None, now);
+        assert_eq!(agent.status, Status::Idle);
+    }
+
+    #[test]
+    fn a_subagent_start_marks_the_agent_working() {
+        let mut agent = claude_agent();
+        let now = agent.started;
+        agent.hooked(HookKind::Stop, None, None, now);
+        agent.hooked(HookKind::SubagentStart, subagent("a1"), None, now);
+        assert_eq!(agent.status, Status::Working);
+    }
+
+    #[test]
+    fn a_subagent_stop_leaves_the_status_alone() {
+        let mut agent = claude_agent();
+        let now = agent.started;
+        agent.hooked(HookKind::Stop, None, None, now);
+        agent.hooked(HookKind::SubagentStop, subagent("never-started"), None, now);
+        assert_eq!(agent.status, Status::Idle);
+        agent.hooked(HookKind::SubagentStart, subagent("a1"), None, now);
+        agent.hooked(HookKind::SubagentStop, subagent("a1"), None, now);
+        assert_eq!(agent.status, Status::Working);
+    }
+
+    #[test]
+    fn a_new_session_forgets_its_subagents() {
+        let mut agent = claude_agent();
+        let now = agent.started;
+        agent.hooked(HookKind::SubagentStart, subagent("a1"), None, now);
+        agent.hooked(HookKind::SessionStart, None, None, now);
+        agent.hooked(HookKind::Stop, None, None, now);
+        assert_eq!(agent.status, Status::Idle);
+    }
+
+    #[test]
+    fn settling_to_idle_forgets_the_subagents() {
+        let mut agent = claude_agent();
+        let now = agent.started;
+        agent.hooked(HookKind::SubagentStart, subagent("a1"), None, now);
+        assert!(!agent.settle(now + CLAUDE_SILENCE));
+        assert!(agent.settle(now + CLAUDE_SUBAGENT_SILENCE));
+        assert_eq!(agent.status, Status::Idle);
+        agent.hooked(HookKind::UserPromptSubmit, None, None, now);
+        agent.hooked(HookKind::Stop, None, None, now);
+        assert_eq!(agent.status, Status::Idle);
+    }
+
+    #[test]
+    fn a_restart_forgets_the_subagents() {
+        let mut agent = claude_agent();
+        let now = agent.started;
+        agent.hooked(HookKind::SubagentStart, subagent("a1"), None, now);
+        agent.set_status(Status::Exited(0));
+        agent.set_status(Status::Starting);
+        agent.hooked(HookKind::Stop, None, None, now);
+        assert_eq!(agent.status, Status::Idle);
     }
 }

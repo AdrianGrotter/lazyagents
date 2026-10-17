@@ -8,15 +8,22 @@ pub const ACTIVITY_WINDOW: Duration = Duration::from_secs(2);
 pub const SETTLE_AFTER: Duration = Duration::from_secs(2);
 pub const CLAUDE_SILENCE: Duration = Duration::from_secs(10);
 pub const CLAUDE_STARTUP_SILENCE: Duration = Duration::from_secs(30);
+pub const CLAUDE_SUBAGENT_SILENCE: Duration = Duration::from_secs(300);
 
-pub fn on_hook(kind: HookKind) -> Status {
-    match kind {
+/// The status a Claude hook moves an agent to, or `None` to keep it. A turn that ends while
+/// subagents run in the background leaves Claude working on them.
+pub fn on_hook(kind: HookKind, subagents_running: bool) -> Option<Status> {
+    let status = match kind {
+        HookKind::Stop | HookKind::StopFailure if subagents_running => Status::Working,
         HookKind::SessionStart | HookKind::Stop | HookKind::StopFailure => Status::Idle,
-        HookKind::UserPromptSubmit | HookKind::PreToolUse | HookKind::PostToolUse => {
-            Status::Working
-        }
+        HookKind::UserPromptSubmit
+        | HookKind::PreToolUse
+        | HookKind::PostToolUse
+        | HookKind::SubagentStart => Status::Working,
         HookKind::Notification | HookKind::PermissionRequest => Status::NeedsInput,
-    }
+        HookKind::SubagentStop => return None,
+    };
+    Some(status)
 }
 
 /// Whether a Claude screen shows the workspace-trust dialog, which Claude shows before it
@@ -76,6 +83,7 @@ pub fn settle(
     started: Instant,
     status_since: Instant,
     last_output: Option<Instant>,
+    subagents_running: bool,
     now: Instant,
 ) -> Option<Status> {
     if !status.is_running() {
@@ -94,6 +102,7 @@ pub fn settle(
             let quiet_since = last_output.map_or(started, |at| at.max(started));
             let quiet = now.duration_since(quiet_since.max(status_since));
             match status {
+                Status::Working if subagents_running && quiet < CLAUDE_SUBAGENT_SILENCE => status,
                 Status::Working if quiet >= CLAUDE_SILENCE => Status::Idle,
                 Status::Starting if quiet >= CLAUDE_STARTUP_SILENCE => Status::Idle,
                 _ => status,
@@ -115,14 +124,26 @@ mod tests {
 
     #[test]
     fn hooks_map_to_statuses() {
-        assert_eq!(on_hook(HookKind::SessionStart), Status::Idle);
-        assert_eq!(on_hook(HookKind::UserPromptSubmit), Status::Working);
-        assert_eq!(on_hook(HookKind::PreToolUse), Status::Working);
-        assert_eq!(on_hook(HookKind::PostToolUse), Status::Working);
-        assert_eq!(on_hook(HookKind::Notification), Status::NeedsInput);
-        assert_eq!(on_hook(HookKind::Stop), Status::Idle);
-        assert_eq!(on_hook(HookKind::PermissionRequest), Status::NeedsInput);
-        assert_eq!(on_hook(HookKind::StopFailure), Status::Idle);
+        let idle = |kind| on_hook(kind, false);
+        assert_eq!(idle(HookKind::SessionStart), Some(Status::Idle));
+        assert_eq!(idle(HookKind::UserPromptSubmit), Some(Status::Working));
+        assert_eq!(idle(HookKind::PreToolUse), Some(Status::Working));
+        assert_eq!(idle(HookKind::PostToolUse), Some(Status::Working));
+        assert_eq!(idle(HookKind::Notification), Some(Status::NeedsInput));
+        assert_eq!(idle(HookKind::Stop), Some(Status::Idle));
+        assert_eq!(idle(HookKind::PermissionRequest), Some(Status::NeedsInput));
+        assert_eq!(idle(HookKind::StopFailure), Some(Status::Idle));
+        assert_eq!(idle(HookKind::SubagentStart), Some(Status::Working));
+        assert_eq!(idle(HookKind::SubagentStop), None);
+    }
+
+    #[test]
+    fn a_turn_that_ends_with_subagents_running_keeps_working() {
+        let busy = |kind| on_hook(kind, true);
+        assert_eq!(busy(HookKind::Stop), Some(Status::Working));
+        assert_eq!(busy(HookKind::StopFailure), Some(Status::Working));
+        assert_eq!(busy(HookKind::SessionStart), Some(Status::Idle));
+        assert_eq!(busy(HookKind::Notification), Some(Status::NeedsInput));
     }
 
     #[test]
@@ -148,6 +169,7 @@ mod tests {
                 started,
                 started,
                 None,
+                false,
                 now,
             )
         };
@@ -160,6 +182,7 @@ mod tests {
                 started,
                 started,
                 None,
+                false,
                 after
             ),
             None
@@ -179,6 +202,7 @@ mod tests {
                 started,
                 started,
                 Some(output),
+                false,
                 now,
             )
         };
@@ -199,6 +223,7 @@ mod tests {
                 started,
                 started,
                 last_output,
+                false,
                 now,
             )
         };
@@ -227,6 +252,7 @@ mod tests {
                 started,
                 prompt,
                 Some(output),
+                false,
                 now,
             )
         };
@@ -239,12 +265,45 @@ mod tests {
     }
 
     #[test]
+    fn claude_working_with_subagents_running_waits_out_a_longer_silence() {
+        let started = Instant::now();
+        let claude = |now| {
+            settle(
+                AgentKind::Claude,
+                Status::Working,
+                started,
+                started,
+                None,
+                true,
+                now,
+            )
+        };
+        assert_eq!(claude(started + CLAUDE_SILENCE), None);
+        assert_eq!(
+            claude(started + CLAUDE_SUBAGENT_SILENCE - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(
+            claude(started + CLAUDE_SUBAGENT_SILENCE),
+            Some(Status::Idle)
+        );
+    }
+
+    #[test]
     fn claude_needs_input_is_not_changed_by_silence() {
         let started = Instant::now();
         let late = started + CLAUDE_SILENCE * 3;
         for status in [Status::NeedsInput, Status::Idle] {
             assert_eq!(
-                settle(AgentKind::Claude, status, started, started, None, late),
+                settle(
+                    AgentKind::Claude,
+                    status,
+                    started,
+                    started,
+                    None,
+                    false,
+                    late
+                ),
                 None
             );
             assert_eq!(
@@ -254,6 +313,7 @@ mod tests {
                     started,
                     started,
                     Some(started),
+                    false,
                     late
                 ),
                 None
@@ -271,6 +331,7 @@ mod tests {
                 started,
                 started,
                 last_output,
+                false,
                 now,
             )
         };
@@ -299,9 +360,12 @@ mod tests {
         let late = started + CLAUDE_SILENCE * 3;
         for kind in [AgentKind::Generic, AgentKind::Claude] {
             for status in [Status::Stopped, Status::Exited(0), Status::Exited(137)] {
-                assert_eq!(settle(kind, status, started, started, None, late), None);
                 assert_eq!(
-                    settle(kind, status, started, started, Some(late), late),
+                    settle(kind, status, started, started, None, false, late),
+                    None
+                );
+                assert_eq!(
+                    settle(kind, status, started, started, Some(late), false, late),
                     None
                 );
             }

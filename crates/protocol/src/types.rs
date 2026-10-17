@@ -206,10 +206,12 @@ pub enum HookKind {
     Stop,
     PermissionRequest,
     StopFailure,
+    SubagentStart,
+    SubagentStop,
 }
 
 impl HookKind {
-    pub const ALL: [HookKind; 8] = [
+    pub const ALL: [HookKind; 10] = [
         HookKind::SessionStart,
         HookKind::UserPromptSubmit,
         HookKind::PreToolUse,
@@ -218,6 +220,8 @@ impl HookKind {
         HookKind::Stop,
         HookKind::PermissionRequest,
         HookKind::StopFailure,
+        HookKind::SubagentStart,
+        HookKind::SubagentStop,
     ];
 
     pub fn name(self) -> &'static str {
@@ -230,6 +234,8 @@ impl HookKind {
             HookKind::Stop => "Stop",
             HookKind::PermissionRequest => "PermissionRequest",
             HookKind::StopFailure => "StopFailure",
+            HookKind::SubagentStart => "SubagentStart",
+            HookKind::SubagentStop => "SubagentStop",
         }
     }
 
@@ -255,7 +261,15 @@ mod tests {
             HookKind::from_name("StopFailure"),
             Some(HookKind::StopFailure)
         );
-        assert_eq!(HookKind::from_name("SubagentStop"), None);
+        assert_eq!(
+            HookKind::from_name("SubagentStart"),
+            Some(HookKind::SubagentStart)
+        );
+        assert_eq!(
+            HookKind::from_name("SubagentStop"),
+            Some(HookKind::SubagentStop)
+        );
+        assert_eq!(HookKind::from_name("PreCompact"), None);
     }
 
     #[test]

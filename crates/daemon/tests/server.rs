@@ -773,6 +773,7 @@ async fn claude_agents_get_sessions_hooks_and_resume() {
         session_id: None,
         source: None,
         detail: None,
+        subagent: None,
     })
     .await
     .expect("hook");
@@ -783,6 +784,7 @@ async fn claude_agents_get_sessions_hooks_and_resume() {
         session_id: None,
         source: None,
         detail: None,
+        subagent: None,
     })
     .await
     .expect("hook");
@@ -843,6 +845,7 @@ async fn session_start(conn: &mut Conn, id: AgentId, session: uuid::Uuid, source
         session_id: Some(session.to_string()),
         source: Some(source.into()),
         detail: None,
+        subagent: None,
     })
     .await
     .expect("hook");
@@ -870,6 +873,7 @@ async fn session_start_source_decides_whether_the_session_stays_resumable() {
         session_id: None,
         source: None,
         detail: None,
+        subagent: None,
     })
     .await
     .expect("prompt");
@@ -1096,6 +1100,7 @@ async fn hook(conn: &mut Conn, id: AgentId, kind: HookKind, detail: Option<&str>
         session_id: None,
         source: None,
         detail: detail.map(str::to_string),
+        subagent: None,
     })
     .await
     .expect("hook");
@@ -1307,6 +1312,7 @@ async fn a_claude_agent_at_the_trust_dialog_needs_input() {
         session_id: None,
         source: Some("startup".into()),
         detail: None,
+        subagent: None,
     })
     .await
     .expect("hook");
@@ -1410,6 +1416,7 @@ async fn approving_a_claude_prompt_that_quotes_the_trust_dialog_presses_enter() 
         session_id: None,
         source: Some("startup".into()),
         detail: None,
+        subagent: None,
     })
     .await
     .expect("hook");
@@ -1486,6 +1493,7 @@ async fn hook_for_unknown_agent_is_an_error() {
             session_id: None,
             source: None,
             detail: None,
+            subagent: None,
         })
         .await
         .expect_err("unknown");
@@ -2008,6 +2016,7 @@ async fn late_hook_does_not_revive_an_exited_agent() {
         session_id: None,
         source: None,
         detail: None,
+        subagent: None,
     })
     .await
     .expect("late hook");

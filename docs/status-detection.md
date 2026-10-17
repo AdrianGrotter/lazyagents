@@ -26,7 +26,17 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
     input", case-insensitive) as `Stop`, and drops the informational ones
     (`auth_success`, `elicitation_complete`, `elicitation_response`, `agent_completed`
     and every `quota_*`) without telling the daemon
-  - `Stop`, `StopFailure` (a turn ended by an API error) → `Idle`
+  - `Stop`, `StopFailure` (a turn ended by an API error) → `Idle`, or `Working` while
+    subagents run
+  - `SubagentStart` → `Working`; `SubagentStop` leaves the status as it is
+- **Claude subagents**: Claude runs subagents in the background, so the main turn ends with
+  `Stop` while they work, and Claude starts a new turn once one finishes. The daemon keeps
+  the `agent_id`s of subagents that reported `SubagentStart` and not yet `SubagentStop`;
+  while any remain, `Stop` and `StopFailure` mean `Working`. Claude also sends
+  `SubagentStop` for internal helpers it never reported starting, so a `SubagentStop`
+  changes no status. A `SessionStart`, or any status other than `Working` (silence, exit,
+  restart), forgets them all, so a subagent whose `SubagentStop` never arrives cannot keep
+  an agent `Working` past the silence below.
 - **Status line**: when the user has a Claude status line of their own (a `command` one,
   from the agent directory's `.claude/settings.local.json`, else `.claude/settings.json`,
   else `$CLAUDE_CONFIG_DIR/settings.json` or `~/.claude/settings.json`), the generated
@@ -36,11 +46,11 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   daemon the usage figures in the JSON within 200 ms. Without a status line of their own an
   agent gets none, and reports no usage. The lookup happens when the agent starts; changes
   to the status line's other settings apply on restart, changes to their script at once.
-- **Claude silence**: a `Working` Claude agent with no output for 10 s becomes `Idle`.
-  The 10 s count from the latest of its start, its last output and its last hook (every
-  hook counts, even one that leaves the status unchanged), so a prompt submitted after a
-  long quiet spell is not cut short. This covers an Esc interrupt, which fires no `Stop`
-  hook.
+- **Claude silence**: a `Working` Claude agent with no output for 10 s becomes `Idle`, or
+  for 5 min while subagents run. Both count from the latest of its start, its last output
+  and its last hook (every hook counts, even one that leaves the status unchanged), so a
+  prompt submitted after a long quiet spell is not cut short. This covers an Esc
+  interrupt, which fires no `Stop` hook.
 - **Claude trust dialog**: Claude runs no hook until the user trusts the directory, which
   every new worktree asks for. A `Starting` Claude agent whose screen shows the trust
   dialog ("Yes, I trust this folder", or the older "Do you trust the files in this

@@ -1,6 +1,6 @@
 # Protocol
 
-Status: implemented in crates/protocol (version 6); that crate is the source of truth.
+Status: implemented in crates/protocol (version 7); that crate is the source of truth.
 
 ## Transport and framing
 
@@ -83,12 +83,13 @@ does not compile in the test until its sample is added.
 - `Input { id, event }`
 - `Resize { id, cols, rows }`
 - `Scroll { id, lines }`
-- `Hook { id, kind, session_id, source, detail }`: `session_id` and `source` come from
-  the Claude Code hook payload; `source` is `SessionStart`'s `startup`, `resume`, `clear`
-  or `compact`. `detail` is one line of at most 120 characters: a `PermissionRequest`'s
-  `tool_name` and the first of its `tool_input`'s `command`, `file_path`, `path`, `url`,
-  `pattern`, `query`, `description` or `prompt` (`Bash: npm test`), or a
-  `Notification`'s `message`
+- `Hook { id, kind, session_id, source, detail, subagent }`: `session_id` and `source`
+  come from the Claude Code hook payload; `source` is `SessionStart`'s `startup`,
+  `resume`, `clear` or `compact`. `detail` is one line of at most 120 characters: a
+  `PermissionRequest`'s `tool_name` and the first of its `tool_input`'s `command`,
+  `file_path`, `path`, `url`, `pattern`, `query`, `description` or `prompt`
+  (`Bash: npm test`), or a `Notification`'s `message`. `subagent` is the payload's
+  `agent_id`, set when the hook fired in a subagent
 - `Usage { id, usage }`: from `lazyagents statusline`; ignored, like a `Hook`, for an agent
   that is not a running Claude agent
 - `Shutdown`: answered after every agent's process tree has exited

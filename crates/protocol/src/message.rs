@@ -82,6 +82,8 @@ pub enum Request {
         /// A summary of what the hook is about: the tool call of a `PermissionRequest`, the
         /// message of a `Notification`.
         detail: Option<String>,
+        /// The `agent_id` of the subagent the hook fired in.
+        subagent: Option<String>,
     },
     /// From `lazyagents statusline`, each time Claude refreshes the agent's status line.
     Usage {
@@ -282,6 +284,7 @@ mod tests {
                 session_id: Some("s".into()),
                 source: Some("resume".into()),
                 detail: Some("Bash: ls".into()),
+                subagent: Some("a853c9dd5f0c291b7".into()),
             },
             Request::Usage {
                 id,

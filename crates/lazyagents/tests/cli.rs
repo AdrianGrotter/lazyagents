@@ -490,6 +490,28 @@ fn idle_notification_marks_a_claude_agent_idle() {
     assert!(!env.ok(&["ls"]).contains("needs input"));
 }
 
+#[test]
+fn a_claude_agent_stays_working_while_a_background_subagent_runs() {
+    let env = TestEnv::new();
+    let claude = FakeClaude::start(&env);
+    let session = &claude.session;
+    let main = format!("{{\"session_id\":\"{session}\"}}");
+    let sub = format!(
+        "{{\"session_id\":\"{session}\",\"agent_id\":\"a853c9dd5f0c291b7\",\"agent_type\":\"general-purpose\"}}"
+    );
+    claude.hook(&env, "UserPromptSubmit", &main);
+    claude.hook(&env, "SubagentStart", &sub);
+    claude.hook(&env, "Stop", &main);
+    assert!(wait_until(Duration::from_secs(5), || env
+        .ok(&["ls"])
+        .contains("working")));
+    claude.hook(&env, "SubagentStop", &sub);
+    claude.hook(&env, "Stop", &main);
+    assert!(wait_until(Duration::from_secs(5), || env
+        .ok(&["ls"])
+        .contains("idle")));
+}
+
 /// Runs the binary once, so a timed run measures it rather than the first exec of a
 /// newly linked binary, which macOS holds up for its code-signature assessment.
 fn warm_up() {
