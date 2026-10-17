@@ -113,14 +113,35 @@ shows at most 20 000 lines. A git error closes it and shows the error in the sta
 
 | Key | Action |
 |---|---|
-| `j`/`k`, `↓`/`↑` | scroll one line |
-| `ctrl-d`/`ctrl-u` | scroll half a page |
-| `pagedown`/`pageup` | scroll a page |
-| `g`/`G` | top / bottom |
+| `j`/`k`, `↓`/`↑` | move the cursor one line |
+| `ctrl-d`/`ctrl-u` | move it half a page |
+| `pagedown`/`pageup` | move it a page |
+| `g`/`G` | first / last line |
+| `c` | comment on the cursor line (an added, removed or context line); on a commented line, edit the comment; saving it empty removes it |
+| `n`/`N` | next / previous commented line |
+| `S` | send every comment to the agent as one prompt and return to the sidebar |
 | `D`, `q`, `esc` | close, back to the Agents box |
 | `ctrl-c` | quit the TUI (agents keep running) |
 
-The mouse wheel scrolls the diff too. The view closes by itself if its agent is removed.
+The view scrolls to keep the cursor line, highlighted, on screen. The mouse wheel scrolls
+the diff and keeps the cursor inside it. The view closes by itself if its agent is removed.
+
+Review comments belong to the agent and stay, drawn under their line as `✎ <text>`, when the
+diff is closed and opened again, until `S` sends them or the TUI quits. A comment is tied to
+its file and line (a new-file line, or an old-file line for a removed one), so it is shown
+again only where the new diff has that line. `S` pastes this into the agent and presses
+`enter`:
+
+```
+Review comments on your changes. Address each one:
+
+- src/a.rs:11: name this better
+  +let fresh = old();
+- src/a.rs:11 (removed line): why remove this?
+  -check();
+```
+
+The comment popup shows the line it is about; `enter` saves, `esc` cancels.
 
 **Pane mode**: all input goes to the agent except the `ctrl-q` prefix and `ctrl-]`.
 After `ctrl-q`, one more key picks a pane action:

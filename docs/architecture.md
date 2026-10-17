@@ -278,6 +278,9 @@ daemon last told it.
   restores both afterwards, dropping the SIGINT a ctrl-c also sent the TUI. `popup` and
   `none` commands run on a blocking task and report back to `App::command_finished`;
   `agent` commands become a `CreateAgent` request.
+- **Review comments** (`review.rs`): maps each diff line to its file and line number,
+  following the hunk headers' counts, and builds the prompt that sends an agent the
+  comments on its diff. `App` keeps the comments per agent in memory.
 - **Notifications** (`notify.rs`): bell, OSC 9 or OSC 777 for the `Notify` effect, and the
   window title, saved on start and restored on exit.
 - **Clipboard** (`clipboard.rs`): the runtime handles `Copy` between draws, writing OSC 52

@@ -15,6 +15,7 @@ use crate::config::{Config, PresetDef, Theme};
 use crate::keymap::{Action, Keymap};
 use crate::keys;
 use crate::known::{self, KnownProject};
+use crate::review::{self, Comment, Location};
 use crate::ui::Areas;
 
 pub const MESSAGE_TTL: Duration = Duration::from_secs(5);
@@ -185,12 +186,15 @@ impl Confirmed {
     }
 }
 
-/// `lines` is `None` until the daemon's diff arrives.
+/// `lines` is `None` until the daemon's diff arrives; `locations` holds each line's place
+/// in the files, for comments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffView {
     pub agent: AgentId,
     pub lines: Option<Vec<String>>,
+    pub locations: Vec<Option<Location>>,
     pub scroll: usize,
+    pub cursor: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +239,13 @@ pub enum Popup {
         index: usize,
     },
     CommandPrompt(CommandRun),
+    /// Writing the review comment on `location` of `agent`'s diff.
+    Comment {
+        agent: AgentId,
+        location: Location,
+        code: String,
+        input: String,
+    },
     /// A line to send to `agent`, as if typed into its pane and submitted.
     Reply {
         agent: AgentId,
@@ -409,6 +420,8 @@ pub struct App {
     pub keymap: Keymap,
     pub presets: Vec<PresetDef>,
     pub commands: Vec<CustomCommand>,
+    /// Review comments per agent, kept until they are sent.
+    pub comments: HashMap<AgentId, Vec<Comment>>,
     pub theme: Theme,
     cwd: PathBuf,
     home: Option<PathBuf>,
@@ -453,6 +466,7 @@ impl App {
             keymap: config.keymap,
             presets: config.presets,
             commands: config.commands,
+            comments: HashMap::new(),
             theme: config.theme,
             cwd,
             home,
@@ -675,7 +689,11 @@ impl App {
             return;
         };
         match result {
-            Ok(text) => view.lines = Some(diff_lines(&text)),
+            Ok(text) => {
+                let lines = diff_lines(&text);
+                view.locations = review::locations(&lines);
+                view.lines = Some(lines);
+            }
             Err(message) => {
                 self.close_diff();
                 self.fail(message);
@@ -1067,6 +1085,14 @@ const WHEEL_LINES: i32 = 3;
 const SCROLL_TOP: i32 = i32::MAX / 2;
 const SCROLL_BOTTOM: i32 = i32::MIN / 2;
 
+/// How many of `comments` sit on `location`: 0 or 1.
+fn comments_at(comments: &[Comment], location: Option<&Option<Location>>) -> usize {
+    match location {
+        Some(Some(location)) => comments.iter().filter(|c| c.location == *location).count(),
+        _ => 0,
+    }
+}
+
 fn press(id: AgentId, code: protocol::KeyCode) -> Effect {
     Effect::Send(Request::Input {
         id,
@@ -1162,10 +1188,56 @@ impl App {
             (KeyCode::PageUp, _) => -page,
             (KeyCode::Char('g'), false) => i64::MIN / 2,
             (KeyCode::Char('G'), false) => i64::MAX / 2,
+            (KeyCode::Char('c'), false) => {
+                self.open_comment();
+                return Vec::new();
+            }
+            (KeyCode::Char('n'), false) => {
+                self.jump_to_comment(true);
+                return Vec::new();
+            }
+            (KeyCode::Char('N'), false) => {
+                self.jump_to_comment(false);
+                return Vec::new();
+            }
+            (KeyCode::Char('S'), false) => return self.send_comments(),
             _ => return Vec::new(),
         };
-        self.scroll_diff(step);
+        self.move_diff_cursor(step);
         Vec::new()
+    }
+
+    fn move_diff_cursor(&mut self, step: i64) {
+        let Some(view) = self.diff.as_mut() else {
+            return;
+        };
+        let last = view.lines.as_ref().map_or(0, |l| l.len().saturating_sub(1)) as i64;
+        view.cursor = (view.cursor as i64).saturating_add(step).clamp(0, last) as usize;
+        self.keep_cursor_visible();
+    }
+
+    /// Scrolls the least that shows the cursor line, counting the comment rows drawn
+    /// under commented lines.
+    fn keep_cursor_visible(&mut self) {
+        let page = self.diff_page();
+        let Some(view) = self.diff.as_mut() else {
+            return;
+        };
+        let commented = self
+            .comments
+            .get(&view.agent)
+            .map_or(&[][..], Vec::as_slice);
+        let rows = |from: usize, to: usize| {
+            (from..=to)
+                .map(|i| 1 + comments_at(commented, view.locations.get(i)))
+                .sum::<usize>()
+        };
+        if view.cursor < view.scroll {
+            view.scroll = view.cursor;
+        }
+        while view.scroll < view.cursor && rows(view.scroll, view.cursor) > page {
+            view.scroll += 1;
+        }
     }
 
     fn scroll_diff(&mut self, step: i64) {
@@ -1178,8 +1250,122 @@ impl App {
             .as_ref()
             .map_or(0, |lines| lines.len().saturating_sub(page)) as i64;
         view.scroll = (view.scroll as i64).saturating_add(step).clamp(0, last) as usize;
+        view.cursor = view
+            .cursor
+            .clamp(view.scroll, view.scroll + page.saturating_sub(1));
+        let lines = view.lines.as_ref().map_or(0, Vec::len);
+        view.cursor = view.cursor.min(lines.saturating_sub(1));
     }
 
+    fn open_comment(&mut self) {
+        let Some(view) = &self.diff else {
+            return;
+        };
+        let (Some(Some(location)), Some(code)) = (
+            view.locations.get(view.cursor),
+            view.lines.as_ref().and_then(|l| l.get(view.cursor)),
+        ) else {
+            self.fail("comment on a changed or context line");
+            return;
+        };
+        let input = self
+            .comments
+            .get(&view.agent)
+            .and_then(|c| c.iter().find(|c| c.location == *location))
+            .map(|c| c.text.clone())
+            .unwrap_or_default();
+        self.popup = Some(Popup::Comment {
+            agent: view.agent,
+            location: location.clone(),
+            code: code.clone(),
+            input,
+        });
+    }
+
+    /// An empty comment removes the one on that line.
+    fn save_comment(&mut self, agent: AgentId, location: Location, code: String, text: String) {
+        let comments = self.comments.entry(agent).or_default();
+        comments.retain(|c| c.location != location);
+        let text = text.trim().to_string();
+        if !text.is_empty() {
+            comments.push(Comment {
+                location,
+                code,
+                text,
+            });
+        }
+        if comments.is_empty() {
+            self.comments.remove(&agent);
+        }
+        self.keep_cursor_visible();
+    }
+
+    fn jump_to_comment(&mut self, forward: bool) {
+        let Some(view) = self.diff.as_mut() else {
+            return;
+        };
+        let commented = self
+            .comments
+            .get(&view.agent)
+            .map_or(&[][..], Vec::as_slice);
+        let count = view.locations.len();
+        let target = (1..=count)
+            .map(|offset| match forward {
+                true => (view.cursor + offset) % count,
+                false => (view.cursor + count - offset % count) % count,
+            })
+            .find(|&i| comments_at(commented, view.locations.get(i)) > 0);
+        match target {
+            Some(line) => {
+                view.cursor = line;
+                self.keep_cursor_visible();
+            }
+            None => self.fail("no comments on this diff"),
+        }
+    }
+
+    /// Sends every comment on the agent's diff as one prompt, in diff order, and returns
+    /// to the sidebar to watch it work.
+    fn send_comments(&mut self) -> Vec<Effect> {
+        let Some(view) = &self.diff else {
+            return Vec::new();
+        };
+        let id = view.agent;
+        let order = |location: &Location| {
+            view.locations
+                .iter()
+                .position(|l| l.as_ref() == Some(location))
+        };
+        let Some(mut comments) = self.comments.get(&id).cloned() else {
+            self.fail("no comments to send");
+            return Vec::new();
+        };
+        comments.sort_by_key(|c| order(&c.location));
+        let Some(agent) = self.agents.iter().find(|a| a.id == id) else {
+            return Vec::new();
+        };
+        if !agent.status.is_running() {
+            let message = format!("{} is not running", crate::ui::label(agent));
+            self.fail(message);
+            return Vec::new();
+        }
+        let message = format!(
+            "sent {} comment{} to {}",
+            comments.len(),
+            if comments.len() == 1 { "" } else { "s" },
+            crate::ui::label(agent)
+        );
+        self.comments.remove(&id);
+        self.close_diff();
+        self.inform(message);
+        vec![
+            Effect::Send(Request::Input {
+                id,
+                event: InputEvent::Paste(review::prompt(&comments)),
+            }),
+            press(id, protocol::KeyCode::Enter),
+        ]
+    }
     /// Leaves scroll mode, returning to the pane only if it was entered from there and
     /// the agent still runs, and scrolls the agent back to the bottom.
     fn exit_scroll(&mut self) -> Vec<Effect> {
@@ -1298,6 +1484,7 @@ impl App {
         match &mut self.popup {
             Some(Popup::Rename { input, .. }) => input.push_str(&line),
             Some(Popup::CommandPrompt(run)) => run.input.push_str(&line),
+            Some(Popup::Comment { input, .. }) => input.push_str(&line),
             Some(Popup::Reply { input, .. }) => {
                 input.push_str(&text.replace("\r\n", " ").replace(['\r', '\n'], " "))
             }
@@ -1619,7 +1806,9 @@ impl App {
                     self.diff = Some(DiffView {
                         agent: id,
                         lines: None,
+                        locations: Vec::new(),
                         scroll: 0,
+                        cursor: 0,
                     });
                     self.focus = Focus::Diff;
                     if self.diffs_in_flight.contains_key(&id) {
@@ -1838,6 +2027,26 @@ impl App {
         match popup {
             Popup::Help => Vec::new(),
             Popup::Commands { index } => self.on_commands_key(index, key),
+            Popup::Comment {
+                agent,
+                location,
+                code,
+                mut input,
+            } => {
+                match edit(&mut input, &key) {
+                    Edit::Submit => self.save_comment(agent, location, code, input),
+                    Edit::Cancel => {}
+                    Edit::Continue => {
+                        self.popup = Some(Popup::Comment {
+                            agent,
+                            location,
+                            code,
+                            input,
+                        })
+                    }
+                }
+                Vec::new()
+            }
             Popup::Reply { agent, mut input } => match edit(&mut input, &key) {
                 Edit::Submit if input.trim().is_empty() => Vec::new(),
                 Edit::Submit => vec![
@@ -4595,8 +4804,9 @@ pub(crate) mod tests {
         assert_eq!(app.focus, Focus::Diff);
     }
 
-    fn diff_scroll(app: &App) -> usize {
-        app.diff.as_ref().expect("diff view").scroll
+    fn diff_place(app: &App) -> (usize, usize) {
+        let view = app.diff.as_ref().expect("diff view");
+        (view.cursor, view.scroll)
     }
 
     #[test]
@@ -4614,22 +4824,23 @@ pub(crate) mod tests {
             Some(&text)
         );
         for (event, expected) in [
-            (key('j'), 1),
-            (key('k'), 0),
-            (key('k'), 0),
-            (ctrl('d'), 5),
-            (ctrl('u'), 0),
-            (code(KeyCode::PageDown), 10),
-            (code(KeyCode::PageUp), 0),
-            (key('G'), 90),
-            (key('j'), 90),
-            (code(KeyCode::PageDown), 90),
-            (key('g'), 0),
+            (key('j'), (1, 0)),
+            (key('k'), (0, 0)),
+            (key('k'), (0, 0)),
+            (ctrl('d'), (5, 0)),
+            (ctrl('d'), (10, 1)),
+            (ctrl('u'), (5, 1)),
+            (code(KeyCode::PageDown), (15, 6)),
+            (code(KeyCode::PageUp), (5, 5)),
+            (key('G'), (99, 90)),
+            (key('j'), (99, 90)),
+            (code(KeyCode::PageDown), (99, 90)),
+            (key('g'), (0, 0)),
         ] {
             assert!(app.on_key(event).is_empty(), "{event:?}");
-            assert_eq!(diff_scroll(&app), expected, "{event:?}");
+            assert_eq!(diff_place(&app), expected, "{event:?}");
         }
-        for event in [key('x'), key('d'), key('n'), code(KeyCode::Enter)] {
+        for event in [key('x'), key('d'), key('n'), key('S'), code(KeyCode::Enter)] {
             assert!(app.on_key(event).is_empty(), "{event:?}");
             assert_eq!((app.focus, &app.popup), (Focus::Diff, &None), "{event:?}");
         }
@@ -5727,5 +5938,189 @@ mod reply_tests {
             app.current_message(Instant::now()),
             Some("api is not running")
         );
+    }
+}
+
+#[cfg(test)]
+mod diff_comment_tests {
+    use super::tests::{agent, loaded, project};
+    use super::*;
+    use protocol::{InputEvent, Key as ProtoKey, KeyCode as ProtoCode, Modifiers};
+
+    const DIFF: &str = "diff --git a/src/a.rs b/src/a.rs\n\
+                        --- a/src/a.rs\n\
+                        +++ b/src/a.rs\n\
+                        @@ -10,2 +10,2 @@\n \
+                        keep\n\
+                        -old\n\
+                        +new";
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn code(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn typed(app: &mut App, text: &str) {
+        for c in text.chars() {
+            let _ = app.on_key(key(c));
+        }
+    }
+
+    fn with_diff() -> (App, AgentInfo) {
+        let p = project("p");
+        let a = agent(&p, "api", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a.clone()]);
+        let _ = app.set_pane_size(80, 10);
+        let _ = app.on_key(key('D'));
+        app.apply_diff(a.id, Ok(DIFF.into()));
+        (app, a)
+    }
+
+    fn to_line(app: &mut App, line: usize) {
+        let _ = app.on_key(key('g'));
+        for _ in 0..line {
+            let _ = app.on_key(key('j'));
+        }
+    }
+
+    fn comment(app: &mut App, line: usize, text: &str) {
+        to_line(app, line);
+        let _ = app.on_key(key('c'));
+        typed(app, text);
+        let _ = app.on_key(code(KeyCode::Enter));
+    }
+
+    fn texts(app: &App, id: AgentId) -> Vec<String> {
+        app.comments
+            .get(&id)
+            .map(|c| c.iter().map(|c| c.text.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn c_comments_on_the_cursor_line_and_edits_or_drops_it() {
+        let (mut app, a) = with_diff();
+        comment(&mut app, 6, "name this better");
+        assert_eq!(app.focus, Focus::Diff);
+        let comments = &app.comments[&a.id];
+        assert_eq!(comments.len(), 1);
+        assert_eq!(
+            comments[0].location,
+            crate::review::Location {
+                file: "src/a.rs".into(),
+                line: 11,
+                removed: false
+            }
+        );
+        assert_eq!(comments[0].code, "+new");
+        to_line(&mut app, 6);
+        let _ = app.on_key(key('c'));
+        assert!(matches!(
+            &app.popup,
+            Some(Popup::Comment { input, .. }) if input == "name this better"
+        ));
+        let _ = app.on_key(ctrl_u());
+        typed(&mut app, "rename to fresh");
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(texts(&app, a.id), ["rename to fresh"]);
+        to_line(&mut app, 6);
+        let _ = app.on_key(key('c'));
+        let _ = app.on_key(ctrl_u());
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert!(texts(&app, a.id).is_empty());
+    }
+
+    fn ctrl_u() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn a_header_line_takes_no_comment() {
+        let (mut app, _) = with_diff();
+        to_line(&mut app, 3);
+        assert!(app.on_key(key('c')).is_empty());
+        assert_eq!(app.popup, None);
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("comment on a changed or context line")
+        );
+    }
+
+    #[test]
+    fn capital_s_sends_the_comments_in_diff_order_and_clears_them() {
+        let (mut app, a) = with_diff();
+        comment(&mut app, 6, "second");
+        comment(&mut app, 4, "first");
+        let effects = app.on_key(key('S'));
+        let expected = crate::review::prompt(&app_comments_sorted());
+        assert_eq!(
+            effects,
+            vec![
+                Effect::Send(Request::Input {
+                    id: a.id,
+                    event: InputEvent::Paste(expected),
+                }),
+                Effect::Send(Request::Input {
+                    id: a.id,
+                    event: InputEvent::Key(ProtoKey::new(ProtoCode::Enter, Modifiers::NONE)),
+                }),
+            ]
+        );
+        assert!(texts(&app, a.id).is_empty());
+        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("sent 2 comments to api")
+        );
+    }
+
+    fn app_comments_sorted() -> Vec<crate::review::Comment> {
+        let at = |line, removed| crate::review::Location {
+            file: "src/a.rs".into(),
+            line,
+            removed,
+        };
+        vec![
+            crate::review::Comment {
+                location: at(10, false),
+                code: " keep".into(),
+                text: "first".into(),
+            },
+            crate::review::Comment {
+                location: at(11, false),
+                code: "+new".into(),
+                text: "second".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn n_and_capital_n_jump_between_commented_lines() {
+        let (mut app, _) = with_diff();
+        comment(&mut app, 4, "a");
+        comment(&mut app, 6, "b");
+        to_line(&mut app, 0);
+        let cursor = |app: &App| app.diff.as_ref().map(|d| d.cursor);
+        let _ = app.on_key(key('n'));
+        assert_eq!(cursor(&app), Some(4));
+        let _ = app.on_key(key('n'));
+        assert_eq!(cursor(&app), Some(6));
+        let _ = app.on_key(key('n'));
+        assert_eq!(cursor(&app), Some(4));
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert_eq!(cursor(&app), Some(6));
+    }
+
+    #[test]
+    fn comments_outlive_the_diff_view() {
+        let (mut app, a) = with_diff();
+        comment(&mut app, 5, "why?");
+        let _ = app.on_key(key('q'));
+        let _ = app.on_key(key('D'));
+        app.apply_diff(a.id, Ok(DIFF.into()));
+        assert_eq!(texts(&app, a.id), ["why?"]);
     }
 }

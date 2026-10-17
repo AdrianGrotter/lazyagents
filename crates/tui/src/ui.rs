@@ -27,6 +27,7 @@ const OUTPUT_HINT: &str = "j/k scroll · q close";
 const MENU_HINT: &str = "j/k move · enter run · esc cancel";
 const INPUT_HINT: &str = "enter ok · esc cancel";
 const REPLY_HINT: &str = "enter send · esc cancel";
+const COMMENT_HINT: &str = "enter save (empty removes) · esc cancel";
 const CHOICE_HINT: &str = "j/k move · enter pick · esc cancel";
 const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
 const PROJECT_FORM_HINT: &str = "tab field · enter add · esc cancel";
@@ -422,7 +423,7 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
         let title = format!(" diff · {} ", label(agent));
         frame.render_widget(block(title, true, &app.theme), areas.pane);
         frame.render_widget(
-            diff_text(view, &app.theme, areas.pane_inner.height),
+            diff_text(view, app, areas.pane_inner.height),
             areas.pane_inner,
         );
         return;
@@ -486,15 +487,23 @@ fn draw_selection(selection: Selection, area: Rect, buf: &mut Buffer) {
     }
 }
 
-fn diff_text<'a>(view: &'a DiffView, theme: &Theme, height: u16) -> Paragraph<'a> {
+/// Draws the diff from its scroll position, the cursor line highlighted while the view has
+/// focus and each review comment on a row of its own under its line.
+fn diff_text<'a>(view: &'a DiffView, app: &App, height: u16) -> Paragraph<'a> {
+    let theme = &app.theme;
     let Some(lines) = &view.lines else {
         return Paragraph::new("loading diff…").fg(theme.dim);
     };
     if lines.is_empty() {
         return Paragraph::new("no changes").fg(theme.dim);
     }
-    let visible = lines.iter().skip(view.scroll).take(usize::from(height));
-    let styled = visible.map(|line| {
+    let comments = app.comments.get(&view.agent).map_or(&[][..], Vec::as_slice);
+    let height = usize::from(height);
+    let mut rows = Vec::with_capacity(height);
+    for (index, line) in lines.iter().enumerate().skip(view.scroll) {
+        if rows.len() >= height {
+            break;
+        }
         let header = ["diff", "index", "---", "+++"]
             .iter()
             .any(|prefix| line.starts_with(prefix));
@@ -509,9 +518,20 @@ fn diff_text<'a>(view: &'a DiffView, theme: &Theme, height: u16) -> Paragraph<'a
         } else {
             Style::new()
         };
-        Line::styled(line.as_str(), style)
-    });
-    Paragraph::new(styled.collect::<Vec<_>>())
+        let style = if index == view.cursor && app.focus == Focus::Diff {
+            style.bg(theme.selected)
+        } else {
+            style
+        };
+        rows.push(Line::styled(line.as_str(), style));
+        if let Some(Some(location)) = view.locations.get(index) {
+            for comment in comments.iter().filter(|c| c.location == *location) {
+                rows.push(Line::from(format!("  ✎ {}", comment.text)).fg(theme.accent));
+            }
+        }
+    }
+    rows.truncate(height);
+    Paragraph::new(rows)
 }
 
 fn diff_hint(keymap: &Keymap) -> String {
@@ -523,7 +543,7 @@ fn diff_hint(keymap: &Keymap) -> String {
         }
     }
     format!(
-        "{} close · j/k scroll · ctrl-d/ctrl-u half page · pagedown/pageup page · g/G top/bottom",
+        "c comment · S send comments · n/N next/previous comment · {} close · j/k move · ctrl-d/ctrl-u half page · pagedown/pageup page · g/G top/bottom",
         close.join("/")
     )
 }
@@ -725,6 +745,22 @@ fn popup_content(popup: &Popup, app: &App) -> PopupContent {
             PopupContent::fitting(" Commands ", 40, command_menu_lines(app, *index))
         }
         Popup::CommandPrompt(run) => command_prompt_content(app, run),
+        Popup::Comment {
+            location,
+            code,
+            input,
+            ..
+        } => {
+            let removed = if location.removed { " (removed)" } else { "" };
+            let lines = vec![
+                Line::from(code.clone()).fg(theme.dim),
+                Line::from(input.clone()),
+                Line::default(),
+                Line::from(COMMENT_HINT).fg(theme.dim),
+            ];
+            let title = format!(" Comment on {}:{}{removed} ", location.file, location.line);
+            PopupContent::new(title, 60, lines).cursor_at(Some(1))
+        }
         Popup::Reply { agent, input } => {
             let name = app
                 .agents
@@ -2008,6 +2044,41 @@ mod tests {
         "diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n same";
 
     #[test]
+    fn diff_comments_show_under_their_line_and_the_cursor_is_highlighted() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        open_diff(&mut app, SAMPLE_DIFF);
+        for _ in 0..6 {
+            let _ = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let (text, _) = render(&app);
+        assert!(text.contains(" Comment on f:1 "), "{text}");
+        for c in "rename".chars() {
+            let _ = app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let (text, buffer) = render(&app);
+        let rows: Vec<&str> = text.lines().collect();
+        let new = rows
+            .iter()
+            .position(|r| r.contains("│+new"))
+            .expect("+new row");
+        assert!(rows[new + 1].contains("  ✎ rename"), "{text}");
+        assert!(rows[new + 2].contains(" same"), "{text}");
+        let layout = layout(Rect::new(0, 0, 100, 30), &app);
+        assert_eq!(
+            buffer[(layout.pane_inner.x, new as u16)].bg,
+            app.theme.selected
+        );
+        let status = text.lines().last().expect("status line");
+        assert!(
+            status.starts_with("c comment · S send comments"),
+            "{status}"
+        );
+    }
+
+    #[test]
     fn diff_view_colours_lines() {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
@@ -2035,7 +2106,9 @@ mod tests {
         let status = text.lines().last().expect("status line");
         assert!(status.contains("q/esc/D close"), "{status}");
         let _ = app.set_pane_size(73, 5);
-        let _ = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        for _ in 0..5 {
+            let _ = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
         let (text, _) = render(&app);
         let first = text
             .lines()

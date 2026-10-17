@@ -9,6 +9,7 @@ pub mod keymap;
 pub mod keys;
 pub mod known;
 pub mod notify;
+pub mod review;
 mod run;
 pub mod ui;
 
