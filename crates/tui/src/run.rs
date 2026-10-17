@@ -41,6 +41,7 @@ struct TerminalGuard {
     /// cursor, and printing to a vanished tty panics.
     terminal: ManuallyDrop<DefaultTerminal>,
     enhanced: bool,
+    reader: Option<std::sync::mpsc::Sender<Control>>,
 }
 
 impl TerminalGuard {
@@ -57,6 +58,7 @@ impl TerminalGuard {
         let guard = TerminalGuard {
             terminal: ManuallyDrop::new(terminal),
             enhanced,
+            reader: None,
         };
         execute!(
             stdout(),
@@ -71,6 +73,43 @@ impl TerminalGuard {
             )?;
         }
         Ok(guard)
+    }
+}
+
+impl TerminalGuard {
+    /// Hands the terminal to a command: the reader stops, and the terminal leaves raw
+    /// mode and the alternate screen.
+    fn suspend(&mut self) {
+        if let Some(reader) = &self.reader {
+            let (ack_tx, ack) = std::sync::mpsc::channel();
+            if reader.send(Control::Pause(ack_tx)).is_ok() {
+                let _ = ack.recv();
+            }
+        }
+        let _ = self.terminal.show_cursor();
+        restore_terminal(self.enhanced);
+    }
+
+    fn resume(&mut self) -> anyhow::Result<()> {
+        terminal::enable_raw_mode()?;
+        execute!(
+            stdout(),
+            terminal::EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture,
+            EnableFocusChange
+        )?;
+        if self.enhanced {
+            execute!(
+                stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )?;
+        }
+        if let Some(reader) = &self.reader {
+            let _ = reader.send(Control::Resume);
+        }
+        self.terminal.clear()?;
+        Ok(())
     }
 }
 
@@ -186,6 +225,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
     let mut hangup = signal(SignalKind::hangup())?;
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
+    let (finished_tx, mut finished) = mpsc::unbounded_channel::<Finished>();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut frame_counter: u64 = 0;
@@ -256,6 +296,12 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                 }
                 Some(Incoming::Closed) | None => anyhow::bail!("the daemon stopped"),
             },
+            done = finished.recv() => {
+                if let Some(done) = done {
+                    app.command_finished(&done.title, done.show, done.result);
+                }
+                Vec::new()
+            }
             _ = hangup.recv() => return Ok(()),
             _ = terminate.recv() => return Ok(()),
             _ = interrupt.recv() => return Ok(()),
@@ -273,6 +319,35 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                     let _ = requests.send(request);
                 }
                 Effect::Copy(text) => clipboard::copy(guard.terminal.backend_mut(), &text),
+                Effect::RunCommand {
+                    title,
+                    script,
+                    cwd,
+                    show,
+                } => {
+                    let finished = finished_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = run_captured(&script, &cwd);
+                        let _ = finished.send(Finished {
+                            title,
+                            show,
+                            result,
+                        });
+                    });
+                }
+                Effect::RunInTerminal { title, script, cwd } => {
+                    guard.suspend();
+                    let result =
+                        tokio::task::spawn_blocking(move || run_in_terminal(&script, &cwd))
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                    guard.resume()?;
+                    while let Ok(Some(())) =
+                        tokio::time::timeout(Duration::ZERO, interrupt.recv()).await
+                    {
+                    }
+                    app.terminal_command_finished(&title, result);
+                }
                 Effect::Notify(body) => {
                     if let Some(method) = notify_method {
                         notify::write(
@@ -305,6 +380,44 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
     }
 }
 
+/// A background command's result, back from its thread.
+struct Finished {
+    title: String,
+    show: bool,
+    result: Result<(i32, String), String>,
+}
+
+fn run_captured(script: &str, cwd: &Path) -> Result<(i32, String), String> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("exec 2>&1\n{script}"))
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok((
+        exit_code(output.status),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
+
+fn run_in_terminal(script: &str, cwd: &Path) -> Result<i32, String> {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(cwd)
+        .status()
+        .map(exit_code)
+        .map_err(|e| e.to_string())
+}
+
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
 /// Takes the merged list back, so projects another TUI remembered show up here too.
 fn update_known(app: &mut App, file: &Path, change: impl FnOnce(&mut Vec<KnownProject>) -> bool) {
     match known::update(file, change) {
@@ -314,10 +427,22 @@ fn update_known(app: &mut App, file: &Path, change: impl FnOnce(&mut Vec<KnownPr
 }
 
 fn open_terminal() -> anyhow::Result<(TerminalGuard, UnboundedReceiver<Term>)> {
-    let guard = TerminalGuard::enter()?;
+    let mut guard = TerminalGuard::enter()?;
     let (input_tx, input) = mpsc::unbounded_channel();
-    std::thread::spawn(move || read_terminal(&input_tx));
+    let (control_tx, control) = std::sync::mpsc::channel();
+    guard.reader = Some(control_tx);
+    std::thread::spawn(move || read_terminal(&input_tx, &control));
     Ok((guard, input))
+}
+
+const READ_SLICE: Duration = Duration::from_millis(50);
+
+/// Sent to the thread that reads the terminal.
+enum Control {
+    /// Stop reading, so a command run in the terminal gets every key; the sender hears
+    /// back once the reader has stopped.
+    Pause(std::sync::mpsc::Sender<()>),
+    Resume,
 }
 
 enum Answer {
@@ -391,8 +516,23 @@ fn send_all(requests: &UnboundedSender<Request>, effects: Vec<Effect>) {
 }
 
 /// Blocks on terminal input; a read error means the terminal is gone.
-fn read_terminal(tx: &UnboundedSender<Term>) {
+/// Polls rather than blocks on terminal input, so a pause takes effect within
+/// `READ_SLICE`.
+fn read_terminal(tx: &UnboundedSender<Term>, control: &std::sync::mpsc::Receiver<Control>) {
     loop {
+        if let Ok(Control::Pause(ack)) = control.try_recv() {
+            let _ = ack.send(());
+            while !matches!(control.recv(), Ok(Control::Resume) | Err(_)) {}
+            continue;
+        }
+        match event::poll(READ_SLICE) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(_) => {
+                let _ = tx.send(Term::Gone);
+                return;
+            }
+        }
         let term = match event::read() {
             Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => Term::Key(key),
             Ok(Event::Paste(text)) => Term::Paste(text),

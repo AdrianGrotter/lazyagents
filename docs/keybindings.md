@@ -30,6 +30,7 @@ Two input modes:
 | `D` | diff view of the agent's changes in the main pane |
 | `s` | scroll mode: browse the agent's terminal history (running or exited agents) |
 | `/` | filter the Agents box by name or branch (`s:<status>` by status): `enter` keeps the filter, `esc` clears it |
+| `c` | menu of the custom commands (`[[commands]]` in [configuration.md](configuration.md#commands)); `j`/`k` move, `enter` runs, `esc` closes. A command's own key runs it directly |
 | `J`/`K`, `pagedown`/`pageup` | scroll the selected agent's pane half a page down / up without leaving the sidebar |
 | `?` | help popup |
 | `q`, `ctrl-c` | quit TUI (agents keep running) |

@@ -263,11 +263,21 @@ daemon last told it.
 - **Runtime and terminal guard** (`run.rs`): refuses to start without an interactive
   terminal, connects (starting the daemon if needed; on a protocol mismatch it opens the
   restart prompt), then enters raw mode, the alternate screen, mouse capture, bracketed
-  paste and, where supported, keyboard enhancement. A blocking thread reads terminal
-  events; a read error means the terminal is gone and the TUI exits, even with SIGHUP and
+  paste, focus reporting and, where supported, keyboard enhancement. A thread reads terminal
+  events, polling in 50 ms slices so it can be paused; a read error means the terminal is
+  gone and the TUI exits, even with SIGHUP and
   SIGTERM ignored ([ADR 0005](decisions/0005-vendor-crossterm-dead-tty-fix.md)). SIGHUP,
   SIGTERM and SIGINT also exit. The guard and a panic hook restore every terminal mode on
   any exit path, ignoring errors from a vanished terminal.
+- **Custom commands** (`commands.rs`): `[[commands]]` from the config, expanded with
+  shell-quoted values and run with `sh -c` by the runtime ([ADR
+  0010](decisions/0010-custom-commands-run-by-the-tui.md)). A `terminal` command pauses the
+  reader thread, hands it the terminal out of raw mode and the alternate screen, and
+  restores both afterwards, dropping the SIGINT a ctrl-c also sent the TUI. `popup` and
+  `none` commands run on a blocking task and report back to `App::command_finished`;
+  `agent` commands become a `CreateAgent` request.
+- **Notifications** (`notify.rs`): bell, OSC 9 or OSC 777 for the `Notify` effect, and the
+  window title, saved on start and restored on exit.
 - **Clipboard** (`clipboard.rs`): the runtime handles `Copy` between draws, writing OSC 52
   to the terminal and flushing it, and piping the text to `pbcopy` or `wl-copy` when one
   is on `PATH`, with `LC_CTYPE=UTF-8` and no `LC_ALL`, so pbcopy never reads the text

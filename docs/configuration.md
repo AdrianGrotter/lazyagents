@@ -1,6 +1,6 @@
 # Configuration
 
-Status: implemented in crates/tui (config.rs, keymap.rs, notify.rs).
+Status: implemented in crates/tui (config.rs, keymap.rs, notify.rs, commands.rs).
 
 The TUI reads one TOML file at startup. Changes apply the next time the TUI starts.
 
@@ -96,6 +96,7 @@ SHIFT; with `ctrl` or `alt`, SHIFT counts, so `ctrl-Q` is not `ctrl-q`.
 | `filter` | `/` |
 | `peek_down` | `J`, `pagedown` |
 | `peek_up` | `K`, `pageup` |
+| `commands` | `c` |
 
 ### `[keys.pane]`
 
@@ -187,6 +188,90 @@ working = 208
 
 A colour is a name (`red`, `light-green`, `dark-gray`, ...; case-insensitive), `#rrggbb`,
 or a 0-255 palette index, as a number (`208`) or a string (`"12"`).
+
+## Commands
+
+`[[commands]]` adds commands of your own, in the style of lazygit's custom commands. A
+command with a `key` runs when that key is pressed in the sidebar; every command is listed in
+the menu that `c` opens, and the bound ones in the help popup.
+
+```toml
+[[commands]]
+key = "L"
+description = "lazygit in the agent's directory"
+command = "lazygit"
+
+[[commands]]
+key = "E"
+description = "open the editor"
+command = "${EDITOR:-vi} ."
+
+[[commands]]
+key = "P"
+description = "push and open a PR"
+command = "git push -u origin {{agent.branch}} && gh pr create --fill --head {{agent.branch}}"
+output = "popup"
+
+[[commands]]
+key = "W"
+description = "watch the tests"
+command = "cargo watch -x test"
+output = "agent"
+name = "tests"
+
+[[commands]]
+key = "C"
+description = "commit everything"
+command = "git add -A && git commit -m {{form.message}}"
+output = "none"
+
+[[commands.prompts]]
+type = "input"
+key = "message"
+title = "Commit message"
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `description` | required | the name shown in the menu, the help and messages |
+| `command` | required | a template run with `sh -c` |
+| `key` | none | a sidebar key; it wins over the action bound to the same key, with a warning |
+| `context` | `agent` | `agent` runs in the selected agent's directory (its worktree for a worktree agent) and needs a selected agent; `project` runs in the selected project's directory |
+| `output` | `terminal` | `terminal` suspends the TUI and runs the command in the real terminal until it exits; `agent` starts it as a new generic agent in the sidebar, named `<name>-<n>`; `popup` runs it in the background and shows its output (stdout and stderr) in a popup; `none` runs it in the background and says in the status bar how it ended |
+| `name` | `command` | the base of the agent's name for `output = "agent"` |
+| `prompts` | none | `[[commands.prompts]]` asked in order before the command runs |
+
+Template variables are written `{{name}}`. Each is replaced by its value **shell-quoted**,
+so a value with spaces, quotes or `$(...)` stays one literal word: write
+`cd {{agent.cwd}}`, not `cd "{{agent.cwd}}"`. An unknown variable stops the command with
+`<description>: unknown variable <name>`.
+
+| Variable | Value |
+|---|---|
+| `agent.name` | the agent's name |
+| `agent.title` | the name the Agents box shows: a Claude agent's session title, else its name |
+| `agent.cwd` | the agent's directory |
+| `agent.branch`, `agent.base` | a worktree agent's branch and base; empty for other agents |
+| `project.name`, `project.path` | the agent's project, or the selected project for `context = "project"` |
+| `form.<key>` | the answer to the prompt with that `key` |
+
+The `agent.*` variables exist only while an agent is selected. Prompts:
+
+| `type` | Settings | Asks |
+|---|---|---|
+| `input` | `key`, `title`, `initial` | a line of text; `enter` accepts, `esc` abandons the command |
+| `menu` | `key`, `title`, `options` (a non-empty list) | one of the options; `j`/`k` move, `enter` picks |
+| `confirm` | `title` | `y`/`enter` to go on, `n`/`esc` to abandon |
+
+While a command runs in the terminal, ctrl-c reaches the command and not lazyagents. A
+background command's stdin is empty. The output popup scrolls with `j`/`k`, `ctrl-d`/`ctrl-u`
+and `g`/`G`, and closes with `q`, `esc` or `enter`. A failed `terminal` command reports
+`<description> exited with <code>`; a failed `none` command reports its exit code and its
+last line of output.
+
+Warnings name the command by its position (`command #2`): a missing description or command,
+an unknown `context` or `output`, a key that does not parse, a prompt without a `key` or a
+menu without `options`, and unknown settings (which leave the command usable).
 
 ## Notifications
 

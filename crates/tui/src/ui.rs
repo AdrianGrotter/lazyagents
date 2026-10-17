@@ -11,9 +11,10 @@ use ratatui::widgets::{
 };
 
 use crate::app::{
-    AgentView, App, DiffView, Field, Focus, MIN_PANE, MessageKind, NewAgentForm, Popup, Preset,
-    ProjectField, ProjectForm, Selection,
+    AgentView, App, CommandRun, DiffView, Field, Focus, MIN_PANE, MessageKind, NewAgentForm, Popup,
+    Preset, ProjectField, ProjectForm, Selection,
 };
+use crate::commands::{CustomCommand, Prompt};
 use crate::config::Theme;
 use crate::keymap::{Action, Keymap};
 
@@ -22,6 +23,10 @@ pub const WORKING_ORANGE: Color = Color::Rgb(0xDB, 0x6D, 0x28);
 
 const FORM_HINT: &str = "tab field · ←/→ change · enter start · esc cancel";
 const CONFIRM_HINT: &str = "y/enter confirm · n/esc cancel";
+const OUTPUT_HINT: &str = "j/k scroll · q close";
+const MENU_HINT: &str = "j/k move · enter run · esc cancel";
+const INPUT_HINT: &str = "enter ok · esc cancel";
+const CHOICE_HINT: &str = "j/k move · enter pick · esc cancel";
 const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
 const PROJECT_FORM_HINT: &str = "tab field · enter add · esc cancel";
 const PICKER_ROWS: usize = 12;
@@ -53,8 +58,7 @@ const SIDEBAR_HELP: [(&[Action], &str); 19] = [
     (&[Action::ToggleFocus], "switch between Projects and Agents"),
     (&[Action::Open], "open the agent's pane"),
     (&[Action::NewAgent], "new agent"),
-    (&[Action::Stop], "stop agent"),
-    (&[Action::Restart], "restart agent"),
+    (&[Action::Stop, Action::Restart], "stop / restart agent"),
     (&[Action::Remove], "remove agent (in Projects: the project)"),
     (&[Action::Rename], "rename agent"),
     (&[Action::AddProject], "add project"),
@@ -64,6 +68,7 @@ const SIDEBAR_HELP: [(&[Action], &str); 19] = [
         "next agent needing input, then next done",
     ),
     (&[Action::Filter], "filter the agents (esc clears)"),
+    (&[Action::Commands], "custom commands"),
     (&[Action::Diff], "diff of the agent's changes"),
     (&[Action::Scroll], "scroll the agent's history"),
     (
@@ -634,7 +639,7 @@ pub fn draw_mismatch(
 }
 
 struct PopupContent {
-    title: &'static str,
+    title: String,
     width: u16,
     height: u16,
     lines: Vec<Line<'static>>,
@@ -643,9 +648,9 @@ struct PopupContent {
 }
 
 impl PopupContent {
-    fn new(title: &'static str, width: u16, lines: Vec<Line<'static>>) -> Self {
+    fn new(title: impl Into<String>, width: u16, lines: Vec<Line<'static>>) -> Self {
         PopupContent {
-            title,
+            title: title.into(),
             width,
             height: lines.len() as u16 + 2,
             lines,
@@ -653,7 +658,7 @@ impl PopupContent {
         }
     }
 
-    fn fitting(title: &'static str, min_width: u16, lines: Vec<Line<'static>>) -> Self {
+    fn fitting(title: impl Into<String>, min_width: u16, lines: Vec<Line<'static>>) -> Self {
         let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
         Self::new(title, width.max(min_width), lines)
     }
@@ -674,8 +679,29 @@ pub fn popup_area(app: &App, screen: Rect) -> Option<Rect> {
 fn popup_content(popup: &Popup, app: &App) -> PopupContent {
     let theme = &app.theme;
     match popup {
-        Popup::Help => PopupContent::fitting(" Help ", 0, help_lines(&app.keymap)),
+        Popup::Help => PopupContent::fitting(" Help ", 0, help_lines(&app.keymap, &app.commands)),
         Popup::Filter => PopupContent::new(" Filter ", 0, Vec::new()),
+        Popup::Commands { index } => {
+            PopupContent::fitting(" Commands ", 40, command_menu_lines(app, *index))
+        }
+        Popup::CommandPrompt(run) => command_prompt_content(app, run),
+        Popup::Output {
+            title,
+            lines,
+            scroll,
+        } => {
+            let lines: Vec<Line> = lines
+                .iter()
+                .skip(*scroll)
+                .map(|l| Line::from(l.clone()))
+                .collect();
+            let lines = if lines.is_empty() {
+                vec![Line::from("(no output)").fg(theme.dim)]
+            } else {
+                lines
+            };
+            PopupContent::fitting(format!(" {title} · {OUTPUT_HINT} "), 60, lines)
+        }
         Popup::NewAgent(form) => {
             let (lines, cursor) = form_lines(form, app);
             PopupContent::new(" New agent ", 56, lines).cursor_at(cursor)
@@ -733,7 +759,7 @@ fn field_line(label: &'static str, value: String, focused: bool, theme: &Theme) 
     Line::from(vec![label, Span::raw(value)])
 }
 
-fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
+fn help_lines(keymap: &Keymap, commands: &[CustomCommand]) -> Vec<Line<'static>> {
     let sidebar: Vec<(String, String)> = SIDEBAR_HELP
         .iter()
         .map(|(actions, text)| {
@@ -763,9 +789,14 @@ fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
             format!("send {} to the agent", keymap.prefix()),
         ),
     ]);
+    let custom: Vec<(String, String)> = commands
+        .iter()
+        .filter_map(|c| Some((c.key?.to_string(), c.description.clone())))
+        .collect();
     let width = sidebar
         .iter()
         .chain(&pane)
+        .chain(&custom)
         .map(|(key, _)| key.chars().count())
         .max()
         .unwrap_or(0);
@@ -779,10 +810,93 @@ fn help_lines(keymap: &Keymap) -> Vec<Line<'static>> {
     let mut lines = section("Sidebar", sidebar);
     lines.push(Line::default());
     lines.extend(section("Agent pane", pane));
+    if !custom.is_empty() {
+        lines.push(Line::default());
+        lines.extend(section("Commands", custom));
+    }
     lines
 }
 
 /// Shows at most `PICKER_ROWS` rows, scrolled so the highlighted one is visible.
+fn command_menu_lines(app: &App, index: usize) -> Vec<Line<'static>> {
+    if app.commands.is_empty() {
+        return vec![
+            Line::from("no commands yet: add [[commands]] to config.toml"),
+            Line::default(),
+            Line::from("esc close").fg(app.theme.dim),
+        ];
+    }
+    let keys: Vec<String> = app
+        .commands
+        .iter()
+        .map(|c| c.key.map(|k| k.to_string()).unwrap_or_default())
+        .collect();
+    let width = keys.iter().map(|k| k.chars().count()).max().unwrap_or(0);
+    let mut lines: Vec<Line> = app
+        .commands
+        .iter()
+        .zip(&keys)
+        .enumerate()
+        .map(|(row, (command, key))| {
+            let text = format!("{key:<width$}  {}", command.description);
+            if row == index {
+                Line::from(format!("▸ {text}")).style(selection_style(true, &app.theme))
+            } else {
+                Line::from(format!("  {text}"))
+            }
+        })
+        .collect();
+    lines.push(Line::default());
+    lines.push(Line::from(MENU_HINT).fg(app.theme.dim));
+    lines
+}
+
+fn command_prompt_content(app: &App, run: &CommandRun) -> PopupContent {
+    let Some(command) = app.commands.get(run.command) else {
+        return PopupContent::new(" Command ", 40, Vec::new());
+    };
+    let dim = app.theme.dim;
+    let titled = |title: &str| match title {
+        "" => format!(" {} ", command.description),
+        title => format!(" {title} "),
+    };
+    match command.prompts.get(run.step) {
+        Some(Prompt::Input { title, .. }) => {
+            let lines = vec![
+                Line::from(run.input.clone()),
+                Line::default(),
+                Line::from(INPUT_HINT).fg(dim),
+            ];
+            PopupContent::new(titled(title), 60, lines).cursor_at(Some(0))
+        }
+        Some(Prompt::Menu { title, options, .. }) => {
+            let mut lines: Vec<Line> = options
+                .iter()
+                .enumerate()
+                .map(|(row, option)| {
+                    if row == run.choice {
+                        Line::from(format!("▸ {option}")).style(selection_style(true, &app.theme))
+                    } else {
+                        Line::from(format!("  {option}"))
+                    }
+                })
+                .collect();
+            lines.push(Line::default());
+            lines.push(Line::from(CHOICE_HINT).fg(dim));
+            PopupContent::fitting(titled(title), 40, lines)
+        }
+        Some(Prompt::Confirm { title }) => {
+            let question = match title.as_str() {
+                "" => format!("Run {}?", command.description),
+                title => title.to_string(),
+            };
+            let lines = vec![Line::from(question), Line::from(CONFIRM_HINT).fg(dim)];
+            PopupContent::fitting(" Confirm ", 50, lines)
+        }
+        None => PopupContent::new(titled(""), 40, Vec::new()),
+    }
+}
+
 fn picker_lines(app: &App, index: usize) -> Vec<Line<'static>> {
     let candidates = app.project_candidates();
     let width = candidates
@@ -979,6 +1093,33 @@ mod tests {
         assert!(text.contains("● docs  idle"), "{text}");
         assert!(text.contains(" api · generic · needs input "), "{text}");
         assert!(text.contains("status: needs input"), "{text}");
+    }
+
+    #[test]
+    fn command_popups_render_their_content() {
+        let config = crate::config::parse(
+            "[[commands]]\nkey = \"L\"\ndescription = \"lazygit\"\ncommand = \"lazygit\"\n\
+             [[commands]]\ndescription = \"tests\"\ncommand = \"make test\"",
+        )
+        .expect("config");
+        let p = project("p");
+        let (mut app, _) = loaded_with(config, vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.popup = Some(Popup::Commands { index: 1 });
+        let (text, _) = render(&app);
+        assert!(text.contains("  L  lazygit"), "{text}");
+        assert!(text.contains("▸    tests"), "{text}");
+        app.popup = Some(Popup::Output {
+            title: "tests".into(),
+            lines: vec!["first".into(), "second".into()],
+            scroll: 1,
+        });
+        let (text, _) = render(&app);
+        assert!(text.contains(" tests · j/k scroll · q close "), "{text}");
+        assert!(text.contains("second") && !text.contains("first"), "{text}");
+        app.popup = Some(Popup::Help);
+        let (text, _) = render_at(&app, 100, 40);
+        assert!(text.contains("Commands"), "{text}");
+        assert!(text.contains("lazygit"), "{text}");
     }
 
     #[test]
@@ -1357,8 +1498,8 @@ mod tests {
             ("tab", "switch between Projects and Agents"),
             ("enter", "open the agent's pane"),
             ("n", "new agent"),
-            ("x", "stop agent"),
-            ("r", "restart agent"),
+            ("x, r", "stop / restart agent"),
+            ("c", "custom commands"),
             ("d", "remove agent"),
             ("R", "rename agent"),
             ("a", "add project"),

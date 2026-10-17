@@ -5,6 +5,7 @@ use protocol::AgentKind;
 use ratatui::style::Color;
 use toml::{Table, Value};
 
+use crate::commands::{self, CustomCommand};
 use crate::keymap::{Action, KeySpec, Keymap, Rebound, join};
 
 #[derive(Clone, Debug, Default)]
@@ -13,6 +14,7 @@ pub struct Config {
     pub presets: Vec<PresetDef>,
     pub theme: Theme,
     pub notifications: Notifications,
+    pub commands: Vec<CustomCommand>,
     pub warnings: Vec<String>,
 }
 
@@ -168,10 +170,23 @@ pub fn parse(text: &str) -> Result<Config, String> {
             ("keys" | "theme" | "notifications", _) => {
                 config.warn(format!("{name}: expected a table"))
             }
+            ("commands", Value::Array(items)) => {
+                for (index, item) in items.into_iter().enumerate() {
+                    match commands::parse(index + 1, item) {
+                        Ok((command, warnings)) => {
+                            config.warnings.extend(warnings);
+                            config.commands.push(command);
+                        }
+                        Err(warnings) => config.warnings.extend(warnings),
+                    }
+                }
+            }
             ("presets", _) => config.warn("presets: expected [[presets]] tables"),
+            ("commands", _) => config.warn("commands: expected [[commands]] tables"),
             (_, value) => config.warn(unknown(&name, &value)),
         }
     }
+    config.warn_command_keys();
     Ok(config)
 }
 
@@ -192,6 +207,13 @@ fn unknown(path: &str, value: &Value) -> String {
     } else {
         format!("unknown setting {path}")
     }
+}
+
+fn sidebar_action_name(action: Action) -> String {
+    toml::Value::try_from(action)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 fn pane_action_name(action: Action) -> String {
@@ -242,13 +264,7 @@ impl Config {
             }
         }
         for rebound in self.keymap.rebind_sidebar(bindings) {
-            let name = |action: Action| {
-                toml::Value::try_from(action)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_string))
-                    .unwrap_or_default()
-            };
-            self.warn_rebound("keys.sidebar", rebound, name);
+            self.warn_rebound("keys.sidebar", rebound, sidebar_action_name);
         }
     }
 
@@ -306,6 +322,23 @@ impl Config {
                 self.warn_rebound("keys.pane", rebound, pane_action_name);
             }
         }
+    }
+
+    fn warn_command_keys(&mut self) {
+        let taken: Vec<String> = self
+            .commands
+            .iter()
+            .filter_map(|command| {
+                let key = command.key?;
+                let action = self.keymap.sidebar_action(key)?;
+                Some(format!(
+                    "keys.sidebar: {key} is bound to both {} and command \"{}\"; the command wins",
+                    sidebar_action_name(action),
+                    command.description
+                ))
+            })
+            .collect();
+        self.warnings.extend(taken);
     }
 
     fn warn_rebound(&mut self, scope: &str, rebound: Rebound, name: impl Fn(Action) -> String) {
@@ -785,6 +818,40 @@ mod tests {
             .map(|preset| preset.label(&config.presets))
             .collect();
         assert_eq!(labels, ["claude", "shell", "custom", "codex", "opus"]);
+    }
+
+    #[test]
+    fn commands_are_read_in_order_and_their_keys_win() {
+        let config = load_text(
+            r#"
+            [[commands]]
+            key = "L"
+            description = "lazygit"
+            command = "lazygit"
+
+            [[commands]]
+            key = "s"
+            description = "status"
+            command = "git status"
+            output = "popup"
+
+            [[commands]]
+            description = "broken"
+            "#,
+        );
+        let names: Vec<&str> = config
+            .commands
+            .iter()
+            .map(|c| c.description.as_str())
+            .collect();
+        assert_eq!(names, ["lazygit", "status"]);
+        assert_eq!(
+            config.warnings,
+            [
+                "command #3: needs a description and a command",
+                "keys.sidebar: s is bound to both scroll and command \"status\"; the command wins",
+            ]
+        );
     }
 
     #[test]

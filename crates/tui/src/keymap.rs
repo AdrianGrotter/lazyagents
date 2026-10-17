@@ -27,6 +27,7 @@ pub enum Action {
     Filter,
     PeekDown,
     PeekUp,
+    Commands,
     PaneNext,
     PanePrevious,
     PaneLeave,
@@ -263,6 +264,7 @@ impl Keymap {
                 ("D", Diff),
                 ("s", Scroll),
                 ("/", Filter),
+                ("c", Commands),
                 ("J", PeekDown),
                 ("pagedown", PeekDown),
                 ("K", PeekUp),
@@ -283,6 +285,13 @@ impl Keymap {
 
     pub fn sidebar(&self, key: &KeyEvent) -> Option<Action> {
         lookup(&self.sidebar, key)
+    }
+
+    pub fn sidebar_action(&self, key: KeySpec) -> Option<Action> {
+        self.sidebar
+            .iter()
+            .find(|(spec, _)| *spec == key)
+            .map(|(_, action)| *action)
     }
 
     pub fn prefix(&self) -> KeySpec {
