@@ -20,6 +20,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::MissedTickBehavior;
 
 use crate::app::{App, Effect, MouseInput, MouseKind};
+use crate::approved;
 use crate::clipboard;
 use crate::config;
 use crate::connection::{self, Incoming};
@@ -240,6 +241,11 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
     let mut shown_title = String::new();
     let mut app = App::new(cwd, shell, home, config);
     app.gh = on_path("gh");
+    let approved_file = paths.approved_setups();
+    match approved::load(&approved_file) {
+        Ok(list) => app.approved_setups = list,
+        Err(error) => app.fail(format!("{error:#}")),
+    }
     let known_file = paths.known_projects();
     match known::load(&known_file) {
         Ok(list) => app.known = list,
@@ -359,6 +365,14 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                 }
                 Effect::RememberProjects(added) => {
                     update_known(&mut app, &known_file, |list| known::remember(list, &added))
+                }
+                Effect::ApproveSetup { project, script } => {
+                    match approved::update(&approved_file, |list| {
+                        approved::approve(list, &project, &script)
+                    }) {
+                        Ok(list) => app.approved_setups = list,
+                        Err(error) => app.fail(format!("{error:#}")),
+                    }
                 }
                 Effect::ForgetProject(path) => {
                     update_known(&mut app, &known_file, |list| known::forget(list, &path))

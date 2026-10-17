@@ -41,11 +41,15 @@ is rejected.
 - `RemoveProject { id }`
 - `ListAgents`
 - `CreateAgent(CreateAgent)`: `project`, `name`, `kind`, `command`, `cols`, `rows`,
-  `worktree: Option<WorktreeRequest>` and `prompt: Option<String>`; a
+  `worktree: Option<WorktreeRequest>`, `prompt: Option<String>` and
+  `setup: Option<String>`; a
   `WorktreeRequest { base: Option<String> }` makes the daemon create a git worktree for
   the agent first. A non-blank `prompt` goes to the agent on its first start only: a
   Claude agent gets `-- <prompt>` after its options, a generic agent has `<prompt>\r`
-  written to its terminal once it first prints
+  written to its terminal once it first prints. A non-blank `setup` is a shell script
+  run on the first start only, in the agent's terminal before its command, as `sh -c
+  '<setup>; … exec "$@"' lazyagents-setup <command>`, inside direnv when the worktree has
+  an `.envrc`
 - `KillAgent { id }`
 - `RestartAgent { id, cols, rows }`
 - `RemoveAgent { id, remove_worktree, force, delete_branch }`: `remove_worktree` also

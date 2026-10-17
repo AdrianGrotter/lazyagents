@@ -257,6 +257,8 @@ struct Agent {
     /// The create request's prompt until it is delivered: a Claude agent gets it as an
     /// argument when it starts, a generic one has it typed once it first prints.
     pending_prompt: Option<String>,
+    /// The create request's setup script until the first start runs it.
+    pending_setup: Option<String>,
     /// What the agent waits for while it needs input; see `AgentInfo::waiting_for`.
     waiting_for: Option<String>,
     usage: Option<Usage>,
@@ -277,6 +279,7 @@ impl Agent {
             tracked: Vec::new(),
             group: None,
             pending_prompt: None,
+            pending_setup: None,
             waiting_for: None,
             usage: None,
         }
@@ -683,6 +686,17 @@ impl Daemon {
             Some(request) => Some(self.add_worktree(&project, &create.name, request)?),
             None => None,
         };
+        if let Some(worktree) = &worktree {
+            match git::copy_worktree_includes(&project.path, &worktree.path) {
+                Ok(copied) if !copied.is_empty() => {
+                    tracing::info!(files = ?copied, "copied .worktreeinclude files")
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "copying .worktreeinclude files failed")
+                }
+            }
+        }
         if let (Some(direnv), Some(worktree)) = (self.direnv.as_deref(), worktree.as_ref()) {
             match direnv::auto_allow(direnv, &project.path, &worktree.path, &[]) {
                 Ok(true) => {
@@ -709,6 +723,7 @@ impl Daemon {
         let id = record.id;
         let mut agent = Agent::new(record);
         agent.pending_prompt = create.prompt.filter(|p| !p.trim().is_empty());
+        agent.pending_setup = create.setup.filter(|s| !s.trim().is_empty());
         self.agents.insert(id, agent);
         let started = self.start(id, Launch::Fresh, PaneSize::new(create.cols, create.rows));
         self.persist();
@@ -782,6 +797,7 @@ impl Daemon {
                 return Err(message);
             }
         }
+        let setup = agent.pending_setup.take();
         let claude_prompt = match agent.record.kind {
             AgentKind::Claude => agent.pending_prompt.take(),
             AgentKind::Generic => None,
@@ -791,6 +807,7 @@ impl Daemon {
             project_root: &project_root,
             direnv: self.direnv.as_deref(),
             prompt: claude_prompt.as_deref(),
+            setup: setup.as_deref(),
         };
         let spec = spawn_spec(
             &agent.record,

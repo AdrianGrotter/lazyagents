@@ -203,6 +203,9 @@ pub struct CreateAgent {
     pub worktree: Option<WorktreeRequest>,
     /// Sent to the agent on its first start only.
     pub prompt: Option<String>,
+    /// A worktree setup script the user approved, run in the agent's terminal before the agent
+    /// on its first start only.
+    pub setup: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

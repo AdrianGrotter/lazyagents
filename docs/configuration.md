@@ -279,6 +279,32 @@ Warnings name the command by its position (`command #2`): a missing description 
 an unknown `context` or `output`, a key that does not parse, a prompt without a `key` or a
 menu without `options`, and unknown settings (which leave the command usable).
 
+## Project config
+
+A project can carry its own `.lazyagents.toml` and `.worktreeinclude` at its root, shared
+with everyone who clones it.
+
+```toml
+# .lazyagents.toml
+[worktree]
+setup = "npm install"
+```
+
+`setup` runs in each new worktree agent's terminal, in the worktree and inside its direnv
+environment, before the agent starts, on its first start only. A failing setup prints
+`lazyagents: setup exited with <code>` and the agent starts anyway. Because the script comes
+from the repository, creating a worktree agent shows it and asks first: `y` runs it and
+remembers the approval for that project, `s` creates the agent without it this time, `n` or
+`esc` creates nothing. An approval holds for that exact text, so an edited script asks
+again (ADR 0014). Approvals are kept in `approved-setups.toml` in the state directory. A
+`.lazyagents.toml` that cannot be parsed, or a `setup` that is not a string, keeps the new
+agent form open with the error. Agents get `LAZYAGENTS_PROJECT_PATH`, the project's
+directory, in their environment, which a setup can use to copy from the main checkout.
+
+`.worktreeinclude` lists, in gitignore syntax, gitignored files to copy from the project
+into each new worktree, such as `.env`; it is the file Claude Code and the Codex app read for
+their own worktrees. Files already in the worktree are left alone, and nothing is run.
+
 ## Notifications
 
 ```toml

@@ -10,11 +10,13 @@ use protocol::{
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Position, Rect};
 
+use crate::approved;
 use crate::commands::{self, Context, CustomCommand, Output, Prompt};
 use crate::config::{Config, PresetDef, Theme};
 use crate::keymap::{Action, Keymap};
 use crate::keys;
 use crate::known::{self, KnownProject};
+use crate::project_config;
 use crate::review::{self, Comment, Location};
 use crate::ui::Areas;
 
@@ -268,6 +270,12 @@ pub enum Popup {
         index: usize,
     },
     CommandPrompt(CommandRun),
+    /// Asking to run `project`'s worktree setup `script` for the agent `create` describes.
+    ApproveSetup {
+        create: Box<CreateAgent>,
+        project: PathBuf,
+        script: String,
+    },
     /// Row `index` is `App::finish_choices()[index]` for `agent`.
     Finish {
         agent: AgentId,
@@ -299,6 +307,11 @@ pub enum Effect {
     Copy(String),
     /// Tells the outer terminal, with a bell or a desktop notification.
     Notify(String),
+    /// Remembers that the user approved `project`'s worktree setup `script`.
+    ApproveSetup {
+        project: PathBuf,
+        script: String,
+    },
     /// Runs `script` with `sh -c` in the real terminal while the TUI is suspended.
     RunInTerminal {
         title: String,
@@ -457,6 +470,7 @@ pub struct App {
     pub screen_mode: ScreenMode,
     /// Whether `gh` is on `PATH`, which the pull request choice of the finish menu needs.
     pub gh: bool,
+    pub approved_setups: Vec<crate::approved::Approval>,
     /// What the help popup is filtered by while it is open.
     pub help_filter: String,
     /// Review comments per agent, kept until they are sent.
@@ -509,6 +523,7 @@ impl App {
             help_filter: String::new(),
             screen_mode: ScreenMode::Normal,
             gh: false,
+            approved_setups: Vec::new(),
             theme: config.theme,
             cwd,
             home,
@@ -1624,6 +1639,7 @@ impl App {
                 | Popup::Confirm { .. }
                 | Popup::Commands { .. }
                 | Popup::Finish { .. }
+                | Popup::ApproveSetup { .. }
                 | Popup::Output { .. },
             )
             | None => {}
@@ -2151,6 +2167,11 @@ impl App {
             }
             Popup::Commands { index } => self.on_commands_key(index, key),
             Popup::Finish { agent, index } => self.on_finish_key(agent, index, key),
+            Popup::ApproveSetup {
+                create,
+                project,
+                script,
+            } => self.on_approve_setup_key(create, project, script, key),
             Popup::Comment {
                 agent,
                 location,
@@ -2429,12 +2450,7 @@ impl App {
         let prompt = form.prompt.trim();
         let prompt = (!prompt.is_empty()).then(|| prompt.to_string());
         let (cols, rows) = self.pane_size.unwrap_or(DEFAULT_SIZE);
-        self.pending_select = Some(PendingCreate {
-            project,
-            name: name.clone(),
-            interactions: self.interactions,
-        });
-        vec![Effect::Send(Request::CreateAgent(CreateAgent {
+        let mut create = CreateAgent {
             project,
             name,
             kind,
@@ -2443,7 +2459,76 @@ impl App {
             rows,
             worktree,
             prompt,
-        }))]
+            setup: None,
+        };
+        let project_path = self
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .map(|p| p.path.clone());
+        if let (Some(_), Some(path)) = (&create.worktree, project_path) {
+            match project_config::worktree_setup(&path) {
+                Err(error) => {
+                    self.fail(error);
+                    self.popup = Some(Popup::NewAgent(form));
+                    return Vec::new();
+                }
+                Ok(Some(script))
+                    if approved::is_approved(&self.approved_setups, &path, &script) =>
+                {
+                    create.setup = Some(script);
+                }
+                Ok(Some(script)) => {
+                    self.popup = Some(Popup::ApproveSetup {
+                        create: Box::new(create),
+                        project: path,
+                        script,
+                    });
+                    return Vec::new();
+                }
+                Ok(None) => {}
+            }
+        }
+        self.send_create(create)
+    }
+
+    fn send_create(&mut self, create: CreateAgent) -> Vec<Effect> {
+        self.pending_select = Some(PendingCreate {
+            project: create.project,
+            name: create.name.clone(),
+            interactions: self.interactions,
+        });
+        vec![Effect::Send(Request::CreateAgent(create))]
+    }
+
+    /// `y` runs the script and remembers it for the project, `s` creates the agent without
+    /// it, `n` creates nothing.
+    fn on_approve_setup_key(
+        &mut self,
+        mut create: Box<CreateAgent>,
+        project: PathBuf,
+        script: String,
+        key: KeyEvent,
+    ) -> Vec<Effect> {
+        match key.code {
+            KeyCode::Char('y') => {
+                approved::approve(&mut self.approved_setups, &project, &script);
+                create.setup = Some(script.clone());
+                let mut effects = vec![Effect::ApproveSetup { project, script }];
+                effects.extend(self.send_create(*create));
+                effects
+            }
+            KeyCode::Char('s') => self.send_create(*create),
+            KeyCode::Char('n') | KeyCode::Esc => Vec::new(),
+            _ => {
+                self.popup = Some(Popup::ApproveSetup {
+                    create,
+                    project,
+                    script,
+                });
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -2630,6 +2715,7 @@ impl App {
                     rows,
                     worktree: None,
                     prompt: None,
+                    setup: None,
                 }))]
             }
         }
@@ -6065,6 +6151,7 @@ mod command_tests {
                 rows: create.rows,
                 worktree: None,
                 prompt: None,
+                setup: None,
             }
         );
     }
@@ -6709,5 +6796,113 @@ mod finish_tests {
             app.current_message(Instant::now()),
             Some("merged lazyagents/api into main")
         );
+    }
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn code(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// A loaded app whose one project is a real directory holding `.lazyagents.toml`.
+    fn with_setup(script: &str) -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("project");
+        std::fs::write(
+            dir.path().join(".lazyagents.toml"),
+            format!("[worktree]\nsetup = {script:?}\n"),
+        )
+        .expect("config");
+        let project = Project {
+            id: ProjectId::random(),
+            name: "p".into(),
+            path: dir.path().to_path_buf(),
+        };
+        let (app, _) = super::tests::loaded(vec![project], Vec::new());
+        (app, dir)
+    }
+
+    /// Opens the new agent form, turns on Worktree and submits.
+    fn submit_worktree_agent(app: &mut App) -> Vec<Effect> {
+        let _ = app.on_key(key('n'));
+        let _ = app.on_key(code(KeyCode::Tab));
+        let _ = app.on_key(code(KeyCode::Tab));
+        let _ = app.on_key(key(' '));
+        app.on_key(code(KeyCode::Enter))
+    }
+
+    fn created_setup(effects: &[Effect]) -> Option<Option<String>> {
+        effects.iter().find_map(|effect| match effect {
+            Effect::Send(Request::CreateAgent(create)) => Some(create.setup.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn an_unapproved_setup_script_is_shown_before_it_runs() {
+        let (mut app, dir) = with_setup("npm install");
+        assert!(submit_worktree_agent(&mut app).is_empty());
+        assert!(matches!(
+            &app.popup,
+            Some(Popup::ApproveSetup { script, .. }) if script == "npm install"
+        ));
+        let effects = app.on_key(key('y'));
+        assert!(effects.contains(&Effect::ApproveSetup {
+            project: dir.path().to_path_buf(),
+            script: "npm install".into(),
+        }));
+        assert_eq!(created_setup(&effects), Some(Some("npm install".into())));
+    }
+
+    #[test]
+    fn an_approved_script_runs_without_asking_until_it_changes() {
+        let (mut app, dir) = with_setup("npm install");
+        app.approved_setups = vec![crate::approved::Approval {
+            project: dir.path().to_path_buf(),
+            script: "npm install".into(),
+        }];
+        let effects = submit_worktree_agent(&mut app);
+        assert_eq!(app.popup, None);
+        assert_eq!(created_setup(&effects), Some(Some("npm install".into())));
+
+        std::fs::write(
+            dir.path().join(".lazyagents.toml"),
+            "[worktree]\nsetup = \"npm install && ./postinstall.sh\"\n",
+        )
+        .expect("edit");
+        assert!(submit_worktree_agent(&mut app).is_empty());
+        assert!(matches!(app.popup, Some(Popup::ApproveSetup { .. })));
+    }
+
+    #[test]
+    fn s_creates_without_the_setup_and_n_creates_nothing() {
+        let (mut app, _dir) = with_setup("npm install");
+        let _ = submit_worktree_agent(&mut app);
+        let effects = app.on_key(key('s'));
+        assert_eq!(created_setup(&effects), Some(None));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::ApproveSetup { .. }))
+        );
+
+        let (mut app, _dir) = with_setup("npm install");
+        let _ = submit_worktree_agent(&mut app);
+        assert!(app.on_key(key('n')).is_empty());
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn a_plain_agent_never_runs_the_setup() {
+        let (mut app, _dir) = with_setup("npm install");
+        let _ = app.on_key(key('n'));
+        let effects = app.on_key(code(KeyCode::Enter));
+        assert_eq!(created_setup(&effects), Some(None));
     }
 }

@@ -264,6 +264,7 @@ async fn create(
         rows: 24,
         worktree: None,
         prompt: None,
+        setup: None,
     });
     match conn.request(request).await {
         Ok(Response::Agent(info)) => Ok(info),
@@ -1027,6 +1028,7 @@ async fn create_with_prompt(
         rows: 24,
         worktree: None,
         prompt: Some(prompt.into()),
+        setup: None,
     });
     match conn.request(request).await {
         Ok(Response::Agent(info)) => info,
@@ -2041,6 +2043,7 @@ async fn create_in_worktree(
         rows: 24,
         worktree: Some(WorktreeRequest { base: None }),
         prompt: None,
+        setup: None,
     });
     match conn.request(request).await {
         Ok(Response::Agent(info)) => Ok(info),
@@ -2699,6 +2702,50 @@ async fn only_a_worktree_agent_can_be_merged() {
         .await
         .expect_err("no worktree");
     assert!(err.contains("has no worktree branch to merge"), "{err}");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_setup_script_runs_once_in_the_new_worktree_before_the_agent() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _repo) = add_repo_project(&mut conn).await;
+    let request = Request::CreateAgent(CreateAgent {
+        project: project.id,
+        name: "setup".into(),
+        kind: AgentKind::Generic,
+        command: vec![
+            "sh".into(),
+            "-c".into(),
+            "echo agent-sees:$(cat ready.txt); exec sleep 30".into(),
+        ],
+        cols: 120,
+        rows: 24,
+        worktree: Some(WorktreeRequest { base: None }),
+        prompt: None,
+        setup: Some("echo $LAZYAGENTS_PROJECT_PATH > /dev/null; echo prepared > ready.txt".into()),
+    });
+    let Ok(Response::Agent(agent)) = conn.request(request).await else {
+        panic!("create failed")
+    };
+    conn.request(Request::Subscribe { id: agent.id })
+        .await
+        .expect("subscribe");
+    conn.wait_text(agent.id, "agent-sees:prepared").await;
+    let worktree = agent.worktree.clone().expect("worktree").path;
+    std::fs::remove_file(worktree.join("ready.txt")).expect("remove marker");
+    conn.request(Request::RestartAgent {
+        id: agent.id,
+        cols: 120,
+        rows: 24,
+    })
+    .await
+    .expect("restart");
+    conn.wait_text(agent.id, "agent-sees:").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!worktree.join("ready.txt").exists(), "setup ran again");
     conn.request(Request::KillAgent { id: agent.id })
         .await
         .expect("kill");

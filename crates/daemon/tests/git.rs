@@ -4,8 +4,8 @@ use std::path::Path;
 
 use common::{git, repo};
 use daemon::git::{
-    add_worktree, check_branch, current_branch, delete_merged_branch, diff, dirty_files, merge,
-    remove_worktree, stat,
+    add_worktree, check_branch, copy_worktree_includes, current_branch, delete_merged_branch, diff,
+    dirty_files, merge, remove_worktree, stat,
 };
 use protocol::{DiffScope, GitStat};
 
@@ -268,4 +268,53 @@ fn only_a_merged_branch_is_deleted() {
     git(repo.path(), &["merge", "-q", "--ff-only", "lazyagents/wt"]);
     delete_merged_branch(repo.path(), "lazyagents/wt", "main").expect("merged");
     assert_eq!(git(repo.path(), &["branch", "--list", "lazyagents/wt"]), "");
+}
+
+#[test]
+fn worktree_include_copies_matching_ignored_files_only() {
+    let repo = repo();
+    std::fs::write(
+        repo.path().join(".gitignore"),
+        ".env\nconfig/local.toml\nbuild/\n",
+    )
+    .expect("ignore");
+    std::fs::write(
+        repo.path().join(".worktreeinclude"),
+        ".env\nconfig/local.toml\n",
+    )
+    .expect("include");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-q", "-m", "ignore"]);
+    std::fs::write(repo.path().join(".env"), "SECRET=1\n").expect("env");
+    std::fs::create_dir_all(repo.path().join("config")).expect("config dir");
+    std::fs::write(repo.path().join("config/local.toml"), "port = 1\n").expect("local");
+    std::fs::create_dir_all(repo.path().join("build")).expect("build dir");
+    std::fs::write(repo.path().join("build/out.o"), "binary").expect("build");
+    std::fs::write(repo.path().join("notes.txt"), "untracked, not ignored\n").expect("notes");
+
+    let root = tempfile::tempdir().expect("worktree root");
+    let wt = root.path().join("wt");
+    add_worktree(repo.path(), &wt, "lazyagents/wt", "main").expect("add");
+    let copied = copy_worktree_includes(repo.path(), &wt).expect("copy");
+    assert_eq!(copied, [".env", "config/local.toml"]);
+    assert_eq!(
+        std::fs::read_to_string(wt.join(".env")).expect("env"),
+        "SECRET=1\n"
+    );
+    assert!(wt.join("config/local.toml").exists());
+    assert!(!wt.join("build/out.o").exists());
+    assert!(!wt.join("notes.txt").exists());
+}
+
+#[test]
+fn without_a_worktree_include_nothing_is_copied() {
+    let repo = repo();
+    let root = tempfile::tempdir().expect("worktree root");
+    let wt = root.path().join("wt");
+    add_worktree(repo.path(), &wt, "lazyagents/wt", "main").expect("add");
+    assert!(
+        copy_worktree_includes(repo.path(), &wt)
+            .expect("copy")
+            .is_empty()
+    );
 }

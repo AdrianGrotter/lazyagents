@@ -25,6 +25,8 @@ pub struct SpawnContext<'a> {
     pub project_root: &'a Path,
     pub direnv: Option<&'a Path>,
     pub prompt: Option<&'a str>,
+    /// A project's worktree setup script, run in the agent's terminal before the agent.
+    pub setup: Option<&'a str>,
 }
 
 pub fn spawn_spec(record: &AgentRecord, launch: Launch, ctx: &SpawnContext<'_>) -> SpawnSpec {
@@ -49,6 +51,19 @@ pub fn spawn_spec(record: &AgentRecord, launch: Launch, ctx: &SpawnContext<'_>) 
             argv.push(prompt.to_string());
         }
     }
+    if let Some(setup) = ctx.setup {
+        let script = format!(
+            "{setup}\nstatus=$?\n[ \"$status\" -eq 0 ] || printf '\\nlazyagents: setup exited with %s\\n\\n' \"$status\"\nexec \"$@\""
+        );
+        let mut wrapped = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            script,
+            "lazyagents-setup".to_string(),
+        ];
+        wrapped.append(&mut argv);
+        argv = wrapped;
+    }
 
     let (program, args) = match ctx.direnv.zip(find_envrc(&record.cwd, ctx.project_root)) {
         Some((direnv, dir)) => {
@@ -67,6 +82,10 @@ pub fn spawn_spec(record: &AgentRecord, launch: Launch, ctx: &SpawnContext<'_>) 
         (
             "LAZYAGENTS_SOCKET".to_string(),
             ctx.paths.socket().display().to_string(),
+        ),
+        (
+            "LAZYAGENTS_PROJECT_PATH".to_string(),
+            ctx.project_root.display().to_string(),
         ),
     ]);
     SpawnSpec {
@@ -196,7 +215,51 @@ mod tests {
             project_root: root,
             direnv,
             prompt: None,
+            setup: None,
         }
+    }
+
+    #[test]
+    fn a_setup_script_runs_before_the_agent_in_its_terminal() {
+        let paths = StatePaths::new("/s");
+        let rec = record(
+            AgentKind::Generic,
+            &["codex", "--full-auto"],
+            Path::new("/p"),
+        );
+        let ctx = SpawnContext {
+            setup: Some("npm install"),
+            ..ctx(&paths, Path::new("/p"), None)
+        };
+        let spec = spawn_spec(&rec, Launch::Fresh, &ctx);
+        assert_eq!(spec.program, "sh");
+        assert_eq!(spec.args[0], "-c");
+        assert!(
+            spec.args[1].starts_with("npm install\n"),
+            "{}",
+            spec.args[1]
+        );
+        assert!(spec.args[1].ends_with("exec \"$@\""), "{}", spec.args[1]);
+        assert_eq!(spec.args[2..], ["lazyagents-setup", "codex", "--full-auto"]);
+        assert_eq!(spec.env["LAZYAGENTS_PROJECT_PATH"], "/p");
+    }
+
+    #[test]
+    fn a_setup_script_runs_inside_direnv_too() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::write(root.path().join(".envrc"), "use flake").expect("envrc");
+        let paths = StatePaths::new("/s");
+        let rec = record(AgentKind::Generic, &["codex"], root.path());
+        let ctx = SpawnContext {
+            setup: Some("make deps"),
+            ..ctx(&paths, root.path(), Some(Path::new("/bin/direnv")))
+        };
+        let spec = spawn_spec(&rec, Launch::Fresh, &ctx);
+        assert_eq!(spec.program, "/bin/direnv");
+        assert_eq!(
+            spec.args[..3],
+            ["exec", root.path().to_str().expect("utf8"), "sh"]
+        );
     }
 
     #[test]

@@ -76,6 +76,11 @@ impl StatePaths {
         self.dir.join("known-projects.toml")
     }
 
+    /// The worktree setup scripts the user approved; written by the TUI, never by the daemon.
+    pub fn approved_setups(&self) -> PathBuf {
+        self.dir.join("approved-setups.toml")
+    }
+
     pub fn log_file(&self) -> PathBuf {
         self.dir.join("daemon.log")
     }

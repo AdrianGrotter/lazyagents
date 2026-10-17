@@ -28,6 +28,7 @@ const MENU_HINT: &str = "j/k move · enter run · esc cancel";
 const INPUT_HINT: &str = "enter ok · esc cancel";
 const REPLY_HINT: &str = "enter send · esc cancel";
 const COMMENT_HINT: &str = "enter save (empty removes) · esc cancel";
+const SETUP_HINT: &str = "y run it and remember · s skip it this time · n cancel";
 const CHOICE_HINT: &str = "j/k move · enter pick · esc cancel";
 const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
 const PROJECT_FORM_HINT: &str = "tab field · enter add · esc cancel";
@@ -799,6 +800,26 @@ fn popup_content(popup: &Popup, app: &App) -> PopupContent {
             PopupContent::fitting(title, 0, help_lines(app))
         }
         Popup::Filter => PopupContent::new(" Filter ", 0, Vec::new()),
+        Popup::ApproveSetup {
+            project, script, ..
+        } => {
+            let mut lines = vec![
+                Line::from(format!(
+                    "{}/{} runs this in every new worktree:",
+                    app.display_path(project),
+                    crate::project_config::FILE
+                )),
+                Line::default(),
+            ];
+            lines.extend(
+                script
+                    .lines()
+                    .map(|l| Line::from(format!("  {l}")).fg(theme.accent)),
+            );
+            lines.push(Line::default());
+            lines.push(Line::from(SETUP_HINT).fg(theme.dim));
+            PopupContent::fitting(" Run setup script? ", 50, lines)
+        }
         Popup::Finish { index, .. } => {
             let mut lines: Vec<Line> = app
                 .finish_choices()

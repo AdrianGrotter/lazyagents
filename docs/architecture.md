@@ -182,6 +182,12 @@ its worktree, so it can be restarted. The agent's cwd is the worktree, and
 `AgentInfo.worktree` holds its path, branch and base. Renaming the agent keeps its branch
 and worktree path.
 
+After the add, files named by the project's `.worktreeinclude` that git ignores (`git
+ls-files --others --ignored` with its patterns, intersected with `--exclude-standard`) are
+copied into the worktree, skipping any already there; a failure is logged and the agent
+starts anyway. A `CreateAgent.setup` the user approved in the TUI (ADR 0014) wraps the
+agent's first start in `sh -c` so the script runs in its terminal first.
+
 direnv allows an `.envrc` by its path and content, so a new worktree's checked-out
 `.envrc` starts out blocked, and `direnv exec` refuses it until it is allowed. Right after
 the worktree is added, and only when `direnv` is on `PATH`, the daemon runs `direnv allow

@@ -162,6 +162,54 @@ pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> anyhow::Result<
     git(Some(repo), args).map(drop)
 }
 
+/// Copies into a new worktree the project's files that git ignores and its `.worktreeinclude`
+/// names, as Claude Code does for its own worktrees; gitignore syntax, relative to the
+/// project. Returns the copied paths, sorted.
+pub fn copy_worktree_includes(project: &Path, worktree: &Path) -> anyhow::Result<Vec<String>> {
+    let include = project.join(".worktreeinclude");
+    if !include.is_file() {
+        return Ok(Vec::new());
+    }
+    let listed = |args: &[&OsStr]| -> anyhow::Result<std::collections::BTreeSet<String>> {
+        let out = git_read(project, args)?;
+        Ok(out
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect())
+    };
+    let exclude_from = format!("--exclude-from={}", include.display());
+    let named = listed(&[
+        OsStr::new("ls-files"),
+        OsStr::new("-z"),
+        OsStr::new("--others"),
+        OsStr::new("--ignored"),
+        OsStr::new(&exclude_from),
+    ])?;
+    let ignored = listed(&[
+        OsStr::new("ls-files"),
+        OsStr::new("-z"),
+        OsStr::new("--others"),
+        OsStr::new("--ignored"),
+        OsStr::new("--exclude-standard"),
+    ])?;
+    let mut copied = Vec::new();
+    for path in named.intersection(&ignored) {
+        let target = worktree.join(path);
+        if target.exists() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::copy(project.join(path), &target)
+            .with_context(|| format!("copying {path} into the worktree"))?;
+        copied.push(path.clone());
+    }
+    Ok(copied)
+}
+
 /// Merges `branch` into `base` in the project's own checkout. The agent's worktree must hold
 /// no uncommitted work, which the merge would leave behind, and the checkout must be on
 /// `base` with no tracked changes. A merge that fails is aborted, so the checkout is left as

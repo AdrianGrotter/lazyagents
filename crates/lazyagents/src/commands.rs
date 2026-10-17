@@ -73,6 +73,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
                 rows: DEFAULT_ROWS,
                 worktree: None,
                 prompt,
+                setup: None,
             });
             let info = expect_agent(client.request(request).await?)?;
             println!("started {}", info.name);
