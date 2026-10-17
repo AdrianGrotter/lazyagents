@@ -13,10 +13,10 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
 
-const WAIT: Duration = Duration::from_secs(10);
-/// Starting a daemon runs `ps` before it listens, which takes seconds when the machine is
-/// busy, as it is with the whole suite running in parallel.
-const STARTUP_WAIT: Duration = Duration::from_secs(30);
+/// How long anything the daemon is expected to do may take. With the whole suite running in
+/// parallel each spawned process (`ps`, every git command) can take seconds, so a request
+/// that runs several, such as creating a worktree agent, needs well over 10 s.
+const WAIT: Duration = Duration::from_secs(30);
 
 struct TestDaemon {
     dir: tempfile::TempDir,
@@ -111,8 +111,8 @@ async fn spawn_configured(config: Config) -> JoinHandle<anyhow::Result<()>> {
             panic!("daemon stopped before listening: {:?}", task.await);
         }
         assert!(
-            started.elapsed() < STARTUP_WAIT,
-            "daemon never listened within {STARTUP_WAIT:?}"
+            started.elapsed() < WAIT,
+            "daemon never listened within {WAIT:?}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
