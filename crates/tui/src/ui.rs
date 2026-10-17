@@ -819,8 +819,8 @@ fn state_hint(app: &App) -> Option<String> {
     let mut hints = Vec::new();
     match agent.status {
         Status::NeedsInput => hints.push(answer_hint(&app.keymap)),
-        Status::Stopped => hints.push(format!("{} start", key(Action::Restart))),
-        Status::Exited(_) => hints.push(format!("{} restart", key(Action::Restart))),
+        Status::Stopped => hints.push(format!("{} start", key(Action::Open))),
+        Status::Exited(_) => hints.push(format!("{} restart", key(Action::Open))),
         _ => {}
     }
     if let Some(count) = app.comments.get(&agent.id).map(Vec::len) {
@@ -1551,11 +1551,11 @@ mod tests {
         let (app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Stopped)]);
         let (text, _) = render(&app);
         let status = text.lines().last().expect("status");
-        assert!(status.starts_with("r start · ? help"), "{status}");
+        assert!(status.starts_with("enter start · ? help"), "{status}");
         let (app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Exited(1))]);
         let (text, _) = render(&app);
         let status = text.lines().last().expect("status");
-        assert!(status.starts_with("r restart · ? help"), "{status}");
+        assert!(status.starts_with("enter restart · ? help"), "{status}");
     }
 
     #[test]

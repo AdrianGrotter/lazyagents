@@ -45,7 +45,7 @@ says why in the status bar instead of doing nothing: `no agent selected`, `<agen
 running` (stop, reply), `<agent> has no terminal yet — r starts it` (scroll mode and
 `J`/`K` on a stopped agent), `<agent> is not waiting for an answer` (`y`, `N`). The status
 bar starts with what the selected agent's state calls for: the answers to a waiting agent,
-`r start` for a stopped one, `r restart` for an exited one, and `D <n> comments to send`
+`enter start` for a stopped one, `enter restart` for an exited one, and `D <n> comments to send`
 while it has review comments.
 
 The pane of a stopped or exited agent keeps its last screen, with a bar over the bottom row
