@@ -348,15 +348,7 @@ fn kind_label(kind: AgentKind) -> &'static str {
 pub fn info_lines(app: &App) -> Vec<String> {
     match (app.selected_agent(), app.selected_project()) {
         (Some(agent), _) => {
-            let command = if agent.command.is_empty() {
-                "claude".to_string()
-            } else {
-                agent.command.join(" ")
-            };
             let mut lines = vec![format!("status: {}", agent.status.label())];
-            if label(agent) != agent.name {
-                lines.push(format!("name: {}", agent.name));
-            }
             if let Some(worktree) = &agent.worktree {
                 lines.push(format!("branch: {}", worktree.branch));
             }
@@ -367,11 +359,7 @@ pub fn info_lines(app: &App) -> Vec<String> {
                 ));
                 lines.push(format!("{} uncommitted", stat.uncommitted));
             }
-            lines.extend([
-                format!("cmd: {command}"),
-                format!("cwd: {}", agent.cwd.display()),
-                format!("kind: {}", kind_label(agent.kind)),
-            ]);
+            lines.push(format!("cwd: {}", agent.cwd.display()));
             lines
         }
         (None, Some(project)) => vec![format!("path: {}", project.path.display())],
@@ -918,7 +906,11 @@ mod tests {
         assert!(text.contains("● sh  idle"), "{text}");
         assert!(!text.contains("~/git/x"), "{text}");
         assert!(text.contains(" Fix it · claude · idle "), "{text}");
-        assert!(info_lines(&app).contains(&"name: claude-1".to_string()));
+        let info = info_lines(&app);
+        assert!(
+            !info.iter().any(|line| line.contains("claude-1")),
+            "{info:?}"
+        );
 
         let _ = app.on_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
         let (text, _) = render(&app);
@@ -1842,9 +1834,7 @@ mod tests {
                 "branch: lazyagents/wt",
                 "+4 −2 · 3 files",
                 "1 uncommitted",
-                "cmd: sh",
                 "cwd: /s/worktrees/wt",
-                "kind: generic",
             ],
             "{text}"
         );

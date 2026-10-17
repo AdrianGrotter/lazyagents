@@ -239,7 +239,7 @@ daemon last told it.
   the diff view, the status line and popups from `App`; the pane copies the daemon's cell
   grid into the ratatui buffer, with the text selection drawn reversed on top. Colours
   come from the theme. The Info box is sized to its content (status, worktree branch, git
-  stat, command, cwd, kind): it grows as long as the Agents box keeps 8 rows, and keeps 6
+  stat, cwd): it grows as long as the Agents box keeps 8 rows, and keeps 6
   rows while the content fits. The status line shows a transient message in red, then `│`
   and the key hint, cut off on the right. Below a 20×5 pane only "terminal too small" is
   drawn, and keys do nothing except quitting from the sidebar and leaving the pane. Status
