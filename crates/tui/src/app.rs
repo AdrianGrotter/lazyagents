@@ -204,6 +204,15 @@ pub struct ScrollMode {
     pub from_pane: bool,
 }
 
+/// A way to finish a worktree agent's work, from the finish menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishChoice {
+    Merge,
+    PullRequest,
+    Remove,
+    RemoveWithBranch,
+}
+
 /// How much of the screen the pane takes: beside the usual sidebar, beside a narrow one, or
 /// all of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,6 +268,11 @@ pub enum Popup {
         index: usize,
     },
     CommandPrompt(CommandRun),
+    /// Row `index` is `App::finish_choices()[index]` for `agent`.
+    Finish {
+        agent: AgentId,
+        index: usize,
+    },
     /// Writing the review comment on `location` of `agent`'s diff.
     Comment {
         agent: AgentId,
@@ -441,6 +455,8 @@ pub struct App {
     pub presets: Vec<PresetDef>,
     pub commands: Vec<CustomCommand>,
     pub screen_mode: ScreenMode,
+    /// Whether `gh` is on `PATH`, which the pull request choice of the finish menu needs.
+    pub gh: bool,
     /// What the help popup is filtered by while it is open.
     pub help_filter: String,
     /// Review comments per agent, kept until they are sent.
@@ -492,6 +508,7 @@ impl App {
             comments: HashMap::new(),
             help_filter: String::new(),
             screen_mode: ScreenMode::Normal,
+            gh: false,
             theme: config.theme,
             cwd,
             home,
@@ -817,6 +834,7 @@ impl App {
                 }
                 let _ = self.upsert_agent(info);
             }
+            Response::Done(message) => self.inform(message),
             Response::Ok | Response::GitStat(_) | Response::Diff(_) => {}
         }
         effects.extend(self.sync_after_server(before, created));
@@ -1605,6 +1623,7 @@ impl App {
                 | Popup::ProjectPicker { .. }
                 | Popup::Confirm { .. }
                 | Popup::Commands { .. }
+                | Popup::Finish { .. }
                 | Popup::Output { .. },
             )
             | None => {}
@@ -1944,6 +1963,7 @@ impl App {
             }
             Action::Scroll => self.enter_scroll(false),
             Action::Commands => self.popup = Some(Popup::Commands { index: 0 }),
+            Action::Finish => self.open_finish(),
             Action::Approve | Action::Deny => {
                 let answer = if action == Action::Approve {
                     protocol::KeyCode::Enter
@@ -2130,6 +2150,7 @@ impl App {
                 Vec::new()
             }
             Popup::Commands { index } => self.on_commands_key(index, key),
+            Popup::Finish { agent, index } => self.on_finish_key(agent, index, key),
             Popup::Comment {
                 agent,
                 location,
@@ -2247,6 +2268,7 @@ impl App {
             id,
             remove_worktree,
             force,
+            delete_branch: false,
         })]
     }
 
@@ -2747,6 +2769,115 @@ impl App {
                 Some(format!("{name} is not waiting for an answer"))
             }
             _ => None,
+        }
+    }
+}
+
+impl App {
+    /// The finish menu's choices for the selected agent, which must have a worktree.
+    pub fn finish_choices(&self) -> Vec<FinishChoice> {
+        let mut choices = vec![FinishChoice::Merge];
+        if self.gh {
+            choices.push(FinishChoice::PullRequest);
+        }
+        choices.extend([FinishChoice::Remove, FinishChoice::RemoveWithBranch]);
+        choices
+    }
+
+    pub fn finish_label(&self, choice: FinishChoice) -> String {
+        let worktree = self.selected_agent().and_then(|a| a.worktree.as_ref());
+        let (branch, base) = worktree.map_or(("the branch", "its base"), |w| {
+            (w.branch.as_str(), w.base.as_str())
+        });
+        match choice {
+            FinishChoice::Merge => format!("merge {branch} into {base}"),
+            FinishChoice::PullRequest => format!("push {branch} and open a pull request"),
+            FinishChoice::Remove => {
+                format!("remove the agent and its worktree, keep {branch}")
+            }
+            FinishChoice::RemoveWithBranch => {
+                format!("remove the agent, its worktree and {branch} (merged only)")
+            }
+        }
+    }
+
+    fn open_finish(&mut self) {
+        let Some(agent) = self.selected_agent() else {
+            return;
+        };
+        if agent.worktree.is_none() {
+            let message = format!("{} has no worktree to finish", crate::ui::label(agent));
+            self.fail(message);
+            return;
+        }
+        self.popup = Some(Popup::Finish {
+            agent: agent.id,
+            index: 0,
+        });
+    }
+
+    /// The menu choice is the confirmation: the destructive entries name what they remove.
+    fn on_finish_key(&mut self, agent: AgentId, index: usize, key: KeyEvent) -> Vec<Effect> {
+        let choices = self.finish_choices();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.popup = Some(Popup::Finish {
+                    agent,
+                    index: wrap(index, 1, choices.len()),
+                });
+                Vec::new()
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.popup = Some(Popup::Finish {
+                    agent,
+                    index: wrap(index, -1, choices.len()),
+                });
+                Vec::new()
+            }
+            KeyCode::Enter => match choices.get(index) {
+                Some(choice) => self.finish(agent, *choice),
+                None => Vec::new(),
+            },
+            KeyCode::Esc | KeyCode::Char('q') => Vec::new(),
+            _ => {
+                self.popup = Some(Popup::Finish { agent, index });
+                Vec::new()
+            }
+        }
+    }
+
+    fn finish(&mut self, id: AgentId, choice: FinishChoice) -> Vec<Effect> {
+        let Some(agent) = self.agents.iter().find(|a| a.id == id) else {
+            return Vec::new();
+        };
+        let Some(worktree) = agent.worktree.clone() else {
+            return Vec::new();
+        };
+        match choice {
+            FinishChoice::Merge => {
+                self.inform(format!(
+                    "merging {} into {}…",
+                    worktree.branch, worktree.base
+                ));
+                vec![Effect::Send(Request::MergeAgent { id })]
+            }
+            FinishChoice::PullRequest => {
+                let branch = commands::shell_quote(&worktree.branch);
+                vec![Effect::RunInTerminal {
+                    title: "pull request".into(),
+                    script: format!(
+                        "git push -u origin {branch} && gh pr create --fill --head {branch}"
+                    ),
+                    cwd: worktree.path.clone(),
+                }]
+            }
+            FinishChoice::Remove => self.remove(id, true, false),
+            FinishChoice::RemoveWithBranch => vec![Effect::Send(Request::RemoveAgent {
+                id,
+                remove_worktree: true,
+                force: false,
+                delete_branch: true,
+            })],
         }
     }
 }
@@ -3561,6 +3692,7 @@ pub(crate) mod tests {
                 id: a.id,
                 remove_worktree: false,
                 force: false,
+                delete_branch: false,
             })]
         );
     }
@@ -4829,6 +4961,7 @@ pub(crate) mod tests {
                 id: wt.id,
                 remove_worktree,
                 force: false,
+                delete_branch: false,
             })]
         };
         let _ = app.on_key(key('d'));
@@ -4908,6 +5041,7 @@ pub(crate) mod tests {
                 id: wt.id,
                 remove_worktree: true,
                 force: true,
+                delete_branch: false,
             })]
         );
         app.request_failed(dirty(1));
@@ -6460,6 +6594,120 @@ mod screen_mode_tests {
         assert_eq!(
             (app.screen_mode, app.focus),
             (ScreenMode::Wide, Focus::Pane)
+        );
+    }
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use super::tests::{agent, loaded, project};
+    use super::*;
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    fn worktree_app(gh: bool) -> (App, AgentInfo) {
+        let p = project("p");
+        let a = AgentInfo {
+            worktree: Some(Box::new(protocol::WorktreeInfo {
+                path: "/w/api".into(),
+                branch: "lazyagents/api".into(),
+                base: "main".into(),
+            })),
+            cwd: "/w/api".into(),
+            ..agent(&p, "api", Status::Idle)
+        };
+        let (mut app, _) = loaded(vec![p], vec![a.clone()]);
+        app.gh = gh;
+        (app, a)
+    }
+
+    fn choices(app: &App) -> Vec<String> {
+        app.finish_choices()
+            .iter()
+            .map(|choice| app.finish_label(*choice))
+            .collect()
+    }
+
+    #[test]
+    fn f_offers_the_ways_to_finish_a_worktree_agent() {
+        let (mut app, _) = worktree_app(true);
+        let _ = app.on_key(key('F'));
+        assert!(matches!(app.popup, Some(Popup::Finish { index: 0, .. })));
+        assert_eq!(
+            choices(&app),
+            [
+                "merge lazyagents/api into main",
+                "push lazyagents/api and open a pull request",
+                "remove the agent and its worktree, keep lazyagents/api",
+                "remove the agent, its worktree and lazyagents/api (merged only)",
+            ]
+        );
+        let (app, _) = worktree_app(false);
+        assert!(!choices(&app).iter().any(|c| c.contains("pull request")));
+    }
+
+    #[test]
+    fn each_choice_sends_its_request() {
+        let (mut app, a) = worktree_app(true);
+        let _ = app.on_key(key('F'));
+        assert_eq!(
+            app.on_key(enter()),
+            vec![Effect::Send(Request::MergeAgent { id: a.id })]
+        );
+        assert_eq!(app.popup, None);
+
+        let _ = app.on_key(key('F'));
+        let _ = app.on_key(key('j'));
+        assert_eq!(
+            app.on_key(enter()),
+            vec![Effect::RunInTerminal {
+                title: "pull request".into(),
+                script: "git push -u origin 'lazyagents/api' && gh pr create --fill --head 'lazyagents/api'"
+                    .into(),
+                cwd: "/w/api".into(),
+            }]
+        );
+
+        let _ = app.on_key(key('F'));
+        for _ in 0..3 {
+            let _ = app.on_key(key('j'));
+        }
+        assert_eq!(
+            app.on_key(enter()),
+            vec![Effect::Send(Request::RemoveAgent {
+                id: a.id,
+                remove_worktree: true,
+                force: false,
+                delete_branch: true,
+            })]
+        );
+    }
+
+    #[test]
+    fn finishing_needs_a_worktree_agent() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "plain", Status::Idle)]);
+        assert!(app.on_key(key('F')).is_empty());
+        assert_eq!(app.popup, None);
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("plain has no worktree to finish")
+        );
+    }
+
+    #[test]
+    fn a_finished_operation_is_reported() {
+        let (mut app, _) = worktree_app(false);
+        let _ = app.apply_response(Response::Done("merged lazyagents/api into main".into()));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("merged lazyagents/api into main")
         );
     }
 }

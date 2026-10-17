@@ -239,6 +239,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
     let title = config.notifications.title.then(TitleGuard::push);
     let mut shown_title = String::new();
     let mut app = App::new(cwd, shell, home, config);
+    app.gh = on_path("gh");
     let known_file = paths.known_projects();
     match known::load(&known_file) {
         Ok(list) => app.known = list,
@@ -416,6 +417,11 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
 }
 
 /// Takes the merged list back, so projects another TUI remembered show up here too.

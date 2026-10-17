@@ -162,6 +162,61 @@ pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> anyhow::Result<
     git(Some(repo), args).map(drop)
 }
 
+/// Merges `branch` into `base` in the project's own checkout. The agent's worktree must hold
+/// no uncommitted work, which the merge would leave behind, and the checkout must be on
+/// `base` with no tracked changes. A merge that fails is aborted, so the checkout is left as
+/// it was.
+pub fn merge(project: &Path, worktree: &Path, branch: &str, base: &str) -> anyhow::Result<String> {
+    if !dirty_files(worktree)?.is_empty() {
+        anyhow::bail!("the agent's worktree has uncommitted changes; commit them first");
+    }
+    let current = current_branch(project)?;
+    if current != base {
+        anyhow::bail!("the project checkout is on {current}, not {base}");
+    }
+    let tracked = git_read(project, ["status", "--porcelain", "--untracked-files=no"])?;
+    if !tracked.trim().is_empty() {
+        anyhow::bail!("the project checkout has changes; commit or stash them first");
+    }
+    if let Err(error) = git(Some(project), ["merge", "--no-edit", branch]) {
+        let conflicts = git_read(project, ["diff", "--name-only", "--diff-filter=U"])
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let _ = git(Some(project), ["merge", "--abort"]);
+        if conflicts.is_empty() {
+            anyhow::bail!("merging {branch} into {base} failed and was abandoned: {error:#}");
+        }
+        anyhow::bail!(
+            "merging {branch} into {base} hit a conflict in {} and was abandoned",
+            conflicts.join(", ")
+        );
+    }
+    Ok(format!("merged {branch} into {base}"))
+}
+
+/// Whether `base` already contains every commit of `branch`.
+pub fn is_merged(repo: &Path, branch: &str, base: &str) -> anyhow::Result<bool> {
+    let merged = command(Some(repo))
+        .args(["merge-base", "--is-ancestor", branch, base])
+        .status()
+        .context("running git")?;
+    match merged.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => anyhow::bail!("checking whether {branch} is merged into {base} failed"),
+    }
+}
+
+/// Deletes `branch` only when `base` already contains all of it.
+pub fn delete_merged_branch(repo: &Path, branch: &str, base: &str) -> anyhow::Result<()> {
+    if !is_merged(repo, branch, base)? {
+        anyhow::bail!("{branch} is not merged into {base}");
+    }
+    git(Some(repo), ["branch", "-D", branch]).map(drop)
+}
+
 /// The commit `stat` and `diff` compare the working tree with: the merge base with
 /// `base`, so committed work counts too, or `HEAD` for uncommitted changes only.
 fn compare_point(dir: &Path, base: Option<&str>) -> anyhow::Result<String> {

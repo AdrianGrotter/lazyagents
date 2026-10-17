@@ -37,6 +37,13 @@ pub enum Request {
         id: AgentId,
         remove_worktree: bool,
         force: bool,
+        /// Also delete the worktree's branch, which is refused unless it is merged into its
+        /// base; needs `remove_worktree`.
+        delete_branch: bool,
+    },
+    /// Merge a worktree agent's branch into its base, in the project's own checkout.
+    MergeAgent {
+        id: AgentId,
     },
     GitStat {
         id: AgentId,
@@ -93,6 +100,8 @@ pub enum Response {
     Agent(AgentInfo),
     GitStat(GitStat),
     Diff(String),
+    /// A finished operation, described for the user.
+    Done(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,12 +223,15 @@ mod tests {
                 id,
                 remove_worktree: true,
                 force: false,
+                delete_branch: true,
             },
             Request::RemoveAgent {
                 id,
                 remove_worktree: false,
                 force: true,
+                delete_branch: false,
             },
+            Request::MergeAgent { id },
             Request::GitStat { id },
             Request::GitDiff {
                 id,
@@ -306,6 +318,10 @@ mod tests {
             ServerMessage::Response {
                 id: 5,
                 result: Ok(Response::Diff("diff --git a b\n".into())),
+            },
+            ServerMessage::Response {
+                id: 6,
+                result: Ok(Response::Done("merged".into())),
             },
             ServerMessage::AgentUpdated(info.clone()),
             ServerMessage::AgentRemoved(info.id),

@@ -450,9 +450,11 @@ impl Daemon {
                 id,
                 remove_worktree,
                 force,
+                delete_branch,
             } => self
-                .remove_agent(id, remove_worktree, force)
+                .remove_agent(id, remove_worktree, force, delete_branch)
                 .map(|()| Response::Ok),
+            Request::MergeAgent { id } => return self.merge_agent(client, request_id, id),
             Request::GitStat { id } => {
                 return self.git_query(client, request_id, id, GitQuery::Stat);
             }
@@ -954,8 +956,15 @@ impl Daemon {
         id: AgentId,
         remove_worktree: bool,
         force: bool,
+        delete_branch: bool,
     ) -> Result<(), String> {
         let agent = self.agent(id)?;
+        let branch = agent
+            .record
+            .worktree
+            .as_ref()
+            .filter(|_| delete_branch)
+            .map(|w| (w.branch.clone(), w.base.clone()));
         let removal = match agent.record.worktree.as_ref().filter(|_| remove_worktree) {
             Some(worktree) => {
                 let project = self
@@ -968,6 +977,18 @@ impl Daemon {
             }
             None => None,
         };
+        if delete_branch {
+            let (Some((project, _)), Some((branch, base))) = (&removal, &branch) else {
+                return Err(
+                    "only a worktree agent removed with its worktree can lose its branch".into(),
+                );
+            };
+            if !git::is_merged(project, branch, base).map_err(|e| format!("{e:#}"))? {
+                return Err(format!(
+                    "{branch} is not merged into {base}; merge it first, or keep the branch"
+                ));
+            }
+        }
         if let Some((_, path)) = &removal
             && !force
         {
@@ -1001,7 +1022,51 @@ impl Daemon {
         }
         self.persist();
         self.broadcast(&ServerMessage::AgentRemoved(id));
+        if let (Some((project, _)), Some((branch, base))) = (&removal, &branch) {
+            git::delete_merged_branch(project, branch, base)
+                .map_err(|e| format!("removed the agent but kept {branch}: {e:#}"))?;
+        }
         Ok(())
+    }
+
+    /// Merges on its own thread, like a git query, since the user's merge hooks may take
+    /// their time.
+    fn merge_agent(&self, client: ClientId, request_id: u64, id: AgentId) -> Reply {
+        let agent = match self.agent(id) {
+            Ok(agent) => agent,
+            Err(e) => return Reply::Now(Box::new(Err(e))),
+        };
+        let Some(worktree) = agent.record.worktree.clone() else {
+            let message = format!("{} has no worktree branch to merge", agent.record.name);
+            return Reply::Now(Box::new(Err(message)));
+        };
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|p| p.id == agent.record.project)
+            .map(|p| p.path.clone())
+        else {
+            let message = format!("unknown project {}", agent.record.project);
+            return Reply::Now(Box::new(Err(message)));
+        };
+        let Some(tx) = self.clients.get(&client).map(|c| c.tx.clone()) else {
+            return Reply::Deferred;
+        };
+        let spawned = std::thread::Builder::new()
+            .name("git-merge".into())
+            .spawn(move || {
+                let result = git::merge(&project, &worktree.path, &worktree.branch, &worktree.base)
+                    .map(Response::Done)
+                    .map_err(|e| format!("{e:#}"));
+                let _ = tx.send(ServerMessage::Response {
+                    id: request_id,
+                    result,
+                });
+            });
+        match spawned {
+            Ok(_) => Reply::Deferred,
+            Err(e) => Reply::Now(Box::new(Err(format!("spawning a git thread: {e}")))),
+        }
     }
 
     /// Runs the query on its own thread and answers the client from there; an answer

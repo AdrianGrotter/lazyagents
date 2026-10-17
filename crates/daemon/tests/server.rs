@@ -683,6 +683,7 @@ async fn kill_restart_remove_and_rename() {
         id: agent.id,
         remove_worktree: false,
         force: false,
+        delete_branch: false,
     })
     .await
     .expect("remove");
@@ -1610,6 +1611,7 @@ async fn remove_stops_the_agent_tree() {
         id: agent.id,
         remove_worktree: false,
         force: false,
+        delete_branch: false,
     })
     .await
     .expect("remove");
@@ -2276,6 +2278,7 @@ async fn remove_refuses_a_dirty_worktree_and_lists_files() {
             id: agent.id,
             remove_worktree: true,
             force: false,
+            delete_branch: false,
         })
         .await
         .expect_err("dirty worktree");
@@ -2306,6 +2309,7 @@ async fn remove_refuses_untracked_files_hidden_by_the_repo_config() {
             id: agent.id,
             remove_worktree: true,
             force: false,
+            delete_branch: false,
         })
         .await
         .expect_err("untracked file");
@@ -2332,6 +2336,7 @@ async fn remove_with_force_removes_the_worktree() {
         id: agent.id,
         remove_worktree: true,
         force: true,
+        delete_branch: false,
     })
     .await
     .expect("forced remove");
@@ -2355,6 +2360,7 @@ async fn branches_survive_worktree_removal() {
         id: agent.id,
         remove_worktree: true,
         force: false,
+        delete_branch: false,
     })
     .await
     .expect("clean remove");
@@ -2380,6 +2386,7 @@ async fn remove_without_remove_worktree_keeps_it() {
         id: agent.id,
         remove_worktree: false,
         force: false,
+        delete_branch: false,
     })
     .await
     .expect("remove agent only");
@@ -2605,6 +2612,93 @@ async fn a_detached_project_bases_worktrees_on_its_commit() {
         .await
         .expect("create");
     assert_eq!(agent.worktree.expect("worktree").base, head.trim());
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worktree_agent_is_merged_then_removed_with_its_branch() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let agent = create_in_worktree(
+        &mut conn,
+        &project,
+        "feat",
+        &["sh", "-c", "printf 'x\\n' > feat.txt && git add feat.txt && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm feat && exec sleep 30"],
+    )
+    .await
+    .expect("create");
+    let worktree = agent.worktree.clone().expect("worktree");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while common::git(repo.path(), &["log", "--oneline", "lazyagents/feat"])
+        .lines()
+        .count()
+        < 2
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the agent never committed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let refused = conn
+        .request(Request::RemoveAgent {
+            id: agent.id,
+            remove_worktree: true,
+            force: false,
+            delete_branch: true,
+        })
+        .await
+        .expect_err("unmerged branch kept");
+    assert!(refused.contains("not merged into main"), "{refused}");
+
+    let merged = conn
+        .request(Request::MergeAgent { id: agent.id })
+        .await
+        .expect("merge");
+    assert_eq!(
+        merged,
+        Response::Done("merged lazyagents/feat into main".into())
+    );
+    assert!(repo.path().join("feat.txt").exists());
+
+    conn.request(Request::RemoveAgent {
+        id: agent.id,
+        remove_worktree: true,
+        force: false,
+        delete_branch: true,
+    })
+    .await
+    .expect("remove");
+    assert!(!worktree.path.exists());
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/feat"]),
+        ""
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_worktree_agent_can_be_merged() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _repo) = add_repo_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "plain",
+        AgentKind::Generic,
+        &["sleep", "30"],
+    )
+    .await
+    .expect("create");
+    let err = conn
+        .request(Request::MergeAgent { id: agent.id })
+        .await
+        .expect_err("no worktree");
+    assert!(err.contains("has no worktree branch to merge"), "{err}");
     conn.request(Request::KillAgent { id: agent.id })
         .await
         .expect("kill");

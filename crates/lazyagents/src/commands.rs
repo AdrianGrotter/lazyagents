@@ -112,6 +112,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
                     id: info.id,
                     remove_worktree: false,
                     force: false,
+                    delete_branch: false,
                 })
                 .await?;
             println!("{}", removed_message(&info));

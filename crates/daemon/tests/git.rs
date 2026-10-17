@@ -4,7 +4,8 @@ use std::path::Path;
 
 use common::{git, repo};
 use daemon::git::{
-    add_worktree, check_branch, current_branch, diff, dirty_files, remove_worktree, stat,
+    add_worktree, check_branch, current_branch, delete_merged_branch, diff, dirty_files, merge,
+    remove_worktree, stat,
 };
 use protocol::{DiffScope, GitStat};
 
@@ -188,4 +189,83 @@ fn a_failed_add_leaves_other_stale_worktrees_registered() {
     .expect_err("bad base");
     let list = git(repo.path(), &["worktree", "list", "--porcelain"]);
     assert!(list.contains("stale"), "{list}");
+}
+
+fn worktree_with_commit(
+    repo: &Path,
+    file: &str,
+    text: &str,
+) -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = tempfile::tempdir().expect("worktree root");
+    let wt = root.path().join("wt");
+    add_worktree(repo, &wt, "lazyagents/wt", "main").expect("add");
+    std::fs::write(wt.join(file), text).expect("write");
+    git(&wt, &["add", file]);
+    git(&wt, &["commit", "-q", "-m", "work"]);
+    (root, wt)
+}
+
+#[test]
+fn merging_brings_the_agents_commits_into_its_base() {
+    let repo = repo();
+    let (_root, wt) = worktree_with_commit(repo.path(), "feature.txt", "done\n");
+    std::fs::write(repo.path().join("scratch.txt"), "untracked\n").expect("untracked");
+    let message = merge(repo.path(), &wt, "lazyagents/wt", "main").expect("merge");
+    assert_eq!(message, "merged lazyagents/wt into main");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("feature.txt")).expect("merged"),
+        "done\n"
+    );
+}
+
+#[test]
+fn merging_refuses_unsafe_states() {
+    let repo = repo();
+    let (_root, wt) = worktree_with_commit(repo.path(), "feature.txt", "done\n");
+    std::fs::write(wt.join("feature.txt"), "more\n").expect("dirty");
+    let err = merge(repo.path(), &wt, "lazyagents/wt", "main").expect_err("dirty worktree");
+    assert!(
+        format!("{err:#}").contains("uncommitted changes"),
+        "{err:#}"
+    );
+    git(&wt, &["checkout", "--", "feature.txt"]);
+
+    std::fs::write(repo.path().join("README"), "edited\n").expect("dirty project");
+    let err = merge(repo.path(), &wt, "lazyagents/wt", "main").expect_err("dirty project");
+    assert!(format!("{err:#}").contains("has changes"), "{err:#}");
+    git(repo.path(), &["checkout", "--", "README"]);
+
+    git(repo.path(), &["checkout", "-q", "-b", "other"]);
+    let err = merge(repo.path(), &wt, "lazyagents/wt", "main").expect_err("wrong branch");
+    assert!(
+        format!("{err:#}").contains("is on other, not main"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn a_conflicting_merge_is_abandoned_cleanly() {
+    let repo = repo();
+    let (_root, wt) = worktree_with_commit(repo.path(), "README", "from the agent\n");
+    std::fs::write(repo.path().join("README"), "from main\n").expect("write");
+    git(repo.path(), &["commit", "-q", "-am", "main moved"]);
+    let err = merge(repo.path(), &wt, "lazyagents/wt", "main").expect_err("conflict");
+    assert!(format!("{err:#}").contains("conflict"), "{err:#}");
+    assert_eq!(git(repo.path(), &["status", "--porcelain"]), "");
+    assert!(!repo.path().join(".git/MERGE_HEAD").exists());
+}
+
+#[test]
+fn only_a_merged_branch_is_deleted() {
+    let repo = repo();
+    let (_root, wt) = worktree_with_commit(repo.path(), "feature.txt", "done\n");
+    remove_worktree(repo.path(), &wt, false).expect("remove");
+    let err = delete_merged_branch(repo.path(), "lazyagents/wt", "main").expect_err("unmerged");
+    assert!(
+        format!("{err:#}").contains("not merged into main"),
+        "{err:#}"
+    );
+    git(repo.path(), &["merge", "-q", "--ff-only", "lazyagents/wt"]);
+    delete_merged_branch(repo.path(), "lazyagents/wt", "main").expect("merged");
+    assert_eq!(git(repo.path(), &["branch", "--list", "lazyagents/wt"]), "");
 }

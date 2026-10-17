@@ -48,9 +48,14 @@ is rejected.
   written to its terminal once it first prints
 - `KillAgent { id }`
 - `RestartAgent { id, cols, rows }`
-- `RemoveAgent { id, remove_worktree, force }`: `remove_worktree` also removes the agent's
-  worktree and is refused while it has uncommitted changes unless `force` is set; the
-  branch is never deleted
+- `RemoveAgent { id, remove_worktree, force, delete_branch }`: `remove_worktree` also
+  removes the agent's worktree and is refused while it has uncommitted changes unless
+  `force` is set; `delete_branch` (with `remove_worktree`) also deletes its branch, and is
+  refused, before anything is removed, unless the base contains every commit of the branch
+- `MergeAgent { id }`: merges a worktree agent's branch into its base in the project's
+  own checkout with `git merge --no-edit`; refused while the worktree has uncommitted
+  changes, or the checkout is on another branch or has tracked changes. A failed merge is
+  aborted, naming the conflicted files. Answered with `Done("merged <branch> into <base>")`
 - `GitStat { id }`
 - `GitDiff { id, scope }`: `scope` is `All` (committed and uncommitted changes since the
   comparison point), `Uncommitted` (working tree against `HEAD`) or `Committed` (comparison
@@ -80,6 +85,7 @@ is rejected.
 - `Agent(AgentInfo)`
 - `GitStat(GitStat)`: `insertions`, `deletions`, `files` and `uncommitted`
 - `Diff(String)`: unified diff text
+- `Done(String)`: a finished operation, described for the user
 
 `ServerMessage`:
 

@@ -35,6 +35,7 @@ Two input modes:
 | `i` | reply: type a line and `enter` sends it to the selected agent with `enter` after it, as if typed in its pane; `esc` cancels. A pasted newline becomes a space |
 | `J`/`K`, `pagedown`/`pageup` | scroll the selected agent's pane half a page down / up without leaving the sidebar |
 | `+` | screen mode: the pane beside a narrow sidebar, then the pane alone, then back. The sidebar keys keep working while it is hidden |
+| `F` | finish a worktree agent: a menu to merge its branch into its base, push it and open a pull request (with `gh` on `PATH`), remove the agent and worktree but keep the branch, or remove them with the branch (only once it is merged). Picking an entry does it; `j`/`k` move, `esc` closes |
 | `?` | help popup: typing filters it by key or description (`backspace` deletes), `esc`, `enter` or `?` closes it |
 | `q`, `ctrl-c` | quit TUI (agents keep running) |
 | `Q` | quit and stop daemon (confirm) |
@@ -85,10 +86,9 @@ agent in the project uses (`claude-1`, `shell-2`). The Agents box and the pane's
 show a Claude agent by its session title once Claude has set one, and by its name until
 then; the name stays the agent's identity for the CLI and its worktree branch.
 With Worktree on, the agent runs in a new git worktree on branch `lazyagents/<name>`, made
-from Base; an empty Base means the project's current branch. Removing an agent never
-deletes its branch, so a new worktree agent with a removed agent's name fails with git's
-`a branch named 'lazyagents/<name>' already exists` until that branch is deleted or
-renamed.
+from Base; an empty Base means the project's current branch. `d` never deletes an agent's branch, so a new worktree agent with a removed agent's name
+fails with git's `a branch named 'lazyagents/<name>' already exists` until that branch is
+deleted (the finish menu does that for a merged one) or renamed.
 
 Removing a worktree agent asks `Remove <name>? y: agent + worktree · k: keep worktree ·
 n: cancel`:

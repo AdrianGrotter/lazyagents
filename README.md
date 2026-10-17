@@ -37,7 +37,7 @@ The TUI starts the daemon if none is running. Quitting it leaves the agents runn
 
 The mouse works too: click to focus, drag in the terminal to copy. Keys, presets and colours are configurable in `~/.config/lazyagents/config.toml` ([docs/configuration.md](docs/configuration.md)). The full key map is in [docs/keybindings.md](docs/keybindings.md).
 
-An agent created with the worktree option runs in its own git worktree on the branch `lazyagents/<name>`, under the state directory. Removing the agent can remove the worktree; the branch always stays.
+An agent created with the worktree option runs in its own git worktree on the branch `lazyagents/<name>`, under the state directory. Removing the agent can remove the worktree, and the finish menu (`F`) can merge the branch, open a pull request, or delete the branch once it is merged.
 
 The same daemon is scriptable without the TUI:
 

@@ -208,7 +208,8 @@ and the changed paths, one per line (the new path of a rename), and leaves the a
 running. Both this check and the `git -c status.showUntrackedFiles=normal worktree
 remove` that follows see untracked files even when the user's git config hides them.
 `force: true` skips the check and runs `git worktree remove --force`. Without `remove_worktree` the worktree stays
-on disk. An agent's branch is never deleted.
+on disk. Its branch is deleted only by a `RemoveAgent` with `delete_branch`, which needs
+the branch merged into its base (`git merge-base --is-ancestor`); see ADR 0013.
 
 ### The TUI
 

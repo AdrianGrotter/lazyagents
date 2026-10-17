@@ -78,7 +78,10 @@ const SIDEBAR_HELP: [(&[Action], &str); 19] = [
         &[Action::Approve, Action::Deny, Action::Reply],
         "approve / deny / reply to the agent",
     ),
-    (&[Action::Diff], "diff of the agent's changes"),
+    (
+        &[Action::Diff, Action::Finish],
+        "diff / finish (merge, PR, clean up) a worktree agent",
+    ),
     (&[Action::Scroll], "scroll the agent's history"),
     (
         &[Action::PeekDown, Action::PeekUp],
@@ -796,6 +799,24 @@ fn popup_content(popup: &Popup, app: &App) -> PopupContent {
             PopupContent::fitting(title, 0, help_lines(app))
         }
         Popup::Filter => PopupContent::new(" Filter ", 0, Vec::new()),
+        Popup::Finish { index, .. } => {
+            let mut lines: Vec<Line> = app
+                .finish_choices()
+                .into_iter()
+                .enumerate()
+                .map(|(row, choice)| {
+                    let text = app.finish_label(choice);
+                    if row == *index {
+                        Line::from(format!("▸ {text}")).style(selection_style(true, theme))
+                    } else {
+                        Line::from(format!("  {text}"))
+                    }
+                })
+                .collect();
+            lines.push(Line::default());
+            lines.push(Line::from(CHOICE_HINT).fg(theme.dim));
+            PopupContent::fitting(" Finish ", 40, lines)
+        }
         Popup::Commands { index } => {
             PopupContent::fitting(" Commands ", 40, command_menu_lines(app, *index))
         }
@@ -1274,7 +1295,7 @@ mod tests {
         app.help_filter = "DIFF".into();
         let (text, _) = render(&app);
         assert!(text.contains(" Help · /DIFF "), "{text}");
-        assert!(text.contains("diff of the agent's changes"), "{text}");
+        assert!(text.contains("diff / finish"), "{text}");
         assert!(!text.contains("new agent"), "{text}");
         assert!(!text.contains("Agent pane"), "{text}");
         app.help_filter = "zzz".into();

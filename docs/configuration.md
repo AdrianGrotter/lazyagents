@@ -97,6 +97,7 @@ SHIFT; with `ctrl` or `alt`, SHIFT counts, so `ctrl-Q` is not `ctrl-q`.
 | `peek_down` | `J`, `pagedown` |
 | `peek_up` | `K`, `pageup` |
 | `commands` | `c` |
+| `finish` | `F` |
 | `approve` | `y` |
 | `deny` | `N` |
 | `reply` | `i` |
