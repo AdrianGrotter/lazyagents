@@ -18,7 +18,7 @@ At startup, when `direnv` is on its `PATH`, the daemon runs `direnv export json`
 - Revert in the client before it spawns the daemon, applying `direnv export json`'s output with `Command::env`/`env_remove`: also cleans the daemon's own git and direnv subprocesses, but misses a daemon started directly with `lazyagents daemon`.
 - `direnv exec <agent cwd>` for every agent: direnv searches ancestors of the cwd, so it would load, or refuse as blocked, an `.envrc` outside the project, which lazyagents deliberately ignores.
 - Decode `DIRENV_DIFF` in Rust and apply it per agent: needs zlib and base64 dependencies, works without direnv but duplicates its format, and still cannot unset variables through the PTY spawn without a wrapper such as `env -u`.
-- The daemon re-execs itself under `direnv exec /` at startup: it would also clean the daemon's own subprocesses, but a direnv failure (a corrupt `DIRENV_DIFF`, a blocked `/.envrc`) would then keep the daemon from starting, where the probe only costs the revert, and the re-exec replaces the process, so the daemon would need a guard to avoid re-exec loops and would run `direnv exec` even where direnv has nothing to revert.
+- The daemon re-execs itself under `direnv exec /` at startup: it would also clean the daemon's own subprocesses. But a direnv failure (a corrupt `DIRENV_DIFF`, a blocked `/.envrc`) would then keep the daemon from starting, where the probe only costs the revert. The re-exec also replaces the process, so the daemon would need a guard to avoid re-exec loops.
 - Wrap only when `DIRENV_DIFF` is set, without probing: a corrupt diff would then stop every agent from starting.
 
 ## Consequences

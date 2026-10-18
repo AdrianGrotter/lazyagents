@@ -296,13 +296,15 @@ daemon last told it.
   another client, the agent list was replaced).
 - **Keys and config** (`keymap.rs`, `config.rs`): a `Keymap` maps key events to `Action`s
   in three scopes: the sidebar, the keys after the pane prefix (`ctrl-q`), and the direct
-  keys, which act without the prefix: `direct_leave` (`ctrl-]`, `ctrl-5`) and the unbound
-  by default `direct_next` and `direct_previous`. Key strings such as `ctrl-q`, `shift-tab` or `A` parse
-  into `KeySpec`s, and `describe` renders an action's keys for the help popup and the
-  hints. The pane prefix state lives in `App` and is cleared whenever focus leaves the
-  pane. `config::load` reads the config file once at startup into a `Config` (keymap,
-  presets, theme, notifications, custom commands, warnings) that never fails: unusable entries keep their defaults and
-  become warnings shown in the status bar ([configuration.md](configuration.md)).
+  keys, which act without the prefix: `direct_leave` (`ctrl-]`, `ctrl-5`) and
+  `direct_next` and `direct_previous`, which are unbound by default. Key strings such as
+  `ctrl-q`, `shift-tab` or `A` parse into `KeySpec`s, and `describe` renders an action's
+  keys for the help popup and the hints. The pane prefix state lives in `App` and is
+  cleared whenever focus leaves the pane. `config::load` reads the config file once at
+  startup into a `Config` (keymap, presets, theme, notifications, custom commands,
+  warnings) that never fails: unusable entries keep their defaults and become warnings
+  shown in the status bar
+  ([configuration.md](configuration.md)).
 - **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane or
   the diff view, the status line and popups from `App`; the pane copies the daemon's cell
   grid into the ratatui buffer, with the text selection drawn reversed on top. Colours
@@ -372,9 +374,10 @@ daemon last told it.
   only the TUI writes: every project it has seen, kept after removal for the add picker
   (`known.rs`, ADR 0009).
 - Config: `$LAZYAGENTS_CONFIG`, else `$XDG_CONFIG_HOME/lazyagents/config.toml`, else
-  `~/.config/lazyagents/config.toml`: keybindings, agent presets, theme colours, notifications, custom commands. A missing
-  file gives the built-in defaults; anything unusable becomes a warning in the TUI status
-  line ([configuration.md](configuration.md)).
+  `~/.config/lazyagents/config.toml`: keybindings, agent presets, theme colours,
+  notifications, custom commands. A missing file gives the built-in
+  defaults; anything unusable becomes a warning in the TUI status line
+  ([configuration.md](configuration.md)).
 - `state.toml` is written atomically (write temp + rename) on every metadata change.
 
 ## Error handling
