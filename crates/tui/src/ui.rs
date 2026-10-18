@@ -1014,6 +1014,19 @@ pub(crate) fn start_verb(status: Status) -> &'static str {
     }
 }
 
+/// `message` cut to `room` cells: between its ` · `-separated parts where the first fits, and
+/// with `…` otherwise.
+fn fitted_message(message: &str, room: usize) -> String {
+    if text_width(message) <= room {
+        return message.to_string();
+    }
+    let parts: Vec<String> = message.split(" · ").map(String::from).collect();
+    match fitted(&parts, room) {
+        kept if parts.len() > 1 && !kept.is_empty() => kept,
+        _ => ellipsized(message, room),
+    }
+}
+
 /// The leading `hints` that fit in `room` cells, joined; a hint that does not fit is
 /// dropped whole, with every hint after it.
 fn fitted(hints: &[String], room: usize) -> String {
@@ -1037,7 +1050,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
             MessageKind::Error => theme.error,
             MessageKind::Info => theme.accent,
         };
-        spans.push(Span::raw(message.to_string()).fg(colour));
+        let message = fitted_message(message, usize::from(area.width));
+        spans.push(Span::raw(message).fg(colour));
         spans.push(Span::raw(" │ ").fg(theme.dim));
     }
     if app.popup == Some(Popup::Filter) {
@@ -2707,6 +2721,23 @@ mod tests {
         let status = status_at(&app, 60);
         assert!(status.starts_with("a long error message about something │ y approve"));
         assert!(!status.ends_with('·') && !status.ends_with('│'), "{status}");
+    }
+
+    #[test]
+    fn a_message_too_wide_for_the_status_bar_is_cut_between_its_parts() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.fail("first part of the message · second part of it · third part that is long");
+        let status = status_at(&app, 60);
+        assert!(
+            status.starts_with("first part of the message · second part of it │ ? help"),
+            "{status}"
+        );
+        assert!(!status.contains("third"), "{status}");
+        app.fail("one long message without any parts that could be dropped from its end at all");
+        let status = status_at(&app, 60);
+        assert_eq!(status.chars().count(), 60, "{status}");
+        assert!(status.ends_with('…'), "{status}");
     }
 
     #[test]

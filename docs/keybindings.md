@@ -5,7 +5,8 @@ Status: implemented in crates/tui (app.rs, keymap.rs, keys.rs, config.rs).
 The keys below are the defaults. Every sidebar key, the pane prefix, the keys after it and
 the direct pane keys can be changed in `config.toml` (`[keys.sidebar]` and `[keys.pane]`);
 the help popup, the status bar hints and the messages name the configured keys. A status bar
-message shows for 5 s; an error stays after that until the next key or click. Popup keys
+message shows for 5 s; an error stays after that until the next key or click. A message wider
+than the status bar is cut between its ` · `-separated parts, or with `…`. Popup keys
 and the keys inside the diff view and scroll mode are fixed; there only the configured quit
 keys and, in the diff view, the configured diff key follow the config. The format is in
 [configuration.md](configuration.md).
