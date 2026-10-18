@@ -150,7 +150,8 @@ prompts. Ignored files (`.env.local`, build output) do not count as changes, so 
 the worktree without force still deletes them. The second prompt opens only while focus is
 still in the sidebar and no key or click came after the `y`; otherwise the status bar shows
 `<name>: worktree has uncommitted changes — d to try again` (with the configured remove
-key), and focus stays where it is.
+key), and focus stays where it is. Any other such refusal, such as one to a forced
+removal, shows `<name>: worktree has uncommitted changes (<n> files)`.
 
 **Protocol mismatch**: when the running daemon speaks another protocol version, the TUI
 opens on a full-screen prompt instead of the sidebar. `y` stops that daemon and its agents

@@ -530,7 +530,7 @@ impl App {
     /// A dirty-worktree refusal opens the force prompt only while the user is still
     /// waiting for it in the sidebar; otherwise the prompt could take keys typed for an
     /// agent and force-remove its changes.
-    pub fn request_failed(&mut self, failure: Failure) {
+    pub fn request_failed(&mut self, request: &Request, failure: Failure) {
         self.pending_select = None;
         if let Some(pending) = self.pending_remove.take()
             && let Failure::DirtyWorktree { files } = &failure
@@ -554,7 +554,22 @@ impl App {
             }
             return;
         }
-        self.fail(failure.to_string());
+        let Failure::DirtyWorktree { files } = &failure else {
+            self.fail(failure.to_string());
+            return;
+        };
+        let count = match files.len() {
+            1 => "1 file".to_string(),
+            n => format!("{n} files"),
+        };
+        let name = match request {
+            Request::RemoveAgent { id, .. } => self.agents.iter().find(|a| a.id == *id),
+            _ => None,
+        };
+        self.fail(match name {
+            Some(agent) => format!("{}: {DIRTY_WORKTREE} ({count})", agent.name),
+            None => format!("{DIRTY_WORKTREE} ({count})"),
+        });
     }
 
     /// Asks for the selected agent's git stat when the selection changed, and then every
@@ -664,7 +679,7 @@ impl App {
             }
             (None, Ok(response)) => self.apply_response(response),
             (None, Err(error)) => {
-                self.request_failed(error);
+                self.request_failed(request, error);
                 Vec::new()
             }
         }
@@ -2347,12 +2362,15 @@ pub(crate) mod tests {
     fn force_prompt_strips_control_characters_from_file_names() {
         let p = project("p");
         let wt = worktree_agent(&p, "wt");
-        let (mut app, _) = loaded(vec![p], vec![wt]);
+        let (mut app, _) = loaded(vec![p], vec![wt.clone()]);
         let _ = app.on_key(key('d'));
         let _ = app.on_key(key('y'));
-        app.request_failed(Failure::DirtyWorktree {
-            files: vec!["evil\u{1b}[2J\u{7}.txt".into(), "tab\there".into()],
-        });
+        app.request_failed(
+            &remove_request(wt.id),
+            Failure::DirtyWorktree {
+                files: vec!["evil\u{1b}[2J\u{7}.txt".into(), "tab\there".into()],
+            },
+        );
         let Some(Popup::Confirm { prompt, .. }) = &app.popup else {
             panic!("no confirm: {:?}", app.popup);
         };
@@ -2392,9 +2410,12 @@ pub(crate) mod tests {
             )]
         );
 
-        app.request_failed(Failure::DirtyWorktree {
-            files: vec!["f.txt".into()],
-        });
+        app.request_failed(
+            &remove_request(wt.id),
+            Failure::DirtyWorktree {
+                files: vec!["f.txt".into()],
+            },
+        );
         assert_eq!(app.popup, None);
         assert_eq!(app.focus, Focus::Pane);
         assert_eq!(
@@ -2415,7 +2436,7 @@ pub(crate) mod tests {
 
         let _ = app.on_key(key('d'));
         let _ = app.on_key(key('y'));
-        app.request_failed(dirty(2));
+        app.request_failed(&remove_request(wt.id), dirty(2));
         assert_eq!(
             app.popup,
             Some(Popup::Confirm {
@@ -2435,12 +2456,12 @@ pub(crate) mod tests {
                 delete_branch: false,
             })]
         );
-        app.request_failed(dirty(1));
+        app.request_failed(&remove_request(wt.id), dirty(1));
         assert_eq!(app.popup, None, "a forced remove is never asked again");
 
         let _ = app.on_key(key('d'));
         let _ = app.on_key(key('y'));
-        app.request_failed(dirty(10));
+        app.request_failed(&remove_request(wt.id), dirty(10));
         let Some(Popup::Confirm { prompt, .. }) = &app.popup else {
             panic!("no confirm: {:?}", app.popup);
         };
@@ -2454,13 +2475,13 @@ pub(crate) mod tests {
         let _ = app.on_key(key('d'));
         let _ = app.on_key(key('y'));
         let _ = app.apply_response(Response::Agents(vec![wt.clone()]));
-        app.request_failed(dirty(1));
+        app.request_failed(&remove_request(wt.id), dirty(1));
         assert_eq!(app.popup, None);
 
         let _ = app.on_key(key('d'));
         let _ = app.on_key(key('y'));
         app.apply_git_stat(wt.id, Ok(stat(1)));
-        app.request_failed(dirty(1));
+        app.request_failed(&remove_request(wt.id), dirty(1));
         assert!(
             matches!(app.popup, Some(Popup::Confirm { .. })),
             "git answers arrive out of band"
@@ -2469,12 +2490,41 @@ pub(crate) mod tests {
         let _ = app.on_key(key('n'));
         let _ = app.on_key(key('d'));
         let _ = app.on_key(key('k'));
-        app.request_failed(dirty(1));
+        app.request_failed(&remove_request(wt.id), dirty(1));
         assert_eq!(app.popup, None);
-        assert!(
-            app.current_message(Instant::now())
-                .is_some_and(|m| m.starts_with("worktree has uncommitted changes"))
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("wt: worktree has uncommitted changes (1 file)")
         );
+    }
+
+    #[test]
+    fn a_dirty_refusal_of_a_forced_remove_is_one_line() {
+        let p = project("p");
+        let wt = worktree_agent(&p, "wt");
+        let (mut app, _) = loaded(vec![p], vec![wt.clone()]);
+        let request = Request::RemoveAgent {
+            id: wt.id,
+            remove_worktree: true,
+            force: true,
+            delete_branch: false,
+        };
+        let files = vec!["a.txt".into(), "b.txt".into()];
+        let _ = app.apply_reply(&request, Err(Failure::DirtyWorktree { files }));
+        assert_eq!(app.popup, None);
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("wt: worktree has uncommitted changes (2 files)")
+        );
+    }
+
+    fn remove_request(id: AgentId) -> Request {
+        Request::RemoveAgent {
+            id,
+            remove_worktree: true,
+            force: false,
+            delete_branch: false,
+        }
     }
 
     pub(super) fn names(app: &App) -> Vec<String> {
