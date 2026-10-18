@@ -458,3 +458,31 @@ fn hostile_global_and_system_git_config_do_not_reach_the_tests() {
         "git init read the hostile global config\n{hint}"
     );
 }
+
+#[test]
+fn worktree_include_copies_many_ignored_files_beside_an_ignored_directory() {
+    let repo = repo();
+    std::fs::write(repo.path().join(".gitignore"), "*.local\ncache/\n").expect("ignore");
+    std::fs::write(
+        repo.path().join(".worktreeinclude"),
+        "*.local\ncache/keep\n",
+    )
+    .expect("include");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-q", "-m", "ignore"]);
+    let mut expected: Vec<String> = (0..600).map(|i| format!("f{i:03}.local")).collect();
+    for file in &expected {
+        std::fs::write(repo.path().join(file), file).expect("write");
+    }
+    std::fs::create_dir_all(repo.path().join("cache")).expect("cache dir");
+    std::fs::write(repo.path().join("cache/keep"), "keep").expect("keep");
+    std::fs::write(repo.path().join("cache/drop"), "drop").expect("drop");
+    expected.insert(0, "cache/keep".into());
+
+    let root = tempfile::tempdir().expect("worktree root");
+    let wt = root.path().join("wt");
+    add_worktree(repo.path(), &wt, "lazyagents/wt", "main").expect("add");
+    let copied = copy_worktree_includes(repo.path(), &wt).expect("copy");
+    assert_eq!(copied, expected);
+    assert!(!wt.join("cache/drop").exists());
+}

@@ -172,7 +172,9 @@ pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> anyhow::Result<
 /// names, as Claude Code does for its own worktrees; gitignore syntax, relative to the
 /// project. A directory git ignores as a whole is searched only when a pattern may reach
 /// into it (`may_reach_into`), so a large ignored tree such as `target/` is never walked
-/// for a pattern like `*.env`. Returns the copied paths, sorted.
+/// for a pattern like `*.env`. A file the first listing names on its own is ignored already, so only
+/// the directories are listed again for what git ignores within them. Returns the copied
+/// paths, sorted.
 pub fn copy_worktree_includes(project: &Path, worktree: &Path) -> anyhow::Result<Vec<String>> {
     let include = project.join(".worktreeinclude");
     if !include.is_file() {
@@ -193,7 +195,13 @@ pub fn copy_worktree_includes(project: &Path, worktree: &Path) -> anyhow::Result
     }
     let exclude_from = format!("--exclude-from={}", include.display());
     let named = ls_ignored(project, &[exclude_from.as_str()], &scope)?;
-    let ignored = ls_ignored(project, &["--exclude-standard"], &scope)?;
+    let (dirs, files): (Vec<&str>, Vec<&str>) =
+        scope.iter().partition(|entry| entry.ends_with('/'));
+    let mut ignored: std::collections::BTreeSet<String> =
+        files.into_iter().map(str::to_string).collect();
+    if !dirs.is_empty() {
+        ignored.extend(ls_ignored(project, &["--exclude-standard"], &dirs)?);
+    }
     let mut copied = Vec::new();
     for path in named.intersection(&ignored) {
         let target = worktree.join(path);

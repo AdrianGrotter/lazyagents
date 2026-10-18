@@ -254,9 +254,10 @@ After the add, files named by the project's `.worktreeinclude` that git ignores 
 the worktree, skipping any already there. `git ls-files --others --ignored --exclude-standard
 --directory` lists the ignored files and each directory ignored as a whole once, without
 walking it; such a directory is searched only when an include pattern names it or a path in
-it (ADR 0018). Within those paths, the files `ls-files` lists with the include patterns and
-with `--exclude-standard` are copied; a failure is logged and the agent
-starts anyway. A `CreateAgent.setup` the user approved in the TUI (ADR 0014) wraps the
+it (ADR 0018). Within those paths, the files `ls-files` lists with the include patterns are
+copied when git ignores them: a file the first listing names on its own is ignored, and
+within a directory it lists whole `ls-files --exclude-standard` tells. A failure is logged
+and the agent starts anyway. A `CreateAgent.setup` the user approved in the TUI (ADR 0014) wraps the
 agent's first start in `sh -c`, which runs the script in a shell of its own in the agent's
 terminal and then starts the agent whatever the script did.
 
