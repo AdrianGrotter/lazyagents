@@ -5489,7 +5489,11 @@ pub(crate) mod tests {
         let repo = dir.path().join("repo");
         let nested = repo.join("src/deep");
         std::fs::create_dir_all(&nested).expect("dirs");
-        assert!(!in_git_repo(&repo));
+        if in_git_repo(dir.path()) {
+            eprintln!("the temp dir is inside a git repository; not checking a path outside one");
+        } else {
+            assert!(!in_git_repo(&repo));
+        }
         std::fs::create_dir(repo.join(".git")).expect(".git");
         assert!(in_git_repo(&repo));
         assert!(in_git_repo(&nested));
