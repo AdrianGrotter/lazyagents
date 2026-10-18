@@ -210,11 +210,12 @@ The mouse works in the pane too; see **Mouse** below.
 agent's terminal through its history instead of reaching the agent. It needs an agent with
 a terminal, running or exited; for a stopped agent the status bar says `nothing to scroll`.
 The pane border takes the `[theme]` `scroll` colour (default yellow) and the status bar
-shows `SCROLL · j/k ctrl-u/d g/G · q exit`.
+shows `SCROLL · q/esc exit · j/k move · ctrl-d/ctrl-u half page · g/G top/bottom ·
+pagedown/pageup page`.
 
 | Key | Action |
 |---|---|
-| `j`/`k` | one line towards the bottom / back in history |
+| `j`/`k`, `↓`/`↑` | one line towards the bottom / back in history |
 | `ctrl-d`/`ctrl-u` | half a page towards the bottom / back |
 | `pagedown`/`pageup` | a page towards the bottom / back |
 | `g`/`G` | top of the history / bottom |

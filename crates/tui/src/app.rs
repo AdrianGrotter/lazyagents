@@ -13,6 +13,7 @@ use ratatui::layout::{Position, Rect};
 use crate::approved;
 use crate::commands::{self, Context, CustomCommand, Output, Prompt};
 use crate::config::{Config, PresetDef, Theme};
+use crate::fixed_keys::{self, DiffKey, Motion, ScrollKey};
 use crate::keymap::{Action, Keymap};
 use crate::keys;
 use crate::known::{self, KnownProject};
@@ -1364,11 +1365,8 @@ impl App {
     }
 
     fn closes_diff(&self, key: &KeyEvent) -> bool {
-        let plain = !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-        let fixed = matches!(key.code, KeyCode::Char('q' | 'D') | KeyCode::Esc);
-        (plain && fixed) || self.keymap.sidebar(key) == Some(Action::Diff)
+        fixed_keys::diff_key(key) == Some(DiffKey::Close)
+            || self.keymap.sidebar(key) == Some(Action::Diff)
     }
 
     pub fn set_screen_size(&mut self, cols: u16, rows: u16) {
@@ -1393,41 +1391,43 @@ impl App {
             return effects;
         }
         let page = self.diff_page() as i64;
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let step = match (key.code, ctrl) {
-            (KeyCode::Char('j') | KeyCode::Down, false) => 1,
-            (KeyCode::Char('k') | KeyCode::Up, false) => -1,
-            (KeyCode::Char('d'), true) => page / 2,
-            (KeyCode::Char('u'), true) => -page / 2,
-            (KeyCode::PageDown, _) => page,
-            (KeyCode::PageUp, _) => -page,
-            (KeyCode::Char('g'), false) => i64::MIN / 2,
-            (KeyCode::Char('G'), false) => i64::MAX / 2,
-            (KeyCode::Char('c'), false) => {
+        let Some(action) = fixed_keys::diff_key(&key) else {
+            return Vec::new();
+        };
+        let step = match action {
+            DiffKey::Move(Motion::Down) => 1,
+            DiffKey::Move(Motion::Up) => -1,
+            DiffKey::Move(Motion::HalfPageDown) => page / 2,
+            DiffKey::Move(Motion::HalfPageUp) => -page / 2,
+            DiffKey::Move(Motion::PageDown) => page,
+            DiffKey::Move(Motion::PageUp) => -page,
+            DiffKey::Move(Motion::Top) => i64::MIN / 2,
+            DiffKey::Move(Motion::Bottom) => i64::MAX / 2,
+            DiffKey::Close => return Vec::new(),
+            DiffKey::Comment => {
                 self.open_comment();
                 return Vec::new();
             }
-            (KeyCode::Char('n'), false) => {
+            DiffKey::NextComment => {
                 self.jump_to_comment(true);
                 return Vec::new();
             }
-            (KeyCode::Char('N'), false) => {
+            DiffKey::PreviousComment => {
                 self.jump_to_comment(false);
                 return Vec::new();
             }
-            (KeyCode::Char('S'), false) => return self.send_comments(),
-            (KeyCode::Char('s'), false) => {
+            DiffKey::SendComments => return self.send_comments(),
+            DiffKey::Scope => {
                 let Some(view) = &self.diff else {
                     return Vec::new();
                 };
                 let (id, scope) = (view.agent, view.scope.next());
                 return self.show_diff(id, scope);
             }
-            (KeyCode::Char(']'), false) => return self.jump_diff("diff --git", true),
-            (KeyCode::Char('['), false) => return self.jump_diff("diff --git", false),
-            (KeyCode::Char('}'), false) => return self.jump_diff("@@", true),
-            (KeyCode::Char('{'), false) => return self.jump_diff("@@", false),
-            _ => return Vec::new(),
+            DiffKey::NextFile => return self.jump_diff("diff --git", true),
+            DiffKey::PreviousFile => return self.jump_diff("diff --git", false),
+            DiffKey::NextHunk => return self.jump_diff("@@", true),
+            DiffKey::PreviousHunk => return self.jump_diff("@@", false),
         };
         self.move_diff_cursor(step);
         Vec::new()
@@ -1670,10 +1670,7 @@ impl App {
 
     /// Exits or quits; `None` for any other key.
     fn leave_scroll(&mut self, key: &KeyEvent) -> Option<Vec<Effect>> {
-        let plain = !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-        if plain && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+        if fixed_keys::scroll_key(key) == Some(ScrollKey::Exit) {
             return Some(self.exit_scroll());
         }
         (self.keymap.sidebar(key) == Some(Action::Quit)).then(|| vec![Effect::Quit])
@@ -1687,17 +1684,18 @@ impl App {
             return Vec::new();
         };
         let page = self.diff_page() as i32;
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let lines = match (key.code, ctrl) {
-            (KeyCode::Char('j'), false) => -1,
-            (KeyCode::Char('k'), false) => 1,
-            (KeyCode::Char('d'), true) => -(page / 2),
-            (KeyCode::Char('u'), true) => page / 2,
-            (KeyCode::PageDown, _) => -page,
-            (KeyCode::PageUp, _) => page,
-            (KeyCode::Char('g'), false) => SCROLL_TOP,
-            (KeyCode::Char('G'), false) => SCROLL_BOTTOM,
-            _ => return Vec::new(),
+        let Some(ScrollKey::Move(motion)) = fixed_keys::scroll_key(&key) else {
+            return Vec::new();
+        };
+        let lines = match motion {
+            Motion::Down => -1,
+            Motion::Up => 1,
+            Motion::HalfPageDown => -(page / 2),
+            Motion::HalfPageUp => page / 2,
+            Motion::PageDown => -page,
+            Motion::PageUp => page,
+            Motion::Top => SCROLL_TOP,
+            Motion::Bottom => SCROLL_BOTTOM,
         };
         vec![scroll_request(mode.agent, lines)]
     }
@@ -5969,6 +5967,8 @@ pub(crate) mod tests {
         for (event, lines) in [
             (key('j'), -1),
             (key('k'), 1),
+            (code(KeyCode::Down), -1),
+            (code(KeyCode::Up), 1),
             (ctrl('d'), -5),
             (ctrl('u'), 5),
             (code(KeyCode::PageDown), -10),

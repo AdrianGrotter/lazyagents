@@ -18,6 +18,7 @@ use crate::app::{
 };
 use crate::commands::Prompt;
 use crate::config::Theme;
+use crate::fixed_keys::{self, DIFF_HINTS, DIFF_KEYS, DiffKey};
 use crate::keymap::{Action, Keymap};
 
 pub const PULSE_TICKS: u64 = 10;
@@ -104,7 +105,6 @@ const SIDEBAR_HELP: [(&[Action], &str); 19] = [
         "quit (agents keep running) / stop the daemon too",
     ),
 ];
-const SCROLL_HINT: &str = "SCROLL · j/k ctrl-u/d g/G · q exit";
 const FILTER_HINT: &str = "enter keep · esc clear";
 const TOO_SMALL: &str = "terminal too small";
 
@@ -787,18 +787,23 @@ fn diff_text<'a>(view: &'a DiffView, app: &App, height: u16) -> Paragraph<'a> {
     Paragraph::new(rows)
 }
 
-fn diff_hint(keymap: &Keymap) -> String {
-    let mut close = vec!["q".to_string(), "esc".to_string(), "D".to_string()];
+/// The diff view's hints; the configured diff key closes it too.
+fn diff_hints(keymap: &Keymap) -> Vec<String> {
+    let mut close = fixed_keys::keys(&DIFF_KEYS, DiffKey::Close);
     for key in keymap.keys(Action::Diff) {
-        let key = key.to_string();
         if !close.contains(&key) {
             close.push(key);
         }
     }
-    format!(
-        "{} close · c comment · S send comments · n/N comments · s scope · ]/[ file · }}/{{ hunk · j/k move · ctrl-d/ctrl-u half page · pagedown/pageup page · g/G top/bottom",
-        close.join("/")
-    )
+    let mut hints = vec![format!("{} close", crate::keymap::join(&close))];
+    hints.extend(
+        DIFF_HINTS
+            .iter()
+            .filter(|(keys, _)| *keys != [DiffKey::Close])
+            .filter_map(|(keys, label)| fixed_keys::hint(&DIFF_KEYS, keys, label)),
+    );
+    hints.extend(fixed_keys::motion_hints());
+    hints
 }
 
 fn pane_hint(keymap: &Keymap) -> String {
@@ -881,8 +886,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
             Span::raw(format!("{} …", app.keymap.prefix())).fg(theme.working)
         }
         Focus::Pane => Span::raw(pane_hint(&app.keymap)).fg(theme.dim),
-        Focus::Diff => Span::raw(diff_hint(&app.keymap)).fg(theme.dim),
-        Focus::Scroll => Span::raw(SCROLL_HINT).fg(theme.scroll),
+        Focus::Diff => Span::raw(diff_hints(&app.keymap).join(" · ")).fg(theme.dim),
+        Focus::Scroll => {
+            let hints = std::iter::once("SCROLL".to_string()).chain(fixed_keys::scroll_hints());
+            Span::raw(hints.collect::<Vec<_>>().join(" · ")).fg(theme.scroll)
+        }
         Focus::Projects | Focus::Agents => {
             let hint = match state_hint(app) {
                 Some(state) => format!("{state} · {}", sidebar_hint(&app.keymap)),
@@ -2310,7 +2318,7 @@ mod tests {
         assert_eq!(buffer[(pane.x, pane.y)].fg, Color::Yellow);
         let status = text.lines().last().expect("status line");
         assert!(
-            status.starts_with("SCROLL · j/k ctrl-u/d g/G · q exit"),
+            status.starts_with("SCROLL · q/esc exit · j/k move · ctrl-d/ctrl-u half page"),
             "{status}"
         );
 
