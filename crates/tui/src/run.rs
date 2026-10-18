@@ -1,5 +1,6 @@
 use std::io::{IsTerminal, stdout};
 use std::mem::ManuallyDrop;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -162,62 +163,10 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
             let (guard, input) = open_terminal()?;
             (client, guard, input)
         }
-        Err(error) => {
-            let Some(mismatch) = error.downcast_ref::<VersionMismatch>() else {
-                return Err(error);
-            };
-            let (mut guard, mut input) = open_terminal()?;
-            let mut signals = Signals::new()?;
-            match ask_restart(&mut guard, &mut input, mismatch, &mut signals).await? {
-                Answer::Restart => {}
-                Answer::Quit => return Err(error),
-                Answer::Leave => return Ok(()),
-            }
-            let lock = paths.clone();
-            let pid = tokio::task::spawn_blocking(move || client::daemon_pid(&lock)).await?;
-            guard.terminal.draw(|frame| {
-                ui::draw_mismatch(
-                    frame,
-                    &mismatch.daemon_version,
-                    mismatch.protocol_version,
-                    Mismatch::Stopping(pid),
-                )
-            })?;
-            let stop = paths.clone();
-            let mut stopping =
-                tokio::task::spawn_blocking(move || client::stop_daemon(&stop, SHUTDOWN_WAIT));
-            loop {
-                tokio::select! {
-                    stopped = &mut stopping => {
-                        stopped?.with_context(|| {
-                            format!(
-                                "stopping daemon {} (protocol {})",
-                                mismatch.daemon_version, mismatch.protocol_version
-                            )
-                        })?;
-                        break;
-                    }
-                    event = input.recv() => match event {
-                        Some(Term::Key(key)) if is_ctrl_c(&key) => return Ok(()),
-                        Some(Term::Gone) | None => return Ok(()),
-                        Some(_) => {}
-                    },
-                    _ = signals.hangup.recv() => return Ok(()),
-                    _ = signals.terminate.recv() => return Ok(()),
-                    _ = signals.interrupt.recv() => return Ok(()),
-                }
-            }
-            let client = tokio::select! {
-                client = Client::connect_or_spawn(&paths, &exe) => {
-                    client.context("starting a new daemon")?
-                }
-                _ = signals.hangup.recv() => return Ok(()),
-                _ = signals.terminate.recv() => return Ok(()),
-                _ = signals.interrupt.recv() => return Ok(()),
-            };
-            while input.try_recv().is_ok() {}
-            (client, guard, input)
-        }
+        Err(error) => match restart_mismatched_daemon(&paths, &exe, error).await? {
+            Some(connected) => connected,
+            None => return Ok(()),
+        },
     };
     let (requests, mut incoming) = connection::spawn(client);
     let _ = requests.send(Request::ListProjects);
@@ -318,79 +267,176 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
             }
         };
         redraw = true;
+        let mut ctx = EffectContext {
+            app: &mut app,
+            guard: &mut guard,
+            requests: &requests,
+            incoming: &mut incoming,
+            interrupt: &mut interrupt,
+            finished: &finished_tx,
+            notify_method,
+            known_file: &known_file,
+            approved_file: &approved_file,
+        };
         for effect in effects {
-            match effect {
-                Effect::Send(request) => {
-                    let _ = requests.send(request);
-                }
-                Effect::Copy(text) => clipboard::copy(guard.terminal.backend_mut(), &text),
-                Effect::RunCommand {
-                    title,
-                    script,
-                    cwd,
-                    show,
-                } => {
-                    let finished = finished_tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let result = run_captured(&script, &cwd);
-                        let _ = finished.send(Finished {
-                            title,
-                            show,
-                            result,
-                        });
-                    });
-                }
-                Effect::RunInTerminal { title, script, cwd } => {
-                    guard.suspend();
-                    let result =
-                        tokio::task::spawn_blocking(move || run_in_terminal(&script, &cwd))
-                            .await
-                            .unwrap_or_else(|e| Err(e.to_string()));
-                    guard.resume()?;
-                    while let Ok(Some(())) =
-                        tokio::time::timeout(Duration::ZERO, interrupt.recv()).await
-                    {
-                    }
-                    app.terminal_command_finished(&title, result);
-                }
-                Effect::Notify(body) => {
-                    if let Some(method) = notify_method {
-                        notify::write(
-                            guard.terminal.backend_mut(),
-                            &notify::sequence(method, &body),
-                        );
-                    }
-                }
-                Effect::RememberProjects(added) => {
-                    update_known(&mut app, &known_file, |list| known::remember(list, &added))
-                }
-                Effect::ApproveSetup { project, script } => {
-                    match approved::update(&approved_file, |list| {
-                        approved::approve(list, &project, &script)
-                    }) {
-                        Ok(list) => app.approved_setups = list,
-                        Err(error) => app.fail(format!("{error:#}")),
-                    }
-                }
-                Effect::ForgetProject(path) => {
-                    update_known(&mut app, &known_file, |list| known::forget(list, &path))
-                }
-                Effect::Quit => return Ok(()),
-                Effect::StopDaemonAndQuit => {
-                    let _ = requests.send(Request::Shutdown);
-                    let _ = tokio::time::timeout(Duration::from_secs(3), async {
-                        while let Some(message) = incoming.recv().await {
-                            if matches!(message, Incoming::Closed) {
-                                break;
-                            }
-                        }
-                    })
-                    .await;
-                    return Ok(());
-                }
+            if apply_effect(&mut ctx, effect).await?.is_break() {
+                return Ok(());
             }
         }
     }
+}
+
+/// Asks to replace a daemon that speaks another protocol version, stops it and starts a
+/// new one. `None` when the user or a signal ended the TUI before a new daemon answered;
+/// any error other than a version mismatch comes back unchanged.
+async fn restart_mismatched_daemon(
+    paths: &StatePaths,
+    exe: &Path,
+    error: anyhow::Error,
+) -> anyhow::Result<Option<(Client, TerminalGuard, UnboundedReceiver<Term>)>> {
+    let Some(mismatch) = error.downcast_ref::<VersionMismatch>() else {
+        return Err(error);
+    };
+    let (mut guard, mut input) = open_terminal()?;
+    let mut signals = Signals::new()?;
+    match ask_restart(&mut guard, &mut input, mismatch, &mut signals).await? {
+        Answer::Restart => {}
+        Answer::Quit => return Err(error),
+        Answer::Leave => return Ok(None),
+    }
+    let lock = paths.clone();
+    let pid = tokio::task::spawn_blocking(move || client::daemon_pid(&lock)).await?;
+    guard.terminal.draw(|frame| {
+        ui::draw_mismatch(
+            frame,
+            &mismatch.daemon_version,
+            mismatch.protocol_version,
+            Mismatch::Stopping(pid),
+        )
+    })?;
+    let stop = paths.clone();
+    let mut stopping =
+        tokio::task::spawn_blocking(move || client::stop_daemon(&stop, SHUTDOWN_WAIT));
+    loop {
+        tokio::select! {
+            stopped = &mut stopping => {
+                stopped?.with_context(|| {
+                    format!(
+                        "stopping daemon {} (protocol {})",
+                        mismatch.daemon_version, mismatch.protocol_version
+                    )
+                })?;
+                break;
+            }
+            event = input.recv() => match event {
+                Some(Term::Key(key)) if is_ctrl_c(&key) => return Ok(None),
+                Some(Term::Gone) | None => return Ok(None),
+                Some(_) => {}
+            },
+            _ = signals.hangup.recv() => return Ok(None),
+            _ = signals.terminate.recv() => return Ok(None),
+            _ = signals.interrupt.recv() => return Ok(None),
+        }
+    }
+    let client = tokio::select! {
+        client = Client::connect_or_spawn(paths, exe) => {
+            client.context("starting a new daemon")?
+        }
+        _ = signals.hangup.recv() => return Ok(None),
+        _ = signals.terminate.recv() => return Ok(None),
+        _ = signals.interrupt.recv() => return Ok(None),
+    };
+    while input.try_recv().is_ok() {}
+    Ok(Some((client, guard, input)))
+}
+
+/// What carrying out an `Effect` reaches outside the model.
+struct EffectContext<'a> {
+    app: &'a mut App,
+    guard: &'a mut TerminalGuard,
+    requests: &'a UnboundedSender<Request>,
+    incoming: &'a mut UnboundedReceiver<Incoming>,
+    interrupt: &'a mut tokio::signal::unix::Signal,
+    finished: &'a UnboundedSender<Finished>,
+    notify_method: Option<notify::Method>,
+    known_file: &'a Path,
+    approved_file: &'a Path,
+}
+
+/// `Break` once the TUI should exit.
+async fn apply_effect(
+    ctx: &mut EffectContext<'_>,
+    effect: Effect,
+) -> anyhow::Result<ControlFlow<()>> {
+    match effect {
+        Effect::Send(request) => {
+            let _ = ctx.requests.send(request);
+        }
+        Effect::Copy(text) => clipboard::copy(ctx.guard.terminal.backend_mut(), &text),
+        Effect::RunCommand {
+            title,
+            script,
+            cwd,
+            show,
+        } => {
+            let finished = ctx.finished.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = run_captured(&script, &cwd);
+                let _ = finished.send(Finished {
+                    title,
+                    show,
+                    result,
+                });
+            });
+        }
+        Effect::RunInTerminal { title, script, cwd } => {
+            ctx.guard.suspend();
+            let result = tokio::task::spawn_blocking(move || run_in_terminal(&script, &cwd))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            ctx.guard.resume()?;
+            while let Ok(Some(())) =
+                tokio::time::timeout(Duration::ZERO, ctx.interrupt.recv()).await
+            {}
+            ctx.app.terminal_command_finished(&title, result);
+        }
+        Effect::Notify(body) => {
+            if let Some(method) = ctx.notify_method {
+                notify::write(
+                    ctx.guard.terminal.backend_mut(),
+                    &notify::sequence(method, &body),
+                );
+            }
+        }
+        Effect::RememberProjects(added) => update_known(ctx.app, ctx.known_file, |list| {
+            known::remember(list, &added)
+        }),
+        Effect::ApproveSetup { project, script } => {
+            match approved::update(ctx.approved_file, |list| {
+                approved::approve(list, &project, &script)
+            }) {
+                Ok(list) => ctx.app.approved_setups = list,
+                Err(error) => ctx.app.fail(format!("{error:#}")),
+            }
+        }
+        Effect::ForgetProject(path) => {
+            update_known(ctx.app, ctx.known_file, |list| known::forget(list, &path))
+        }
+        Effect::Quit => return Ok(ControlFlow::Break(())),
+        Effect::StopDaemonAndQuit => {
+            let _ = ctx.requests.send(Request::Shutdown);
+            let _ = tokio::time::timeout(Duration::from_secs(3), async {
+                while let Some(message) = ctx.incoming.recv().await {
+                    if matches!(message, Incoming::Closed) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            return Ok(ControlFlow::Break(()));
+        }
+    }
+    Ok(ControlFlow::Continue(()))
 }
 
 /// A background command's result, back from its thread.
