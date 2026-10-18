@@ -496,7 +496,79 @@ pub fn diff(dir: &Path, base: Option<&str>, scope: DiffScope) -> anyhow::Result<
 
 #[cfg(test)]
 mod tests {
-    use super::may_reach_into;
+    use super::{may_reach_into, worktree_failure};
+    use std::path::Path;
+
+    fn explained(raw: &str, base: Option<&str>) -> Option<String> {
+        worktree_failure(
+            raw,
+            Path::new("/p/repo"),
+            Path::new("/s/worktrees/x"),
+            "lazyagents/x",
+            base,
+        )
+    }
+
+    #[test]
+    fn unknown_git_output_is_left_to_git() {
+        for raw in [
+            "fatal: post-checkout hook refused",
+            "fatal: invalid reference: other",
+            "fatal: a branch named 'lazyagents/y' already exists",
+            "fatal: '/elsewhere' already exists",
+            "",
+        ] {
+            assert_eq!(explained(raw, Some("main")), None, "{raw}");
+        }
+        assert_eq!(explained("fatal: invalid reference: main", None), None);
+    }
+
+    #[test]
+    fn each_known_failure_gets_its_sentence() {
+        for (raw, base, expected) in [
+            (
+                "fatal: not a git repository (or any of the parent directories): .git",
+                None,
+                "/p/repo is not a git repository",
+            ),
+            (
+                "Preparing worktree (new branch 'lazyagents/x')\nfatal: a branch named 'lazyagents/x' already exists",
+                None,
+                "branch lazyagents/x already exists; delete it or choose another agent name",
+            ),
+            (
+                "fatal: invalid reference: dev",
+                Some("dev"),
+                "base dev not found",
+            ),
+            (
+                "fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.",
+                None,
+                "/p/repo has no commits to branch from",
+            ),
+            (
+                "fatal: '/s/worktrees/x' already exists",
+                None,
+                "worktree directory /s/worktrees/x already exists",
+            ),
+        ] {
+            assert_eq!(explained(raw, base).as_deref(), Some(expected), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_missing_repository_wins_over_any_other_cause() {
+        let raw = "fatal: not a git repository\nfatal: a branch named 'lazyagents/x' already exists\nfatal: invalid reference: dev\nfatal: '/s/worktrees/x' already exists";
+        assert_eq!(
+            explained(raw, Some("dev")).as_deref(),
+            Some("/p/repo is not a git repository")
+        );
+        let raw = "fatal: a branch named 'lazyagents/x' already exists\nfatal: '/s/worktrees/x' already exists";
+        assert_eq!(
+            explained(raw, None).as_deref(),
+            Some("branch lazyagents/x already exists; delete it or choose another agent name")
+        );
+    }
 
     #[test]
     fn a_pattern_reaches_into_the_directories_it_names() {
