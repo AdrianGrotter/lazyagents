@@ -1840,14 +1840,19 @@ impl App {
             ),
             MouseKind::ScrollUp | MouseKind::ScrollDown => Vec::new(),
             MouseKind::Down => {
-                self.interactions += 1;
                 self.selection = None;
                 if self.popup.is_some() {
-                    if crate::ui::popup_area(self, areas.screen).is_some_and(|r| !r.contains(at)) {
+                    let outside =
+                        crate::ui::popup_area(self, areas.screen).is_some_and(|r| !r.contains(at));
+                    if outside || !self.popup.as_ref().is_some_and(Popup::is_sending) {
+                        self.interactions += 1;
+                    }
+                    if outside {
                         self.popup = None;
                     }
                     return Vec::new();
                 }
+                self.interactions += 1;
                 self.on_click(at, areas)
             }
             MouseKind::Drag => {
@@ -4857,6 +4862,20 @@ pub(crate) mod tests {
         let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
         let _ = app.apply_response(Response::Agent(a.clone()));
         assert!(app.agents.iter().all(|x| x.id != a.id));
+    }
+
+    #[test]
+    fn a_click_inside_a_waiting_form_does_not_count_as_moving_on() {
+        let (mut app, _, _) = two_agents();
+        let (info, request) = submit_shell_agent(&mut app, "zed");
+        let areas = screen_areas(&app);
+        let form = crate::ui::popup_area(&app, areas.screen).expect("form on screen");
+        let _ = app.on_mouse(mouse(MouseKind::Down, (form.x + 1, form.y + 1)), &areas);
+        let _ = app.on_mouse(mouse(MouseKind::Up, (form.x + 1, form.y + 1)), &areas);
+        assert!(app.popup.as_ref().is_some_and(Popup::is_sending));
+        let _ = app.apply_reply(&request, Ok(Response::Agent(info.clone())));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(info.id));
+        assert_eq!(app.focus, Focus::Pane);
     }
 
     #[test]
