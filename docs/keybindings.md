@@ -111,7 +111,8 @@ Spaces in an agent's name (new agent form and rename) become dashes: `my new age
 stored as `my-new-agent`. An empty name becomes `<preset>-<n>` with the lowest number no
 agent in the project uses (`claude-1`, `shell-2`). The Agents box and the pane's header
 show a Claude agent by its session title once Claude has set one, and by its name until
-then; the name stays the agent's identity for the CLI and its worktree branch.
+then; the name stays the agent's identity for the CLI and its worktree branch. A name too
+long for its row or the pane's header is cut with `…`, so the status after it stays visible.
 With Worktree on, the agent runs in a new git worktree on branch `lazyagents/<name>`, made
 from Base; an empty Base means the project's current branch. `d` never deletes an agent's branch, so a new worktree agent with a removed agent's name
 fails with `branch lazyagents/<name> already exists; delete it or choose another

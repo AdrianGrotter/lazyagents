@@ -351,7 +351,8 @@ pub(crate) fn label(agent: &AgentInfo) -> &str {
     }
 }
 
-fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
+/// The name is cut to fit `width` cells, so the status after it stays visible.
+fn agent_row(app: &App, agent: &AgentInfo, tick: u64, width: usize) -> ListItem<'static> {
     let unseen = app.is_unseen(agent.id);
     let (symbol, style) = match unseen {
         true => ("●", Style::new().fg(app.theme.done)),
@@ -368,7 +369,9 @@ fn agent_row(app: &App, agent: &AgentInfo, tick: u64) -> ListItem<'static> {
         }
         AgentView::Project => label(agent).to_string(),
     };
-    let rest = format!(" {name}  {}", app.status_label(agent));
+    let status = app.status_label(agent);
+    let room = width.saturating_sub(text_width(&status) + 4);
+    let rest = format!(" {}  {status}", ellipsized(&name, room));
     let line = Line::from(vec![Span::styled(symbol, style), Span::raw(rest)]);
     ListItem::new(if agent.status == Status::NeedsInput {
         line.fg(app.theme.attention)
@@ -395,7 +398,11 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect, tick: u64) {
         frame.render_widget(text.block(block), area);
         return;
     }
-    let items = agents.iter().map(|a| agent_row(app, a, tick)).collect();
+    let width = usize::from(area.width.saturating_sub(2 + 2));
+    let items = agents
+        .iter()
+        .map(|a| agent_row(app, a, tick, width))
+        .collect();
     let style = selection_style(app.focus == Focus::Agents, &app.theme);
     let (list, mut state) = selectable_list(items, app.agent_index, block, style);
     frame.render_stateful_widget(list, area, &mut state);
@@ -580,6 +587,21 @@ fn clip_right(spans: Vec<Span<'static>>, room: usize) -> Vec<Span<'static>> {
     clipped
 }
 
+/// `text` cut to `room` cells, ending in `…` when it was cut.
+fn ellipsized(text: &str, room: usize) -> String {
+    if text_width(text) <= room {
+        return text.to_string();
+    }
+    let mut kept = String::new();
+    for c in text.chars() {
+        if text_width(&kept) + char_width(c) + 1 > room {
+            break;
+        }
+        kept.push(c);
+    }
+    format!("{kept}…")
+}
+
 fn clip_left(text: &str, room: usize) -> String {
     let count = text.chars().count();
     if count <= room {
@@ -615,6 +637,14 @@ fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(text).block(block), area);
 }
 
+/// The title `format` builds around `name`, with the name cut so the title fits on the top
+/// border of `area`.
+fn fit_title(area: Rect, name: &str, format: impl Fn(&str) -> String) -> String {
+    let room = usize::from(area.width.saturating_sub(2));
+    let around = text_width(&format(""));
+    format(&ellipsized(name, room.saturating_sub(around)))
+}
+
 fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     let focused = app.focus == Focus::Pane;
     let agent = app.selected_agent();
@@ -624,7 +654,10 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
             n if view.lines.is_some() => format!(" · {n} files"),
             _ => String::new(),
         };
-        let title = format!(" diff · {} · {}{files} ", label(agent), view.scope.label());
+        let scope = view.scope.label();
+        let title = fit_title(areas.pane, label(agent), |name| {
+            format!(" diff · {name} · {scope}{files} ")
+        });
         frame.render_widget(block(title, true, &app.theme), areas.pane);
         frame.render_widget(
             diff_text(view, app, areas.pane_inner.height),
@@ -633,12 +666,12 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
         return;
     }
     let title = match agent {
-        Some(agent) => format!(
-            " {} · {} · {} ",
-            label(agent),
-            kind_label(agent.kind),
-            agent.status.label()
-        ),
+        Some(agent) => {
+            let (kind, status) = (kind_label(agent.kind), agent.status.label());
+            fit_title(areas.pane, label(agent), |name| {
+                format!(" {name} · {kind} · {status} ")
+            })
+        }
         None => " lazyagents ".to_string(),
     };
     let pane_block = if app.focus == Focus::Scroll {
@@ -1935,6 +1968,36 @@ mod tests {
         let _ = app.on_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
         let (text, _) = render(&app);
         assert!(text.contains("p/Fix it"), "{text}");
+    }
+
+    #[test]
+    fn a_long_agent_name_is_cut_and_its_status_stays() {
+        let p = project("p");
+        let long = agent(&p, "a-very-long-agent-name-for-testing", Status::NeedsInput);
+        let (mut app, _) = loaded(vec![p.clone()], vec![long]);
+        for (width, height) in [(60, 20), (80, 24)] {
+            let (text, _) = render_at(&app, width, height);
+            let row = line_with(&text, "▸ ●");
+            assert!(row.contains("…  needs input│"), "{width}: {row}");
+            let title = text.lines().next().expect("top row");
+            assert!(
+                title.contains("… · generic · needs input "),
+                "{width}: {title}"
+            );
+        }
+        let (text, _) = render_at(&app, 200, 50);
+        let title = text.lines().next().expect("top row");
+        assert!(title.contains(" a-very-long-agent-name-for-testing · generic · needs input "));
+        app.view = AgentView::All;
+        let (text, _) = render_at(&app, 80, 24);
+        assert!(
+            line_with(&text, "▸ ●").contains("p/a-…  needs input"),
+            "{text}"
+        );
+        assert!(
+            line_with(&text, "▸ ●").contains("…  needs input│"),
+            "{text}"
+        );
     }
 
     #[test]
