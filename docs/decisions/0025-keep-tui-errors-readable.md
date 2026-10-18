@@ -1,4 +1,4 @@
-# 0020. Keep TUI errors where they happened and until they are read
+# 0025. Keep TUI errors where they happened and until they are read
 
 Date: 2026-10-18
 Status: Accepted

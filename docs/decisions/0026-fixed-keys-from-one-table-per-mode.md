@@ -1,4 +1,4 @@
-# 0021. Fixed keys come from one table per mode
+# 0026. Fixed keys come from one table per mode
 
 Date: 2026-10-18
 Status: Accepted

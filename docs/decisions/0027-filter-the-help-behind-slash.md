@@ -1,4 +1,4 @@
-# 0022. Filter the help popup behind `/`, so its keys can scroll it
+# 0027. Filter the help popup behind `/`, so its keys can scroll it
 
 Date: 2026-10-18
 Status: Accepted
