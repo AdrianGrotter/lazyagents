@@ -27,6 +27,7 @@ const CONFIRM_HINT: &str = "y/enter confirm · n/esc cancel";
 const OUTPUT_HINT: &str = "j/k scroll · q close";
 const MENU_HINT: &str = "j/k move · enter run · esc cancel";
 const INPUT_HINT: &str = "enter ok · esc cancel";
+const RENAME_HINT: &str = "enter rename · esc cancel";
 const SENDING_HINT: &str = "waiting for the daemon · esc close";
 const REPLY_HINT: &str = "enter send · esc cancel";
 const COMMENT_HINT: &str = "enter save (empty removes) · esc cancel";
@@ -1458,7 +1459,7 @@ fn popup_content(popup: &Popup, app: &App, screen: (u16, u16)) -> PopupContent {
                 field_line("Name: ", input.clone(), true, theme),
                 Line::default(),
             ];
-            lines.extend(form_footer(submission, INPUT_HINT, FORM_WIDTH, theme));
+            lines.extend(form_footer(submission, RENAME_HINT, FORM_WIDTH, theme));
             PopupContent::new(" Rename ", FORM_WIDTH, lines).cursor_at(Some(0))
         }
         Popup::ProjectPicker { index } => {
@@ -1847,15 +1848,15 @@ fn project_form_lines(form: &ProjectForm, theme: &Theme) -> (Vec<Line<'static>>,
 /// Returns the lines and, when the focused field takes text, its row.
 fn form_lines(form: &NewAgentForm, app: &App) -> (Vec<Line<'static>>, Option<usize>) {
     let mut rows: Vec<(Field, &'static str, String)> = vec![
-        (Field::Name, "Name:    ", form.name.clone()),
+        (Field::Name, "Name:     ", form.name.clone()),
         (
             Field::Preset,
-            "Preset:  ",
+            "Preset:   ",
             format!("‹ {} ›", form.preset.label(&app.presets)),
         ),
     ];
     if form.preset == Preset::Custom {
-        rows.push((Field::Command, "Command: ", form.command.clone()));
+        rows.push((Field::Command, "Command:  ", form.command.clone()));
     }
     let toggle = match (form.outside_git, form.worktree) {
         (true, _) => "off (not a git repository)",
@@ -1869,14 +1870,14 @@ fn form_lines(form: &NewAgentForm, app: &App) -> (Vec<Line<'static>>, Option<usi
         } else {
             form.base.clone()
         };
-        rows.push((Field::Base, "Base:    ", base));
+        rows.push((Field::Base, "Base:     ", base));
     }
     let prompt = if form.prompt.is_empty() && form.field != Field::Prompt {
         "(none)".to_string()
     } else {
         form.prompt.clone()
     };
-    rows.push((Field::Prompt, "Prompt:  ", prompt));
+    rows.push((Field::Prompt, "Prompt:   ", prompt));
     let cursor = rows.iter().position(|(field, ..)| {
         *field == form.field
             && matches!(
@@ -2928,8 +2929,11 @@ mod tests {
         app.popup = Some(Popup::NewAgent(form.clone()));
         let (buffer, cursor) = cursor_of(&app);
         assert_nothing_reversed(&buffer);
-        let name = find_text(&buffer, buffer.area, "Name:    bot");
-        assert_eq!(cursor, Some((name.0 + "Name:    bot".len() as u16, name.1)));
+        let name = find_text(&buffer, buffer.area, "Name:     bot");
+        assert_eq!(
+            cursor,
+            Some((name.0 + "Name:     bot".len() as u16, name.1))
+        );
 
         form.field = Field::Preset;
         app.popup = Some(Popup::NewAgent(form));
@@ -2938,6 +2942,56 @@ mod tests {
         let preset = find_text(&buffer, buffer.area, "Preset:");
         assert_eq!(buffer[preset].fg, app.theme.accent);
         assert_nothing_reversed(&buffer);
+    }
+
+    #[test]
+    fn new_agent_form_values_start_in_one_column() {
+        let (mut app, _) = loaded(vec![project("p")], Vec::new());
+        app.popup = Some(Popup::NewAgent(NewAgentForm {
+            name: "bot".into(),
+            preset: Preset::Custom,
+            command: "make".into(),
+            worktree: true,
+            base: "main".into(),
+            prompt: "go".into(),
+            field: Field::Prompt,
+            submission: Default::default(),
+            outside_git: false,
+        }));
+        let (text, _) = render(&app);
+        let columns: Vec<usize> = [
+            ("Name:", "bot"),
+            ("Preset:", "‹ custom"),
+            ("Command:", "make"),
+            ("Worktree:", "[x]"),
+            ("Base:", "main"),
+            ("Prompt:", "go"),
+        ]
+        .iter()
+        .map(|(label, value)| {
+            let row = line_with(&text, label);
+            assert!(row.contains(value), "{label} {value}\n{text}");
+            column(row, value)
+        })
+        .collect();
+        assert!(
+            columns.iter().all(|c| *c == columns[0]),
+            "{columns:?}\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_rename_popup_names_its_keys() {
+        let p = project("p");
+        let a = agent(&p, "a", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a.clone()]);
+        app.popup = Some(Popup::Rename {
+            agent: a.id,
+            input: "a".into(),
+            submission: Default::default(),
+        });
+        let (text, _) = render(&app);
+        assert!(text.contains("enter rename · esc cancel"), "{text}");
     }
 
     #[test]
@@ -3343,14 +3397,14 @@ mod tests {
         app.popup = Some(Popup::NewAgent(form(Preset::Claude)));
         let (text, _) = render(&app);
         assert!(
-            text.contains("Name:    api")
+            text.contains("Name:     api")
                 && text.contains("‹ claude ›")
                 && !text.contains("Command:"),
             "{text}"
         );
         app.popup = Some(Popup::NewAgent(form(Preset::Custom)));
         let (text, _) = render(&app);
-        assert!(text.contains("Command: make"), "{text}");
+        assert!(text.contains("Command:  make"), "{text}");
     }
 
     #[test]

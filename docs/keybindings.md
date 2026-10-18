@@ -104,7 +104,8 @@ jump to the top or bottom, and the popup says how many rows are above or below. 
 does nothing until the last row has been shown, and on a terminal too small to show the script
 it never acts; `s` (skip the setup) and `n`/`esc` work at any time.
 
-Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the new agent form,
+Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the rename popup
+`enter` renames and `esc` cancels. In the new agent form,
 `tab`/`shift-tab` (or `↓`/`↑`) move between the visible fields, `enter` starts the agent and
 `esc` cancels. The fields are Name, Preset (`←`/`→`/`space` change it), Command (only for the
 custom preset), Worktree (`space`/`←`/`→` toggle it; for a project outside a git repository it
