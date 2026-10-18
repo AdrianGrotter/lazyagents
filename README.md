@@ -39,7 +39,7 @@ The mouse works too: click to focus, drag in the terminal to copy. Keys, presets
 
 An agent created with the worktree option runs in its own git worktree on the branch `lazyagents/<name>`, under the state directory. Removing the agent can remove the worktree, and the finish menu (`F`) can merge the branch, open a pull request, or delete the branch once it is merged.
 
-The same daemon is scriptable without the TUI:
+The same daemon is scriptable without the TUI. An agent argument is its id, `<project>/<name>`, a name that is unique across projects, or an id prefix of at least 4 hex characters:
 
 ```sh
 lazyagents new api        # start a Claude agent named api in the current project

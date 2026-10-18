@@ -46,7 +46,9 @@ Subcommands:
   reported after the agent's command, as `(Opus · 23% context · $0.42)`.
 - `lazyagents send <agent> <text>` — type `text` into the agent and press enter, as `i` does
   in the TUI.
-- `lazyagents kill|restart|rm <agent>`, `lazyagents rename <agent> <name>`. `rm` keeps
+- `lazyagents kill|restart|rm <agent>`, `lazyagents rename <agent> <name>`. An `<agent>` is
+  its id, `<project>/<name>`, a name unique across projects, or an id prefix of at least
+  4 hex characters. `rm` keeps
   a worktree agent's worktree and branch and says so: `removed <name>; kept worktree
   <path> (branch <branch>)`.
 - `lazyagents shutdown` — stop the daemon and every agent.

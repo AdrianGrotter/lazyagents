@@ -10,7 +10,11 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use protocol::StatePaths;
 
-/// A lazygit-style terminal UI for managing coding agents.
+const AGENT_HELP: &str = "The agent: its id, <project>/<name>, a name unique across projects, \
+     or an id prefix of at least 4 hex characters";
+
+/// A lazygit-style terminal UI for managing coding agents. Running it with no command
+/// opens the TUI.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
@@ -51,15 +55,34 @@ pub enum Command {
         command: Vec<String>,
     },
     /// Stop an agent
-    Kill { agent: String },
+    Kill {
+        #[arg(help = AGENT_HELP)]
+        agent: String,
+    },
     /// Restart an agent, resuming its Claude session when it has one
-    Restart { agent: String },
+    Restart {
+        #[arg(help = AGENT_HELP)]
+        agent: String,
+    },
     /// Remove an agent
-    Rm { agent: String },
+    Rm {
+        #[arg(help = AGENT_HELP)]
+        agent: String,
+    },
     /// Rename an agent
-    Rename { agent: String, name: String },
+    Rename {
+        #[arg(help = AGENT_HELP)]
+        agent: String,
+        /// The new name
+        name: String,
+    },
     /// Type a line into an agent and press enter, as if in its pane
-    Send { agent: String, text: String },
+    Send {
+        #[arg(help = AGENT_HELP)]
+        agent: String,
+        /// The line to type
+        text: String,
+    },
     /// Stop the daemon and every agent
     Shutdown,
 }

@@ -1107,3 +1107,15 @@ command = '''printf 'answer? '; until [ -e '{typed}' ]; do sleep 0.05; done; sle
     tui.keys(&["n"]);
     tui.wait_for(" New agent ");
 }
+
+#[test]
+fn help_says_how_agents_are_named_and_what_bare_lazyagents_does() {
+    let env = TestEnv::new();
+    let top = env.ok(&["--help"]);
+    assert!(top.contains("no command opens the TUI"), "{top}");
+    for command in ["kill", "restart", "rm", "rename", "send"] {
+        let help = env.ok(&[command, "--help"]);
+        assert!(help.contains("<project>/<name>"), "{command}: {help}");
+        assert!(help.contains("4 hex"), "{command}: {help}");
+    }
+}
