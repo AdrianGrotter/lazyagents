@@ -1,4 +1,4 @@
-# 0021. Bound shutdown's wait for requests in flight
+# 0022. Bound shutdown's wait for requests in flight
 
 Date: 2026-10-18
 Status: Accepted
@@ -7,7 +7,7 @@ Status: Accepted
 
 Shutdown stops every agent, waits for every request running off the event loop and finishes it, then stops what turned up meanwhile (ADR 0019). The wait had no limit. A worktree create runs the user's checkout hooks, and a merge or a removal runs git with the user's hooks and config; one that never ends held the daemon, its socket and its lock forever. `lazyagents shutdown` and the TUI's version-mismatch flow give up after `protocol::SHUTDOWN_WAIT` (20 s) and report that the daemon did not stop, and a new daemon cannot start while the old one holds the lock.
 
-ADR 0019 waited because abandoning a create leaves a worktree and branch nobody owns. ADR 0020 now records a worktree being created in `state.toml` and removes it at the next start.
+ADR 0019 waited because abandoning a create leaves a worktree and branch nobody owns. ADR 0021 now records a worktree being created in `state.toml` and removes it at the next start.
 
 ## Decision
 

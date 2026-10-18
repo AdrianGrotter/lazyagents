@@ -1,4 +1,4 @@
-# 0023. Refuse a state directory whose socket path exceeds the platform limit
+# 0024. Refuse a state directory whose socket path exceeds the platform limit
 
 Date: 2026-10-18
 Status: Accepted

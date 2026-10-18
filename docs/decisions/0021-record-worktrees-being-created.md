@@ -1,4 +1,4 @@
-# 0020. Record worktrees being created in state.toml and remove them at the next start
+# 0021. Record worktrees being created in state.toml and remove them at the next start
 
 Date: 2026-10-18
 Status: Accepted

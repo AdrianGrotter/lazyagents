@@ -1,4 +1,4 @@
-# 0022. Bound each client's queue: drop frames, close a connection that overflows
+# 0023. Bound each client's queue: drop frames, close a connection that overflows
 
 Date: 2026-10-18
 Status: Accepted

@@ -57,7 +57,7 @@ Subcommands:
 Commands that talk to the daemon start it if its socket is missing or dead, except
 `shutdown`, which only connects to a running one. A state directory whose `daemon.sock`
 path would exceed the platform's socket limit (104 bytes on macOS, 108 on Linux) is
-refused before anything starts (ADR 0023). The auto-started daemon runs in its own
+refused before anything starts (ADR 0024). The auto-started daemon runs in its own
 session without a controlling terminal, from `/`, with null stdio and without the caller's
 terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
 
@@ -153,7 +153,7 @@ a hook never waits behind other work. Shutdown is the one exception: it runs on 
 which ends with it.
 
 Nothing waits for a client either: each connection has a bounded queue, which its own
-task writes to the socket (`outbox.rs`, ADR 0022). Frames go only while fewer than 4 are
+task writes to the socket (`outbox.rs`, ADR 0023). Frames go only while fewer than 4 are
 queued; a frame that finds 4 is dropped, and the next frame for that connection is full,
 so a client that stalled sees the current screen as soon as it reads again. Every other
 message (replies and events) must arrive: up to 16384 of them may queue, and a connection
@@ -183,7 +183,7 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   recorded in the same save that drops the pending worktree; a failed add drops it after
   git undid its work. When a daemon starts and finds pending worktrees, a crash or a
   shutdown cut a create short: it removes each one with its branch off the event loop
-  (keeping one an agent records) and keeps its name reserved until then (ADR 0020). One
+  (keeping one an agent records) and keeps its name reserved until then (ADR 0021). One
   git will not let go of (a locked worktree, or a branch checked out elsewhere) stays
   pending, with a warning in the log, and is tried again at the next start. One whose
   repository is definitely gone is dropped, with a line at info level, so the project can
@@ -195,10 +195,10 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   `Stopped` and answers `the daemon is shutting down`, a removal completes, and a
   worktree made for an agent that never started is removed with its branch, the create
   answered `the daemon shut down before <name> started; its worktree was removed`. It
-  waits until 13 s after it began (ADR 0021), so a checkout hook that never ends cannot
+  waits until 13 s after it began (ADR 0022), so a checkout hook that never ends cannot
   hold it: a create still running then is answered `the daemon shut down before <name>
   started; its worktree is removed at the next start`, and the next start removes what
-  it made (ADR 0020); other requests still running are logged and get no answer.
+  it made (ADR 0021); other requests still running are logged and get no answer.
   Processes found meanwhile get a second pass.
 
 ### The daemon is the terminal
