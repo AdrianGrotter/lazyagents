@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -34,20 +35,30 @@ pub struct StoredState {
 
 pub fn load(path: &Path) -> anyhow::Result<StoredState> {
     match fs::read_to_string(path) {
+        Ok(text) if text.trim().is_empty() => anyhow::bail!("{} is empty", path.display()),
         Ok(text) => toml::from_str(&text).with_context(|| format!("parsing {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StoredState::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
 
+/// Replaces the file atomically and durably: the new text reaches the disk before the
+/// rename, and the rename before this returns.
 pub fn save(path: &Path, state: &StoredState) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
+    let dir = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let text = toml::to_string(state).context("serializing state")?;
     let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    fs::File::create(&tmp)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    fs::File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("syncing {}", dir.display()))
 }
 
 #[cfg(test)]
@@ -165,5 +176,27 @@ mod tests {
         fs::write(&path, "projects = 7\n[[[").expect("write");
         let err = load(&path).expect_err("corrupt");
         assert!(format!("{err:#}").contains("state.toml"), "{err:#}");
+    }
+
+    #[test]
+    fn an_empty_file_is_corrupt_not_an_empty_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.toml");
+        for text in ["", " \n\n"] {
+            fs::write(&path, text).expect("write");
+            let err = load(&path).expect_err("empty");
+            assert!(
+                format!("{err:#}").contains("state.toml is empty"),
+                "{err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_state_is_saved_as_a_file_that_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.toml");
+        save(&path, &StoredState::default()).expect("save");
+        assert_eq!(load(&path).expect("load"), StoredState::default());
     }
 }

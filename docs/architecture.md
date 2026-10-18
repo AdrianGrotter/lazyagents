@@ -376,10 +376,10 @@ daemon last told it.
   (`known.rs`, ADR 0009).
 - Config: `$LAZYAGENTS_CONFIG`, else `$XDG_CONFIG_HOME/lazyagents/config.toml`, else
   `~/.config/lazyagents/config.toml`: keybindings, agent presets, theme colours,
-  notifications, custom commands. A missing file gives the built-in
-  defaults; anything unusable becomes a warning in the TUI status line
-  ([configuration.md](configuration.md)).
-- `state.toml` is written atomically (write temp + rename) on every metadata change.
+  notifications, custom commands. A missing file gives the built-in defaults; anything
+  unusable becomes a warning in the TUI status line ([configuration.md](configuration.md)).
+- `state.toml` is written atomically and durably on every metadata change: a temp file is
+  written and synced, renamed over it, and the directory synced.
 
 ## Error handling
 
@@ -413,7 +413,9 @@ daemon last told it.
   load as `Stopped` and can be restarted.
   Claude resumes only sessions that received a prompt
   (see [ADR 0006](decisions/0006-resume-only-prompted-sessions.md)).
-- A corrupt `state.toml` → the daemon refuses to start and leaves the file untouched.
+- A corrupt or empty `state.toml` → the daemon refuses to start and leaves the file
+  untouched. The daemon never writes an empty file (even no projects and no agents are
+  written out), so an empty one is the sign of a lost write, not of an empty state.
 - Spawn failure (command not found, cwd missing) → agent `Exited`, error rendered in the
   pane and the status line.
 - Worktree errors (branch exists, base missing) → shown in the status bar; nothing is
