@@ -1,7 +1,7 @@
 # 0002. Agents are interactive inside the main pane
 
 Date: 2026-10-15
-Status: Accepted (confirmed by the milestone 1 spike, see docs/spike-report.md)
+Status: Accepted (confirmed by the milestone 1 spike, see docs/superpowers/notes/spike-report.md)
 
 ## Context
 

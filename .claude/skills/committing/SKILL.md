@@ -5,7 +5,7 @@ description: "Conventional Commits rules for this repo: types, scopes, subject f
 
 # Committing
 
-1. Run `just check` and read the result. Commit only on green.
+1. Follow the `verifying` skill and commit only on green. One green run on the combined tree covers several commits made from it.
 2. Stage one logical change: a feature with its tests and docs, a fix with its regression test. Unrelated changes become separate commits.
 3. Write the message:
 
@@ -16,7 +16,7 @@ description: "Conventional Commits rules for this repo: types, scopes, subject f
    ```
 
    - type: `feat` `fix` `docs` `refactor` `test` `chore` `build` `ci` `perf`
-   - scope (optional): `protocol` `daemon` `tui` `cli` `client` `docs` `nix` `repo` `spike`, naming the crate or area touched; leave it out when the change spans several.
+   - scope (optional): `protocol` `daemon` `tui` `cli` `client` `docs` `nix` `repo`, naming the crate or area touched; leave it out when the change spans several.
    - subject: imperative mood, lower case, no trailing period; the whole first line is at most 72 characters. Count it before committing; the commit-msg hook rejects 73+.
    - breaking change to the protocol or the on-disk state format: `!` after the scope and a `BREAKING CHANGE:` footer.
 4. Commit with a heredoc so the body keeps its line breaks:
