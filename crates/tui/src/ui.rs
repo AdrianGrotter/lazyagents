@@ -470,8 +470,9 @@ impl InfoRow {
     }
 }
 
-/// Git rows come right after what the agent waits for, so they stay visible when a short
-/// terminal clips the box.
+/// The agent's name shows while a session title replaces it in the list, since the CLI
+/// takes the name. Git rows come right after what the agent waits for, so they stay
+/// visible when a short terminal clips the box.
 pub fn info_rows(app: &App) -> Vec<InfoRow> {
     let theme = &app.theme;
     match (app.selected_agent(), app.selected_project()) {
@@ -484,6 +485,9 @@ pub fn info_rows(app: &App) -> Vec<InfoRow> {
             {
                 let waiting = Span::raw(waiting.clone()).fg(theme.attention);
                 rows.push(InfoRow::spans("waiting", vec![waiting]));
+            }
+            if label(agent) != agent.name {
+                rows.push(InfoRow::text("name", agent.name.clone()));
             }
             if let Some(worktree) = &agent.worktree {
                 rows.push(InfoRow::tail("branch", worktree.branch.clone()));
@@ -2032,9 +2036,16 @@ mod tests {
         assert!(text.contains(" Fix it · claude · idle "), "{text}");
         let info = info_box(&app);
         assert!(
-            !info.iter().any(|line| line.contains("claude-1")),
+            info.iter().any(|line| line.starts_with("name    claude-1")),
             "{info:?}"
         );
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let info = info_box(&app);
+        assert!(
+            !info.iter().any(|line| line.starts_with("name")),
+            "{info:?}"
+        );
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
 
         let _ = app.on_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
         let (text, _) = render(&app);
