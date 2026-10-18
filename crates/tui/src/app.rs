@@ -487,7 +487,11 @@ pub struct App {
     pub view: AgentView,
     pub popup: Option<Popup>,
     pub project_index: usize,
-    pub agent_index: usize,
+    /// Kept among `visible_agents()` by `settle_selection` whenever any agent is listed.
+    pub selected: Option<AgentId>,
+    /// The selected agent's row when the selection last settled; the agent that comes to
+    /// this row takes over when the selected one leaves the list.
+    settled_row: usize,
     pub subscribed: Option<AgentId>,
     pub screen: Screen,
     pub pane_size: Option<(u16, u16)>,
@@ -565,7 +569,8 @@ impl App {
             view: AgentView::Project,
             popup,
             project_index: 0,
-            agent_index: 0,
+            selected: None,
+            settled_row: 0,
             subscribed: None,
             screen: Screen::blank(0, 0),
             pane_size: None,
@@ -708,7 +713,28 @@ impl App {
     }
 
     pub fn selected_agent(&self) -> Option<&AgentInfo> {
-        self.visible_agents().get(self.agent_index).copied()
+        let id = self.selected?;
+        self.agents
+            .iter()
+            .find(|a| a.id == id)
+            .filter(|a| self.is_listed(a))
+    }
+
+    /// The selected agent's row in `visible_agents()`.
+    pub fn selected_row(&self) -> Option<usize> {
+        let id = self.selected?;
+        self.visible_agents().iter().position(|a| a.id == id)
+    }
+
+    /// Whether the Agents box lists `agent`, found without sorting the list.
+    fn is_listed(&self, agent: &AgentInfo) -> bool {
+        let in_view = match self.view {
+            AgentView::All => true,
+            AgentView::Project => self
+                .selected_project()
+                .is_some_and(|p| p.id == agent.project),
+        };
+        in_view && self.matches_filter(agent)
     }
 
     pub fn attention(&self, project: ProjectId) -> usize {
@@ -874,16 +900,10 @@ impl App {
         match message {
             ServerMessage::AgentUpdated(info) => effects.extend(self.upsert_agent(info)),
             ServerMessage::AgentBell(id) => effects.extend(self.on_bell(id)),
-            ServerMessage::AgentRemoved(id) => {
-                let selected = self.selected_agent().map(|a| a.id);
-                self.agents.retain(|a| a.id != id);
-                self.reselect(selected);
-            }
+            ServerMessage::AgentRemoved(id) => self.agents.retain(|a| a.id != id),
             ServerMessage::ProjectsChanged(projects) => {
-                let selected = self.selected_agent().map(|a| a.id);
                 effects = self.remember_new(&projects);
                 self.replace_projects(projects);
-                self.reselect(selected);
             }
             ServerMessage::Frame(frame) => {
                 if Some(frame.agent) == self.subscribed {
@@ -942,16 +962,10 @@ impl App {
         let mut effects = Vec::new();
         match response {
             Response::Projects(projects) => {
-                let selected = self.selected_agent().map(|a| a.id);
                 effects = self.remember_new(&projects);
                 self.replace_projects(projects);
-                self.reselect(selected);
             }
-            Response::Agents(agents) => {
-                let selected = self.selected_agent().map(|a| a.id);
-                self.agents = agents;
-                self.reselect(selected);
-            }
+            Response::Agents(agents) => self.agents = agents,
             Response::Project(project) => {
                 effects = self.remember_new(std::slice::from_ref(&project));
                 if !self.projects.iter().any(|p| p.id == project.id) {
@@ -1096,7 +1110,6 @@ impl App {
         } else if status != Status::Idle {
             self.unseen.remove(&id);
         }
-        self.reselect(selected);
         if self.open_on_start == Some(id) {
             self.open_on_start = None;
             if status.is_running() && selected == Some(id) && self.focus == Focus::Agents {
@@ -1155,60 +1168,57 @@ impl App {
         self.sync()
     }
 
-    /// Keeps `selected` selected. In the all-agents view the project highlight stays
-    /// where the user put it, which may be a project without agents.
-    fn reselect(&mut self, selected: Option<AgentId>) {
-        let Some(id) = selected else {
-            return;
-        };
-        match self.view {
-            AgentView::Project => self.select_agent(id),
-            AgentView::All => {
-                if let Some(index) = self.visible_agents().iter().position(|a| a.id == id) {
-                    self.agent_index = index;
-                }
-            }
-        }
-    }
-
     /// Highlights a project and selects its first agent; in the all-agents view a
     /// project without agents keeps the current agent selected.
     fn highlight_project(&mut self, index: usize) {
-        let selected = self.selected_agent().map(|a| a.id);
         self.project_index = index;
-        match self.view {
-            AgentView::Project => self.agent_index = 0,
-            AgentView::All => {
-                let project = self.projects.get(index).map(|p| p.id);
-                let first = self
-                    .visible_agents()
-                    .iter()
-                    .position(|a| Some(a.project) == project);
-                match first {
-                    Some(first) => self.agent_index = first,
-                    None => self.reselect(selected),
-                }
-            }
+        let project = self.projects.get(index).map(|p| p.id);
+        let first = self
+            .visible_agents()
+            .iter()
+            .position(|a| Some(a.project) == project);
+        match (self.view, first) {
+            (AgentView::Project, _) => self.select_row(0),
+            (AgentView::All, Some(first)) => self.select_row(first),
+            (AgentView::All, None) => {}
         }
     }
 
+    /// A selected agent that the new filter hides gives way to the first row.
     fn set_filter(&mut self, filter: String) -> Vec<Effect> {
-        let selected = self.selected_agent().map(|a| a.id);
         self.filter = filter;
-        self.agent_index = 0;
-        self.reselect(selected);
+        self.settled_row = 0;
         self.sync()
     }
 
-    fn select_agent(&mut self, id: AgentId) {
+    /// Selects the agent and highlights its project.
+    pub fn select_agent(&mut self, id: AgentId) {
         let Some(project) = self.agents.iter().find(|a| a.id == id).map(|a| a.project) else {
             return;
         };
         if let Some(index) = self.projects.iter().position(|p| p.id == project) {
             self.project_index = index;
         }
-        if let Some(index) = self.visible_agents().iter().position(|a| a.id == id) {
-            self.agent_index = index;
+        if let Some(row) = self.visible_agents().iter().position(|a| a.id == id) {
+            self.selected = Some(id);
+            self.settled_row = row;
+        }
+    }
+
+    /// Selects the agent on `row`, or the last one when the list is shorter.
+    fn select_row(&mut self, row: usize) {
+        let visible = self.visible_agents();
+        let row = row.min(visible.len().saturating_sub(1));
+        self.selected = visible.get(row).map(|a| a.id);
+        self.settled_row = row;
+    }
+
+    /// Keeps the selected agent while it is listed; otherwise the agent that now has its
+    /// row takes over.
+    fn settle_selection(&mut self) {
+        match self.selected_row() {
+            Some(row) => self.settled_row = row,
+            None => self.select_row(self.settled_row),
         }
     }
 
@@ -1216,8 +1226,7 @@ impl App {
         self.project_index = self
             .project_index
             .min(self.projects.len().saturating_sub(1));
-        let count = self.visible_agents().len();
-        self.agent_index = self.agent_index.min(count.saturating_sub(1));
+        self.settle_selection();
     }
 
     fn sync(&mut self) -> Vec<Effect> {
@@ -1919,7 +1928,8 @@ impl App {
         if areas.agents.contains(at) {
             let mut effects = self.leave_for_sidebar(Focus::Agents);
             let agents = self.visible_agents();
-            let row = crate::ui::row_at(areas.agents, self.agent_index, agents.len(), at.y);
+            let selected = self.selected_row().unwrap_or(0);
+            let row = crate::ui::row_at(areas.agents, selected, agents.len(), at.y);
             if let Some(id) = row.map(|index| agents[index].id) {
                 self.select_agent(id);
             }
@@ -2138,7 +2148,7 @@ impl App {
                     AgentView::Project => AgentView::All,
                     AgentView::All => AgentView::Project,
                 };
-                self.agent_index = 0;
+                self.settled_row = 0;
                 if let Some(id) = selected {
                     self.select_agent(id);
                 }
@@ -2252,7 +2262,8 @@ impl App {
         if count == 0 {
             return;
         }
-        self.agent_index = wrap(self.agent_index, step, count);
+        let row = self.selected_row().unwrap_or(self.settled_row);
+        self.select_row(wrap(row, step, count));
         if self.view == AgentView::All
             && let Some(project) = self.selected_agent().map(|a| a.project)
             && let Some(index) = self.projects.iter().position(|p| p.id == project)
@@ -3427,7 +3438,7 @@ pub(crate) mod tests {
         let a = agent(&p, "alpha", Status::Idle);
         let mut b = agent(&p, "beta", Status::Idle);
         let (mut app, _) = loaded(vec![p], vec![a.clone(), b.clone()]);
-        app.agent_index = 1;
+        app.selected = Some(b.id);
         let _ = app.apply_server(ServerMessage::AgentUpdated(b.clone()));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
         let before = app.subscribed;
@@ -3437,6 +3448,59 @@ pub(crate) mod tests {
         assert_eq!(app.subscribed, before);
         assert!(effects.is_empty());
         let _ = a;
+    }
+
+    #[test]
+    fn selection_stays_on_its_agent_when_a_rename_moves_another_above_it() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Idle);
+        let c = agent(&p, "gamma", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a, b.clone(), c.clone()]);
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        let effects = app.apply_server(ServerMessage::AgentUpdated(AgentInfo {
+            name: "aardvark".into(),
+            ..c.clone()
+        }));
+        assert_eq!(names(&app), ["aardvark", "alpha", "beta"]);
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert!(effects.is_empty(), "{effects:?}");
+    }
+
+    #[test]
+    fn a_rename_reply_keeps_the_renamed_agent_selected_on_its_new_row() {
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Idle);
+        let (mut app, _) = loaded(vec![p], vec![a, b.clone()]);
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(key('R'));
+        let _ = app.on_key(ctrl('u'));
+        type_text(&mut app, "aaa");
+        let request = sent(&app.on_key(code(KeyCode::Enter)));
+        let renamed = AgentInfo {
+            name: "aaa".into(),
+            ..b.clone()
+        };
+        let _ = app.apply_server(ServerMessage::AgentUpdated(renamed.clone()));
+        let _ = app.apply_reply(&request, Ok(Response::Agent(renamed)));
+        assert_eq!(app.popup, None);
+        assert_eq!(app.selected_row(), Some(0));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+    }
+
+    #[test]
+    fn a_filter_that_still_lists_the_selected_agent_keeps_it_on_its_new_row() {
+        let mut app = filter_app();
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|a| a.name.as_str()), Some("docs"));
+        let _ = app.on_key(key('/'));
+        type_text(&mut app, "s:idle");
+        assert_eq!(names(&app), ["api", "docs"]);
+        assert_eq!(app.selected_agent().map(|a| a.name.as_str()), Some("docs"));
+        assert_eq!(app.selected_row(), Some(1));
     }
 
     #[test]
@@ -3639,7 +3703,7 @@ pub(crate) mod tests {
         let b = agent(&p, "b", Status::Idle);
         let c = agent(&p, "c", Status::Idle);
         let (mut app, _) = loaded(vec![p], vec![a.clone(), b.clone(), c]);
-        app.agent_index = 1;
+        app.selected = Some(b.id);
         let _ = app.apply_server(ServerMessage::AgentUpdated(b.clone()));
         let effects = app.apply_server(ServerMessage::AgentRemoved(a.id));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
@@ -6622,7 +6686,7 @@ pub(crate) mod tests {
     fn scroll_mode_bottoms_its_agent_when_the_selection_moves_away() {
         let (mut app, a, b) = running_pair();
         let _ = app.on_key(key('s'));
-        app.agent_index = 1;
+        app.selected = Some(b.id);
         let effects = app.apply_server(ServerMessage::AgentUpdated(b.clone()));
         assert_eq!(effects.first(), scroll_effects(a.id, i32::MIN / 2).first());
         assert!(effects.contains(&Effect::Send(Request::Subscribe { id: b.id })));

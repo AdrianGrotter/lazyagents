@@ -413,7 +413,8 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect, tick: u64) {
         .map(|a| agent_row(app, a, tick, width))
         .collect();
     let style = selection_style(app.focus == Focus::Agents, &app.theme);
-    let (list, mut state) = selectable_list(items, app.agent_index, block, style);
+    let selected = agents.iter().position(|a| Some(a.id) == app.selected);
+    let (list, mut state) = selectable_list(items, selected.unwrap_or(0), block, style);
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -3901,13 +3902,14 @@ mod tests {
         let agents: Vec<_> = (0..20)
             .map(|i| agent(&p, &format!("agent{i:02}"), Status::Idle))
             .collect();
+        let last = agents[19].id;
         let (mut app, _) = loaded(vec![p], agents);
-        app.agent_index = 19;
+        app.select_agent(last);
         let (text, _) = render(&app);
         let area = layout(Rect::new(0, 0, 100, 30), &app).agents;
         let lines: Vec<&str> = text.lines().collect();
         for y in area.y + 1..area.bottom() - 1 {
-            let index = row_at(area, app.agent_index, 20, y).expect("row");
+            let index = row_at(area, 19, 20, y).expect("row");
             let name = format!("agent{index:02}");
             assert!(lines[usize::from(y)].contains(&name), "{y}: {name}\n{text}");
         }
