@@ -440,8 +440,10 @@ daemon last told it.
   Claude resumes only sessions that received a prompt
   (see [ADR 0006](decisions/0006-resume-only-prompted-sessions.md)).
 - A corrupt or empty `state.toml` → the daemon refuses to start and leaves the file
-  untouched. The daemon never writes an empty file (even no projects and no agents are
-  written out), so an empty one is the sign of a lost write, not of an empty state.
+  untouched; for an empty one it says `<path> is empty; restore it from a backup or delete
+  it to start with no agents`. The daemon never writes an empty file (even no projects and
+  no agents are written out), so an empty one is the sign of a lost write, not of an empty
+  state.
 - Spawn failure (command not found, cwd missing) → agent `Exited`, error rendered in the
   pane and the status line.
 - Worktree errors (branch exists, base missing) → shown in the status bar; nothing is

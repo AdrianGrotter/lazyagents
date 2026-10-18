@@ -47,7 +47,10 @@ pub struct PendingWorktree {
 
 pub fn load(path: &Path) -> anyhow::Result<StoredState> {
     match fs::read_to_string(path) {
-        Ok(text) if text.trim().is_empty() => anyhow::bail!("{} is empty", path.display()),
+        Ok(text) if text.trim().is_empty() => anyhow::bail!(
+            "{} is empty; restore it from a backup or delete it to start with no agents",
+            path.display()
+        ),
         Ok(text) => toml::from_str(&text).with_context(|| format!("parsing {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StoredState::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
@@ -199,7 +202,9 @@ mod tests {
             fs::write(&path, text).expect("write");
             let err = load(&path).expect_err("empty");
             assert!(
-                format!("{err:#}").contains("state.toml is empty"),
+                format!("{err:#}").contains(
+                    "state.toml is empty; restore it from a backup or delete it to start with no agents"
+                ),
                 "{err:#}"
             );
         }
