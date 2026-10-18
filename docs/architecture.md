@@ -44,6 +44,8 @@ Subcommands:
 - `lazyagents statusline` (hidden): the status line lazyagents gives a Claude agent whose
   user has one; see [status-detection.md](status-detection.md). `ls` shows what it
   reported after the agent's command, as `(Opus · 23% context · $0.42)`.
+  An agent whose command could not start is kept (`new` says so and names `restart` and
+  `rm`); `ls` prints its error under it as `last error: ...`.
 - `lazyagents send <agent> <text>` — type `text` into the agent and press enter, as `i` does
   in the TUI.
 - `lazyagents kill|restart|rm <agent>`, `lazyagents rename <agent> <name>`. An `<agent>` is

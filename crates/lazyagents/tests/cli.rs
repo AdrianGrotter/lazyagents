@@ -1119,3 +1119,20 @@ fn help_says_how_agents_are_named_and_what_bare_lazyagents_does() {
         assert!(help.contains("4 hex"), "{command}: {help}");
     }
 }
+
+#[test]
+fn a_command_that_cannot_start_leaves_a_kept_agent_that_ls_explains() {
+    let env = TestEnv::new();
+    let out = env.run(&["new", "ghost", "--", "/nonexistent/lazyagents-cmd"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("failed to start"), "{stderr}");
+    assert!(stderr.contains("agent ghost was kept"), "{stderr}");
+    assert!(stderr.contains("lazyagents restart"), "{stderr}");
+    assert!(stderr.contains("lazyagents rm"), "{stderr}");
+    let ls = env.ok(&["ls"]);
+    assert!(
+        ls.contains("last error: failed to start `/nonexistent/lazyagents-cmd`"),
+        "{ls}"
+    );
+}

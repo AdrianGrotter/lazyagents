@@ -66,7 +66,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
             };
             let request = Request::CreateAgent(CreateAgent {
                 project: project.id,
-                name,
+                name: name.clone(),
                 kind,
                 command,
                 cols: DEFAULT_COLS,
@@ -75,7 +75,10 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
                 prompt,
                 setup: None,
             });
-            let info = expect_agent(client.request(request).await?)?;
+            let info = match client.request(request).await {
+                Ok(response) => expect_agent(response)?,
+                Err(e) => return Err(explain_kept_agent(&mut client, &project, &name, e).await),
+            };
             println!("started {}", info.name);
         }
         Command::Send { agent, text } => {
@@ -193,6 +196,31 @@ async fn add_project(
     }
 }
 
+/// A command that cannot start still leaves its agent behind, so a retry under the same
+/// name would be refused; the error says so and how to move on.
+async fn explain_kept_agent(
+    client: &mut Client,
+    project: &Project,
+    name: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let message = error.to_string();
+    let kept = match snapshot(client).await {
+        Ok((_, agents)) => agents.iter().any(|a| {
+            a.project == project.id && a.name == name && a.last_error.as_deref() == Some(&message)
+        }),
+        Err(_) => false,
+    };
+    if !kept {
+        return error;
+    }
+    let target = format!("{}/{name}", project.name);
+    anyhow!(
+        "{message}\nagent {name} was kept; fix the command and run `lazyagents restart {target}`, \
+         or remove it with `lazyagents rm {target}`"
+    )
+}
+
 async fn find_agent(client: &mut Client, query: &str) -> anyhow::Result<AgentInfo> {
     let (projects, agents) = snapshot(client).await?;
     resolve_agent(&projects, &agents, query)
@@ -298,6 +326,9 @@ fn format_ls(projects: &[Project], agents: &[AgentInfo]) -> String {
                 agent.name,
                 agent.status.label()
             ));
+            if let Some(error) = &agent.last_error {
+                out.push_str(&format!("    last error: {error}\n"));
+            }
         }
     }
     out
@@ -404,6 +435,18 @@ mod tests {
         assert_eq!(
             format_ls(&[p], &[a]),
             "lazyagents  /git/lazyagents\n  api  idle          sh  (Opus · $0.42)\n"
+        );
+    }
+
+    #[test]
+    fn ls_shows_why_an_agent_failed_to_start() {
+        let p = project("p", "/git/p");
+        let mut a = agent(&p, "ghost");
+        a.status = Status::Exited(127);
+        a.last_error = Some("failed to start `nope`: not found".into());
+        assert_eq!(
+            format_ls(&[p], &[a]),
+            "p  /git/p\n  ghost  exited (127)  sh\n    last error: failed to start `nope`: not found\n"
         );
     }
 
