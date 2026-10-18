@@ -14,12 +14,13 @@ use crate::approved;
 use crate::commands::{self, Context, CustomCommand, Output, Prompt};
 use crate::config::{Config, PresetDef, Theme};
 use crate::fixed_keys::{self, DiffKey, HelpKey, Motion, ScrollKey};
+use crate::help;
 use crate::keymap::{Action, Keymap};
 use crate::keys;
 use crate::known::{self, KnownProject};
+use crate::layout::{self, Areas, SetupLayout};
 use crate::project_config;
 use crate::review::{self, Comment, Location};
-use crate::ui::Areas;
 
 pub const MESSAGE_TTL: Duration = Duration::from_secs(5);
 pub const MIN_PANE: (u16, u16) = (20, 5);
@@ -636,6 +637,33 @@ impl App {
         }
     }
 
+    /// The heading of the popup that asks to run `project`'s worktree setup script.
+    pub fn setup_heading(&self, project: &Path) -> String {
+        format!(
+            "{}/{} runs this in every new worktree:",
+            self.display_path(project),
+            project_config::FILE
+        )
+    }
+
+    /// How far the setup script can scroll and how many rows a page moves, in the popup
+    /// `Popup::ApproveSetup` draws on `screen`; `None` when the screen is too small to show it.
+    fn setup_scroll_limits(
+        &self,
+        project: &Path,
+        script: &str,
+        screen: (u16, u16),
+    ) -> Option<(usize, usize)> {
+        let layout = SetupLayout::new(&self.setup_heading(project), script, screen);
+        layout.fits.then(|| (layout.max_scroll(), layout.rows))
+    }
+
+    /// How far the help popup can scroll on `screen`, and how many rows a page moves.
+    pub fn help_scroll_limits(&self, help: &Help, screen: (u16, u16)) -> (usize, usize) {
+        let layout = help::Layout::new(self, help, screen);
+        (layout.max_scroll(), layout.room)
+    }
+
     /// Known projects that are not in the sidebar.
     pub fn project_candidates(&self) -> Vec<&KnownProject> {
         self.known
@@ -705,14 +733,10 @@ impl App {
             return self.status_label(agent).to_lowercase().contains(status);
         }
         let branch = agent.worktree.as_ref().map(|w| w.branch.as_str());
-        [
-            Some(crate::ui::label(agent)),
-            Some(agent.name.as_str()),
-            branch,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|text| text.to_lowercase().contains(&needle))
+        [Some(label(agent)), Some(agent.name.as_str()), branch]
+            .into_iter()
+            .flatten()
+            .any(|text| text.to_lowercase().contains(&needle))
     }
 
     pub fn selected_agent(&self) -> Option<&AgentInfo> {
@@ -1117,7 +1141,7 @@ impl App {
     fn upsert_agent(&mut self, info: AgentInfo) -> Option<Effect> {
         let selected = self.selected_agent().map(|a| a.id);
         let in_view = selected == Some(info.id) && self.terminal_focused;
-        let (id, status, name) = (info.id, info.status, crate::ui::label(&info).to_string());
+        let (id, status, name) = (info.id, info.status, label(&info).to_string());
         let before = match self.agents.iter_mut().find(|a| a.id == info.id) {
             Some(existing) => Some(std::mem::replace(existing, info).status),
             None => {
@@ -1156,7 +1180,7 @@ impl App {
         if in_view || agent.kind == AgentKind::Claude {
             return None;
         }
-        let body = format!("{} rang the bell", crate::ui::label(agent));
+        let body = format!("{} rang the bell", label(agent));
         Some(self.notify(body))
     }
 
@@ -1652,7 +1676,7 @@ impl App {
             return Vec::new();
         };
         if !agent.status.is_running() {
-            let message = format!("{} is not running", crate::ui::label(agent));
+            let message = format!("{} is not running", label(agent));
             self.fail(message);
             return Vec::new();
         }
@@ -1660,7 +1684,7 @@ impl App {
             "sent {} comment{} to {}",
             comments.len(),
             if comments.len() == 1 { "" } else { "s" },
-            crate::ui::label(agent)
+            label(agent)
         );
         self.comments.remove(&id);
         self.close_diff();
@@ -1883,8 +1907,7 @@ impl App {
             MouseKind::Down => {
                 self.selection = None;
                 if self.popup.is_some() {
-                    let outside =
-                        crate::ui::popup_area(self, areas.screen).is_some_and(|r| !r.contains(at));
+                    let outside = areas.popup.is_some_and(|r| !r.contains(at));
                     if outside || !self.popup.as_ref().is_some_and(Popup::is_sending) {
                         self.interactions += 1;
                     }
@@ -1937,7 +1960,7 @@ impl App {
     fn on_click(&mut self, at: Position, areas: &Areas) -> Vec<Effect> {
         if areas.projects.contains(at) {
             let mut effects = self.leave_for_sidebar(Focus::Projects);
-            let row = crate::ui::row_at(
+            let row = layout::row_at(
                 areas.projects,
                 self.project_index,
                 self.projects.len(),
@@ -1953,7 +1976,7 @@ impl App {
             let mut effects = self.leave_for_sidebar(Focus::Agents);
             let agents = self.visible_agents();
             let selected = self.selected_row().unwrap_or(0);
-            let row = crate::ui::row_at(areas.agents, selected, agents.len(), at.y);
+            let row = layout::row_at(areas.agents, selected, agents.len(), at.y);
             if let Some(id) = row.map(|index| agents[index].id) {
                 self.select_agent(id);
             }
@@ -1983,7 +2006,7 @@ impl App {
             let message = format!(
                 "{name} is not running — {} {}s it",
                 self.keymap.first_key(Action::Open),
-                crate::ui::start_verb(status)
+                start_verb(status)
             );
             self.fail(message);
         }
@@ -2487,7 +2510,7 @@ impl App {
                 Some(HelpKey::Filter) => help.typing = true,
                 Some(HelpKey::Move(motion)) => {
                     let screen = self.screen_size.unwrap_or(DEFAULT_SIZE);
-                    let (last, page) = crate::ui::help_scroll_limits(self, &help, screen);
+                    let (last, page) = self.help_scroll_limits(&help, screen);
                     help.scroll = motion.position(help.scroll, page, last);
                 }
                 Some(HelpKey::Close) | None => {}
@@ -2784,7 +2807,7 @@ impl App {
         key: KeyEvent,
     ) -> Vec<Effect> {
         let screen = self.screen_size.unwrap_or(DEFAULT_SIZE);
-        let limits = crate::ui::setup_scroll_limits(self, &project, &script, screen);
+        let limits = self.setup_scroll_limits(&project, &script, screen);
         let (last, page) = limits.unwrap_or((0, 1));
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let scroll = match (key.code, ctrl) {
@@ -2859,10 +2882,7 @@ impl App {
             let worktree = agent.worktree.as_ref();
             vars.extend([
                 ("agent.name".to_string(), agent.name.clone()),
-                (
-                    "agent.title".to_string(),
-                    crate::ui::label(agent).to_string(),
-                ),
+                ("agent.title".to_string(), label(agent).to_string()),
                 ("agent.cwd".to_string(), agent.cwd.display().to_string()),
                 (
                     "agent.branch".to_string(),
@@ -3124,7 +3144,7 @@ impl App {
         let Some(agent) = self.selected_agent() else {
             return Some("no agent selected".to_string());
         };
-        let name = crate::ui::label(agent);
+        let name = label(agent);
         let open = self.keymap.first_key(Action::Open);
         match action {
             Action::Stop | Action::Reply if !agent.status.is_running() => {
@@ -3176,7 +3196,7 @@ impl App {
             return;
         };
         if agent.worktree.is_none() {
-            let message = format!("{} has no worktree to finish", crate::ui::label(agent));
+            let message = format!("{} has no worktree to finish", label(agent));
             self.fail(message);
             return;
         }
@@ -3281,6 +3301,22 @@ impl App {
                 })]
             }
         }
+    }
+}
+
+/// A Claude agent is listed by its session's title once it has one.
+pub fn label(agent: &AgentInfo) -> &str {
+    match (&agent.title, agent.kind) {
+        (Some(title), AgentKind::Claude) => title,
+        _ => &agent.name,
+    }
+}
+
+/// `start` for a stopped agent and `restart` for an exited one, as `enter` does them.
+pub fn start_verb(status: Status) -> &'static str {
+    match status {
+        Status::Stopped => "start",
+        _ => "restart",
     }
 }
 
@@ -6633,9 +6669,9 @@ pub(crate) mod tests {
     #[test]
     fn click_outside_popup_closes_it() {
         let (mut app, _, _) = two_agents();
-        let areas = screen_areas(&app);
         let _ = app.on_key(key('?'));
-        let popup = crate::ui::popup_area(&app, areas.screen).expect("popup area");
+        let areas = screen_areas(&app);
+        let popup = areas.popup.expect("popup area");
         let inside = (popup.x + 1, popup.y + 1);
         assert!(
             app.on_mouse(mouse(MouseKind::Down, inside), &areas)
@@ -6653,6 +6689,7 @@ pub(crate) mod tests {
         assert_eq!((&app.popup, app.focus.clone()), (&None, Focus::Agents));
 
         let _ = app.on_key(key('x'));
+        let areas = screen_areas(&app);
         let effects = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 0, 0)), &areas);
         assert!(effects.is_empty(), "{effects:?}");
         assert_eq!(

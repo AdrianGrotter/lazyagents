@@ -1,23 +1,27 @@
-use std::path::Path;
 use std::time::Instant;
 
 use protocol::{AgentInfo, AgentKind, Color as ScreenColor, Screen, Status};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
-use ratatui::layout::{Margin, Position, Rect};
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{
     AgentView, App, CommandRun, DiffView, Field, Focus, Help, MIN_PANE, MessageKind, NewAgentForm,
-    Popup, Preset, ProjectField, ProjectForm, ScreenMode, Selection, Submission,
+    Popup, Preset, ProjectField, ProjectForm, ScreenMode, Selection, Submission, label, start_verb,
 };
 use crate::commands::Prompt;
 use crate::config::Theme;
 use crate::fixed_keys::{self, DIFF_HINTS, DIFF_KEYS, DiffKey};
+use crate::help;
 use crate::keymap::{Action, Keymap};
+use crate::layout::{
+    Areas, SETUP_HINT, SETUP_INDENT, SETUP_SCROLL_HINT, SetupLayout, areas_in, char_width,
+    text_width, wrap, wrap_words,
+};
 
 pub const PULSE_TICKS: u64 = 10;
 pub const WORKING_ORANGE: Color = Color::Rgb(0xDB, 0x6D, 0x28);
@@ -31,8 +35,6 @@ const RENAME_HINT: &str = "enter rename · esc cancel";
 const SENDING_HINT: &str = "waiting for the daemon · esc close";
 const REPLY_HINT: &str = "enter send · esc cancel";
 const COMMENT_HINT: &str = "enter save (empty removes) · esc cancel";
-const SETUP_HINT: &str = "y run it and remember · s skip it this time · n cancel";
-const SETUP_SCROLL_HINT: &str = "j/k scroll to the end to approve · s skip it · n cancel";
 const SETUP_TOO_SMALL: &str = "The terminal is too small to show the script · s skip it · n cancel";
 const CHOICE_HINT: &str = "j/k move · enter pick · esc cancel";
 const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
@@ -41,142 +43,21 @@ const PICKER_ROWS: usize = 12;
 const NEW_AGENT_WIDTH: u16 = 56;
 const FORM_WIDTH: u16 = 60;
 
-const SIDEBAR_HELP: [(&[Action], &str); 20] = [
-    (
-        &[Action::Down, Action::Up],
-        "move down / up in the focused box",
-    ),
-    (
-        &[Action::FocusProjects, Action::FocusAgents],
-        "focus Projects / Agents",
-    ),
-    (&[Action::ToggleFocus], "switch between Projects and Agents"),
-    (
-        &[Action::Open],
-        "open the agent's pane, restarting it if it is not running",
-    ),
-    (&[Action::NewAgent], "new agent"),
-    (&[Action::Stop, Action::Restart], "stop / restart agent"),
-    (&[Action::Remove], "remove agent (in Projects: the project)"),
-    (&[Action::Rename], "rename agent"),
-    (&[Action::ScreenMode], "wider pane / full screen / normal"),
-    (&[Action::AddProject], "add project"),
-    (&[Action::ToggleAllAgents], "all agents / this project"),
-    (
-        &[Action::NextAttention],
-        "next agent needing input, then next done",
-    ),
-    (&[Action::Filter], "filter the agents (esc clears)"),
-    (&[Action::Commands], "custom commands"),
-    (
-        &[Action::Approve, Action::Deny, Action::Reply],
-        "approve / deny / reply to the agent",
-    ),
-    (
-        &[Action::Diff, Action::Finish],
-        "diff / finish (merge, PR, clean up) a worktree agent",
-    ),
-    (&[Action::Scroll], "scroll the agent's history"),
-    (
-        &[Action::PeekDown, Action::PeekUp],
-        "scroll the agent's pane down / up from here",
-    ),
-    (&[Action::Help], "help"),
-    (
-        &[Action::Quit, Action::StopDaemon],
-        "quit (agents keep running) / stop the daemon too",
-    ),
-];
 const FILTER_HINT: &str = "enter keep · esc clear";
 const TOO_SMALL: &str = "terminal too small";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Areas {
-    pub projects: Rect,
-    pub agents: Rect,
-    pub info: Rect,
-    pub pane: Rect,
-    pub pane_inner: Rect,
-    pub status: Rect,
-    pub screen: Rect,
-}
-
-const INFO_MIN_HEIGHT: u16 = 6;
-const AGENTS_MIN_HEIGHT: u16 = 8;
-/// Rows inside the Projects box while it is empty, for its wrapped hint.
-const EMPTY_PROJECTS_ROWS: u16 = 2;
-
+/// The screen's boxes for `app` as it is now, with its open popup.
 pub fn layout(area: Rect, app: &App) -> Areas {
-    areas_in(
+    let areas = areas_in(
         area,
         app.projects.len(),
         info_rows(app).len(),
         app.screen_mode,
-    )
-}
-
-pub const WIDE_SIDEBAR: u16 = 18;
-
-pub fn areas(area: Rect, project_count: usize, info_lines: usize) -> Areas {
-    areas_in(area, project_count, info_lines, ScreenMode::Normal)
-}
-
-/// The Info box fits `info_lines` lines, but never takes the Agents box below
-/// `AGENTS_MIN_HEIGHT` rows to do so; it keeps `INFO_MIN_HEIGHT` rows while they fit.
-pub fn areas_in(area: Rect, project_count: usize, info_lines: usize, mode: ScreenMode) -> Areas {
-    let body_height = area.height.saturating_sub(1);
-    let status = Rect::new(area.x, area.y + body_height, area.width, area.height.min(1));
-    let sidebar_width = match mode {
-        ScreenMode::Normal => (area.width / 4).clamp(24, 40),
-        ScreenMode::Wide => WIDE_SIDEBAR,
-        ScreenMode::Full => 0,
-    }
-    .min(area.width);
-    let project_rows = match project_count {
-        0 => EMPTY_PROJECTS_ROWS,
-        count => count.min(6) as u16,
-    };
-    let projects_height = (project_rows + 2).min(body_height);
-    let below_projects = body_height - projects_height;
-    let wanted = u16::try_from(info_lines)
-        .unwrap_or(u16::MAX)
-        .saturating_add(2)
-        .max(INFO_MIN_HEIGHT);
-    let room = below_projects
-        .saturating_sub(AGENTS_MIN_HEIGHT)
-        .max(INFO_MIN_HEIGHT);
-    let info_height = wanted.min(room).min(below_projects);
-    let agents_height = body_height - projects_height - info_height;
-    let projects = Rect::new(area.x, area.y, sidebar_width, projects_height);
-    let agents = Rect::new(area.x, projects.bottom(), sidebar_width, agents_height);
-    let info = Rect::new(area.x, agents.bottom(), sidebar_width, info_height);
-    let pane = Rect::new(
-        area.x + sidebar_width,
-        area.y,
-        area.width - sidebar_width,
-        body_height,
     );
     Areas {
-        projects,
-        agents,
-        info,
-        pane,
-        pane_inner: pane.inner(Margin::new(1, 1)),
-        status,
-        screen: area,
+        popup: popup_area(app, area),
+        ..areas
     }
-}
-
-/// The item of a bordered list at row `y`. ratatui scrolls a list only as far as needed to
-/// show the selected item, starting from offset 0 on every frame.
-pub fn row_at(area: Rect, selected: usize, len: usize, y: u16) -> Option<usize> {
-    let inner = area.inner(Margin::new(0, 1));
-    if inner.height == 0 || y < inner.y || y >= inner.bottom() {
-        return None;
-    }
-    let offset = selected.saturating_sub(usize::from(inner.height) - 1);
-    let index = offset + usize::from(y - inner.y);
-    (index < len).then_some(index)
 }
 
 pub fn glyph(status: Status, tick: u64, theme: &Theme) -> (&'static str, Style) {
@@ -342,14 +223,6 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
     let style = selection_style(app.focus == Focus::Projects, &app.theme);
     let (list, mut state) = selectable_list(items, app.project_index, block, style);
     frame.render_stateful_widget(list, area, &mut state);
-}
-
-/// A Claude agent is listed by its session's title once it has one.
-pub(crate) fn label(agent: &AgentInfo) -> &str {
-    match (&agent.title, agent.kind) {
-        (Some(title), AgentKind::Claude) => title,
-        _ => &agent.name,
-    }
 }
 
 /// The name is cut to fit `width` cells, so the status after it stays visible.
@@ -999,14 +872,6 @@ fn sidebar_hints(app: &App) -> Vec<String> {
     hints
 }
 
-/// `start` for a stopped agent and `restart` for an exited one, as `enter` does them.
-pub(crate) fn start_verb(status: Status) -> &'static str {
-    match status {
-        Status::Stopped => "start",
-        _ => "restart",
-    }
-}
-
 /// `message` cut to `room` cells: between its ` · `-separated parts where the first fits, and
 /// with `…` otherwise.
 fn fitted_message(message: &str, room: usize) -> String {
@@ -1164,179 +1029,41 @@ pub fn draw_mismatch(
     );
 }
 
-/// The approval popup for a worktree setup script, laid out for `screen`.
-struct SetupView {
-    width: u16,
-    header: Vec<String>,
-    body: Vec<String>,
-    /// How many of `body`'s rows fit between the header and the footer.
-    rows: usize,
-    hint_width: usize,
-    /// Whether the screen has room for the heading, one script row and the hint.
-    fits: bool,
-}
-
-const SETUP_INDENT: usize = 2;
-const SETUP_MIN_WIDTH: usize = 50;
-
-impl SetupView {
-    fn new(heading: &str, script: &str, screen: (u16, u16)) -> Self {
-        let lines: Vec<String> = script.lines().map(escaped).collect();
-        let longest = lines.iter().map(|l| text_width(l)).max().unwrap_or(0);
-        let width = (longest + SETUP_INDENT)
-            .max(text_width(heading))
-            .max(SETUP_MIN_WIDTH - 4)
-            + 4;
-        let width = width.min(usize::from(screen.0)).max(3);
-        let inner = width - 2;
-        let body: Vec<String> = lines
-            .iter()
-            .flat_map(|l| wrap(l, inner.saturating_sub(SETUP_INDENT).max(1)))
+/// The setup script popup's rows from `scroll` on, with the marker and the hint.
+fn setup_lines(view: &SetupLayout, scroll: usize, theme: &Theme) -> Vec<Line<'static>> {
+    if !view.fits {
+        return wrap(SETUP_TOO_SMALL, view.hint_width.max(1))
+            .into_iter()
+            .map(|l| Line::from(l).fg(theme.dim))
             .collect();
-        let header = wrap(heading, inner);
-        let hint_rows = wrap(SETUP_HINT, inner)
-            .len()
-            .max(wrap(SETUP_SCROLL_HINT, inner).len());
-        let fixed = 2 + header.len() + 1 + 1 + hint_rows;
-        let room = usize::from(screen.1).saturating_sub(fixed);
-        let rows = body.len().min(room.max(1));
-        SetupView {
-            width: width as u16,
-            header,
-            body,
-            rows,
-            hint_width: inner,
-            fits: room >= 1 && inner > SETUP_INDENT,
-        }
     }
-
-    fn max_scroll(&self) -> usize {
-        self.body.len() - self.rows
-    }
-
-    fn lines(&self, scroll: usize, theme: &Theme) -> Vec<Line<'static>> {
-        if !self.fits {
-            return wrap(SETUP_TOO_SMALL, self.hint_width.max(1))
-                .into_iter()
-                .map(|l| Line::from(l).fg(theme.dim))
-                .collect();
-        }
-        let scroll = scroll.min(self.max_scroll());
-        let mut lines: Vec<Line> = self.header.iter().cloned().map(Line::from).collect();
-        lines.push(Line::default());
-        lines.extend(
-            self.body[scroll..scroll + self.rows]
-                .iter()
-                .map(|l| Line::from(format!("{:SETUP_INDENT$}{l}", "")).fg(theme.accent)),
-        );
-        let below = self.max_scroll() - scroll;
-        let marker = match (scroll, below) {
-            (0, 0) => String::new(),
-            (0, below) => format!("↓ {below} more below"),
-            (above, 0) => format!("↑ {above} more above"),
-            (above, below) => format!("↑ {above} more above · ↓ {below} more below"),
-        };
-        lines.push(Line::from(marker).fg(theme.dim));
-        let hint = if below == 0 {
-            SETUP_HINT
-        } else {
-            SETUP_SCROLL_HINT
-        };
-        lines.extend(
-            wrap(hint, self.hint_width)
-                .into_iter()
-                .map(|l| Line::from(l).fg(theme.dim)),
-        );
-        lines
-    }
-}
-
-/// How far the setup script can scroll and how many rows a page moves, in the popup
-/// `Popup::ApproveSetup` draws on `screen`; `None` when the screen is too small to show it.
-pub fn setup_scroll_limits(
-    app: &App,
-    project: &Path,
-    script: &str,
-    screen: (u16, u16),
-) -> Option<(usize, usize)> {
-    let view = SetupView::new(&setup_heading(app, project), script, screen);
-    view.fits.then(|| (view.max_scroll(), view.rows))
-}
-
-fn setup_heading(app: &App, project: &Path) -> String {
-    format!(
-        "{}/{} runs this in every new worktree:",
-        app.display_path(project),
-        crate::project_config::FILE
-    )
-}
-
-/// Characters that draw nothing or reorder what is drawn around them.
-fn is_invisible(c: char) -> bool {
-    matches!(c,
-        '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}'..='\u{1160}' | '\u{17b4}'..='\u{17b5}'
-        | '\u{180b}'..='\u{180f}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
-        | '\u{2060}'..='\u{206f}' | '\u{2800}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}'
-        | '\u{feff}' | '\u{ffa0}' | '\u{fff9}'..='\u{fffb}' | '\u{e0000}'..='\u{e0fff}')
-}
-
-/// Shows control and invisible characters as escapes and a backslash as `\\`, so the
-/// script cannot repaint the screen, hide text or pass an escape for plain text.
-fn escaped(line: &str) -> String {
-    line.chars()
-        .map(|c| match c {
-            '\\' => "\\\\".to_string(),
-            c if c.is_control() => c.escape_default().to_string(),
-            c if is_invisible(c) => c.escape_unicode().to_string(),
-            c => c.to_string(),
-        })
-        .collect()
-}
-
-fn text_width(text: &str) -> usize {
-    text.chars().map(char_width).sum()
-}
-
-fn char_width(c: char) -> usize {
-    Span::raw(c.to_string()).width()
-}
-
-/// Splits `text` into rows of at most `width` cells, losing nothing.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut rows = vec![String::new()];
-    let mut used = 0;
-    for c in text.chars() {
-        let w = char_width(c);
-        if used + w > width && used > 0 {
-            rows.push(String::new());
-            used = 0;
-        }
-        rows.last_mut().expect("a row").push(c);
-        used += w;
-    }
-    rows
-}
-
-/// Splits each line of `text` into rows of at most `width` cells, between words where a word
-/// fits; a line's leading spaces stay.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    let mut rows = Vec::new();
-    for line in text.split('\n') {
-        let mut row = String::new();
-        for (index, word) in line.trim_end_matches('\r').split(' ').enumerate() {
-            if index > 0
-                && !row.trim_start().is_empty()
-                && text_width(&row) + 1 + text_width(word) > width
-            {
-                rows.extend(wrap(&std::mem::take(&mut row), width));
-            } else if index > 0 {
-                row.push(' ');
-            }
-            row.push_str(word);
-        }
-        rows.extend(wrap(&row, width));
-    }
-    rows
+    let scroll = scroll.min(view.max_scroll());
+    let mut lines: Vec<Line> = view.header.iter().cloned().map(Line::from).collect();
+    lines.push(Line::default());
+    lines.extend(
+        view.body[scroll..scroll + view.rows]
+            .iter()
+            .map(|l| Line::from(format!("{:SETUP_INDENT$}{l}", "")).fg(theme.accent)),
+    );
+    let below = view.max_scroll() - scroll;
+    let marker = match (scroll, below) {
+        (0, 0) => String::new(),
+        (0, below) => format!("↓ {below} more below"),
+        (above, 0) => format!("↑ {above} more above"),
+        (above, below) => format!("↑ {above} more above · ↓ {below} more below"),
+    };
+    lines.push(Line::from(marker).fg(theme.dim));
+    let hint = if below == 0 {
+        SETUP_HINT
+    } else {
+        SETUP_SCROLL_HINT
+    };
+    lines.extend(
+        wrap(hint, view.hint_width)
+            .into_iter()
+            .map(|l| Line::from(l).fg(theme.dim)),
+    );
+    lines
 }
 
 struct PopupContent {
@@ -1385,8 +1112,8 @@ fn popup_content(popup: &Popup, app: &App, screen: (u16, u16)) -> PopupContent {
                 (false, "") | (true, _) => " Help ".to_string(),
                 (false, filter) => format!(" Help · /{filter} "),
             };
-            let view = HelpView::new(app, help, screen);
-            let (lines, cursor) = view.lines(app, help);
+            let view = help::Layout::new(app, help, screen);
+            let (lines, cursor) = help_lines(&view, help, theme);
             let row = lines.len().saturating_sub(1) as u16;
             let mut content = PopupContent::new(title, view.width, lines);
             content.cursor = cursor.map(|col| (col as u16, row));
@@ -1399,8 +1126,8 @@ fn popup_content(popup: &Popup, app: &App, screen: (u16, u16)) -> PopupContent {
             scroll,
             ..
         } => {
-            let view = SetupView::new(&setup_heading(app, project), script, screen);
-            let lines = view.lines(*scroll, theme);
+            let view = SetupLayout::new(&app.setup_heading(project), script, screen);
+            let lines = setup_lines(&view, *scroll, theme);
             PopupContent::new(" Run setup script? ", view.width, lines)
         }
         Popup::Finish { index, .. } => {
@@ -1553,180 +1280,60 @@ fn field_line(label: &'static str, value: String, focused: bool, theme: &Theme) 
     Line::from(vec![label, Span::raw(value)])
 }
 
-/// Rows are `(keys, description, applies)`; a sidebar action that cannot act on the
-/// selection is dimmed. `filter` keeps only the rows whose keys or description
-/// contain it, ignoring case, and the key column keeps its width while filtering.
-/// Descriptions wrap under themselves to fit `width` cells.
-fn help_lines(app: &App, filter: &str, width: usize) -> Vec<Line<'static>> {
-    let keymap = &app.keymap;
-    let sidebar: Vec<(String, String, bool)> = SIDEBAR_HELP
-        .iter()
-        .map(|(actions, text)| {
-            let keys: Vec<String> = actions.iter().map(|a| keymap.describe(*a)).collect();
-            let applies = actions.iter().any(|a| app.unavailable(*a).is_none());
-            (keys.join(", "), text.to_string(), applies)
-        })
-        .collect();
-    let mut pane = Vec::new();
-    for (action, text) in [
-        (Action::PaneLeave, "back to the sidebar"),
-        (Action::PaneNext, "next agent"),
-        (Action::PanePrevious, "previous agent"),
-    ] {
-        pane.push((keymap.describe(action), text.to_string(), true));
-        let direct = keymap.direct_keys(action);
-        if !direct.is_empty() {
-            pane.push((crate::keymap::join(&direct), text.to_string(), true));
+/// A help row drawn: sections bold, a sidebar action that cannot act on the selection dim.
+fn help_line(row: &help::Row, theme: &Theme) -> Line<'static> {
+    match row {
+        help::Row::Section(title) => Line::from(title.clone()).bold(),
+        help::Row::Blank => Line::default(),
+        help::Row::Key {
+            text,
+            applies: true,
+        } => Line::from(text.clone()),
+        help::Row::Key { text, .. } | help::Row::NoMatch(text) => {
+            Line::from(text.clone()).fg(theme.dim)
         }
     }
-    pane.extend([
-        (
-            keymap.describe(Action::PaneScroll),
-            "scroll the agent's history".to_string(),
-            true,
-        ),
-        (
-            keymap.describe(Action::PaneScreenMode),
-            "wider pane / full screen / normal".to_string(),
-            true,
-        ),
-        (
-            keymap.describe(Action::PaneSendPrefix),
-            format!("send {} to the agent", keymap.prefix()),
-            true,
-        ),
-    ]);
-    let custom: Vec<(String, String, bool)> = app
-        .commands
-        .iter()
-        .filter_map(|c| Some((c.key?.to_string(), c.description.clone(), true)))
-        .collect();
-    let key_width = sidebar
-        .iter()
-        .chain(&pane)
-        .chain(&custom)
-        .map(|(key, ..)| key.chars().count())
-        .max()
-        .unwrap_or(0);
-    let indent = 2 + key_width + 2;
-    let room = width.saturating_sub(indent).max(HELP_MIN_TEXT);
-    let needle = filter.to_lowercase();
-    let matches = |key: &str, text: &str| {
-        key.to_lowercase().contains(&needle) || text.to_lowercase().contains(&needle)
-    };
-    let dim = app.theme.dim;
-    let mut lines = Vec::new();
-    for (title, rows) in [
-        ("Sidebar", sidebar),
-        ("Agent pane", pane),
-        ("Commands", custom),
-    ] {
-        let rows: Vec<Line> = rows
-            .into_iter()
-            .filter(|(key, text, _)| matches(key, text))
-            .flat_map(|(key, text, applies)| {
-                wrap_words(&text, room)
-                    .into_iter()
-                    .enumerate()
-                    .map(move |(index, part)| {
-                        let line = match index {
-                            0 => Line::from(format!("  {key:<key_width$}  {part}")),
-                            _ => Line::from(format!("{:indent$}{part}", "")),
-                        };
-                        if applies { line } else { line.fg(dim) }
-                    })
-            })
-            .collect();
-        if rows.is_empty() {
-            continue;
-        }
-        if !lines.is_empty() {
-            lines.push(Line::default());
-        }
-        lines.push(Line::from(title).bold());
-        lines.extend(rows);
-    }
-    if lines.is_empty() {
-        lines.push(Line::from(format!("no key matches \"{filter}\"")).fg(dim));
-    }
-    lines
 }
 
-const HELP_MIN_TEXT: usize = 16;
-
-/// The help popup laid out for a screen: as many of its rows as fit, a row saying how many
-/// are above and below when not all do, and its hint.
-struct HelpView {
-    width: u16,
-    rows: Vec<Line<'static>>,
-    /// How many of `rows` fit on screen at once.
-    room: usize,
-}
-
-impl HelpView {
-    fn new(app: &App, help: &Help, screen: (u16, u16)) -> Self {
-        let inner = usize::from(screen.0).saturating_sub(4);
-        let rows = help_lines(app, &help.filter, inner);
-        let widest = rows.iter().map(Line::width).max().unwrap_or(0);
-        let hint = fixed_keys::help_hints().join(" · ");
-        let width = (widest.max(text_width(&hint)) + 4).min(usize::from(screen.0));
-        let height = usize::from(screen.1).saturating_sub(2);
-        let room = if rows.len() < height {
-            rows.len()
-        } else {
-            height.saturating_sub(2).max(1)
+/// The help rows from `help.scroll` on, the marker and the hint; and the column of the text
+/// cursor in the hint row while the filter is being typed.
+fn help_lines(
+    view: &help::Layout,
+    help: &Help,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let scroll = help.scroll.min(view.max_scroll());
+    let mut lines: Vec<Line> = view.rows[scroll..scroll + view.room]
+        .iter()
+        .map(|row| help_line(row, theme))
+        .collect();
+    if view.max_scroll() > 0 {
+        let below = view.max_scroll() - scroll;
+        let marker = match (scroll, below) {
+            (0, below) => format!("↓ {below} more below"),
+            (above, 0) => format!("↑ {above} more above"),
+            (above, below) => format!("↑ {above} more above · ↓ {below} more below"),
         };
-        HelpView {
-            width: width as u16,
-            rows,
-            room,
-        }
+        lines.push(Line::from(marker).fg(theme.dim));
     }
-
-    fn max_scroll(&self) -> usize {
-        self.rows.len().saturating_sub(self.room)
+    let room = usize::from(view.width.saturating_sub(2));
+    if help.typing {
+        let filter = format!("/{}", help.filter);
+        let cursor = text_width(&filter);
+        lines.push(Line::from(vec![
+            Span::raw(filter).fg(theme.accent),
+            Span::raw(" │ ").fg(theme.dim),
+            Span::raw(FILTER_HINT).fg(theme.dim),
+        ]));
+        return (lines, Some(cursor));
     }
-
-    /// The rows from `scroll` on, the marker and the hint; and the column of the text cursor
-    /// in the hint row while the filter is being typed.
-    fn lines(&self, app: &App, help: &Help) -> (Vec<Line<'static>>, Option<usize>) {
-        let theme = &app.theme;
-        let scroll = help.scroll.min(self.max_scroll());
-        let mut lines: Vec<Line> = self.rows[scroll..scroll + self.room].to_vec();
-        if self.max_scroll() > 0 {
-            let below = self.max_scroll() - scroll;
-            let marker = match (scroll, below) {
-                (0, below) => format!("↓ {below} more below"),
-                (above, 0) => format!("↑ {above} more above"),
-                (above, below) => format!("↑ {above} more above · ↓ {below} more below"),
-            };
-            lines.push(Line::from(marker).fg(theme.dim));
-        }
-        let room = usize::from(self.width.saturating_sub(2));
-        if help.typing {
-            let filter = format!("/{}", help.filter);
-            let cursor = text_width(&filter);
-            lines.push(Line::from(vec![
-                Span::raw(filter).fg(theme.accent),
-                Span::raw(" │ ").fg(theme.dim),
-                Span::raw(FILTER_HINT).fg(theme.dim),
-            ]));
-            return (lines, Some(cursor));
-        }
-        let mut hints = fixed_keys::help_hints();
-        if !help.filter.is_empty() {
-            hints.insert(0, "esc clear filter".to_string());
-        }
-        let hint = fitted(&hints, room);
-        lines.push(Line::from(hint).fg(theme.dim));
-        (lines, None)
+    let mut hints = fixed_keys::help_hints();
+    if !help.filter.is_empty() {
+        hints.insert(0, "esc clear filter".to_string());
     }
-}
-
-/// How far the help popup can scroll on `screen`, and how many rows a page moves.
-pub fn help_scroll_limits(app: &App, help: &Help, screen: (u16, u16)) -> (usize, usize) {
-    let view = HelpView::new(app, help, screen);
-    (view.max_scroll(), view.room)
+    let hint = fitted(&hints, room);
+    lines.push(Line::from(hint).fg(theme.dim));
+    (lines, None)
 }
 
 /// Shows at most `PICKER_ROWS` rows, scrolled so the highlighted one is visible.
@@ -1941,6 +1548,7 @@ mod tests {
     use crate::config::Config;
     use crate::config::{DONE_BLUE, ERROR_RED, IDLE_GREEN, NEEDS_PURPLE, WORKING_YELLOW};
     use crate::known::KnownProject;
+    use crate::layout::row_at;
     use protocol::{Cell, Color as ScreenColor, GitStat, Screen, Status, Style as ScreenStyle};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2156,7 +1764,7 @@ mod tests {
         assert!(!text.contains("Agent pane"), "{text}");
         assert!(text.contains("restarting it if it is"), "{text}");
         assert!(text.contains("not running"), "{text}");
-        let (last, _) = help_scroll_limits(&app, &Help::default(), (60, 20));
+        let (last, _) = app.help_scroll_limits(&Help::default(), (60, 20));
         app.popup = Some(Popup::Help(Help {
             scroll: last,
             ..Help::default()
@@ -3750,47 +3358,6 @@ mod tests {
     }
 
     #[test]
-    fn screen_modes_narrow_or_hide_the_sidebar() {
-        let screen = Rect::new(0, 0, 120, 30);
-        let normal = areas_in(screen, 2, 4, ScreenMode::Normal);
-        assert_eq!(normal.agents.width, 30);
-        let wide = areas_in(screen, 2, 4, ScreenMode::Wide);
-        assert_eq!(wide.agents.width, WIDE_SIDEBAR);
-        assert_eq!(
-            wide.pane,
-            Rect::new(WIDE_SIDEBAR, 0, 120 - WIDE_SIDEBAR, 29)
-        );
-        let full = areas_in(screen, 2, 4, ScreenMode::Full);
-        assert_eq!(full.agents.width, 0);
-        assert_eq!(full.pane, Rect::new(0, 0, 120, 29));
-    }
-
-    #[test]
-    fn layout_reserves_status_row_and_sidebar() {
-        let a = areas(Rect::new(0, 0, 100, 30), 2, 4);
-        assert_eq!(a.status, Rect::new(0, 29, 100, 1));
-        assert_eq!(a.projects.width, 25);
-        assert_eq!(a.projects.height, 4);
-        assert_eq!(a.info.height, 6);
-        assert_eq!(a.pane.x, 25);
-        assert_eq!(a.pane_inner, Rect::new(26, 1, 73, 27));
-        assert_eq!(areas(Rect::new(0, 0, 100, 30), 2, 1).info.height, 6);
-    }
-
-    #[test]
-    fn info_panel_fits_its_content_and_shrinks_on_short_terminals() {
-        let tall = areas(Rect::new(0, 0, 100, 30), 2, 7);
-        assert_eq!((tall.info.height, tall.agents.height), (9, 16));
-        assert_eq!(tall.info.bottom(), tall.status.y);
-        let medium = areas(Rect::new(0, 0, 100, 20), 2, 7);
-        assert_eq!((medium.info.height, medium.agents.height), (7, 8));
-        let short = areas(Rect::new(0, 0, 100, 16), 2, 7);
-        assert_eq!((short.info.height, short.agents.height), (6, 5));
-        let tiny = areas(Rect::new(0, 0, 100, 8), 2, 7);
-        assert_eq!((tiny.info.height, tiny.agents.height), (3, 0));
-    }
-
-    #[test]
     fn info_shows_everything_for_a_worktree_agent_with_stats() {
         let p = project("p");
         let wt = worktree_agent(&p, "wt");
@@ -3888,24 +3455,6 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("y restart · n quit"), "{text}");
-    }
-
-    #[test]
-    fn row_at_maps_rows_with_scrolling() {
-        let area = Rect::new(0, 3, 25, 6);
-        assert_eq!(row_at(area, 0, 10, 3), None);
-        assert_eq!(row_at(area, 0, 10, 4), Some(0));
-        assert_eq!(row_at(area, 0, 10, 7), Some(3));
-        assert_eq!(row_at(area, 0, 10, 8), None);
-        assert_eq!(row_at(area, 3, 10, 7), Some(3));
-        assert_eq!(row_at(area, 5, 10, 4), Some(2));
-        assert_eq!(row_at(area, 5, 10, 7), Some(5));
-        assert_eq!(row_at(area, 9, 10, 7), Some(9));
-        assert_eq!(row_at(area, 0, 2, 5), Some(1));
-        assert_eq!(row_at(area, 0, 2, 6), None);
-        assert_eq!(row_at(area, 0, 0, 4), None);
-        assert_eq!(row_at(Rect::new(0, 0, 25, 2), 0, 3, 0), None);
-        assert_eq!(row_at(Rect::new(0, 0, 25, 2), 0, 3, 1), None);
     }
 
     #[test]

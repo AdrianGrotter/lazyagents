@@ -252,7 +252,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
         Err(error) => app.fail(format!("{error:#}")),
     }
 
-    let mut layout = ui::areas(Rect::default(), 0, 0);
+    let mut layout = crate::layout::areas(Rect::default(), 0, 0);
     let mut redraw = true;
     let mut message_shown = false;
     loop {

@@ -359,6 +359,12 @@ daemon last told it.
   current and the needed terminal size, is drawn, and keys do nothing except quitting from the sidebar and leaving the pane. Status
   glyphs animate from a frame counter the runtime ticks every 100 ms while an agent is
   starting or working.
+- **Layout** (`layout.rs`, `help.rs`): what the model and the view share about the
+  screen: the boxes of the main screen, the list row under a click, how text wraps, how
+  the setup script and help popups fit a screen, and the help popup's rows. The model
+  bounds popup scrolling and places clicks with them and never calls into `ui.rs`; the
+  rect of the open popup reaches it in `Areas` as last drawn, and the runtime draws after
+  every event.
 - **Mouse** (`app.rs`): the TUI captures the mouse. A click selects a row or focuses a box
   or the pane, a drag selects pane cells and copies them on release, a click outside a
   popup closes it, and the wheel scrolls the diff, the scroll-mode history or the pane's
