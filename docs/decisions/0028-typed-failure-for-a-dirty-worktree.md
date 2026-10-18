@@ -34,3 +34,7 @@ refusal from any other error.
 A refusal that a client must act on gets its own `Failure` variant and a protocol bump;
 everything else stays a message. Clients built before version 8 cannot talk to the
 daemon, as with any wire change.
+
+Nothing compares text any more, but the wording is not all in one place: the TUI words the
+refusal itself in its status line and its force prompt. Those strings are display text
+only; changing them, or the daemon's `Display`, cannot change which errors offer to force.
