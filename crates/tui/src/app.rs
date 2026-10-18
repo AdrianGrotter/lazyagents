@@ -268,9 +268,19 @@ pub struct CommandRun {
     pub choice: usize,
 }
 
+/// The help popup's state, which lasts while it is open.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Help {
+    pub filter: String,
+    /// Whether typed keys go to the filter.
+    pub typing: bool,
+    /// The first row on screen.
+    pub scroll: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Popup {
-    Help,
+    Help(Help),
     NewAgent(NewAgentForm),
     Rename {
         agent: AgentId,
@@ -470,6 +480,13 @@ pub enum MessageKind {
     Info,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub text: String,
+    pub kind: MessageKind,
+    pub at: Instant,
+}
+
 struct PendingRemove {
     agent: AgentId,
     interactions: u64,
@@ -498,8 +515,7 @@ pub struct App {
     pub pane_size: Option<(u16, u16)>,
     /// The whole terminal, which sizes the popups that scroll.
     pub screen_size: Option<(u16, u16)>,
-    pub message: Option<(String, Instant)>,
-    pub message_kind: MessageKind,
+    pub message: Option<Message>,
     /// A key or click came after the message was posted.
     message_seen: bool,
     pub git_stats: HashMap<AgentId, GitStat>,
@@ -533,12 +549,6 @@ pub struct App {
     /// Whether `gh` is on `PATH`, which the pull request choice of the finish menu needs.
     pub gh: bool,
     pub approved_setups: Vec<crate::approved::Approval>,
-    /// What the help popup is filtered by while it is open.
-    pub help_filter: String,
-    /// Whether keys typed in the help popup go to its filter.
-    pub help_typing: bool,
-    /// The help popup's first row on screen.
-    pub help_scroll: usize,
     /// Review comments per agent, kept until they are sent.
     pub comments: HashMap<AgentId, Vec<Comment>>,
     pub theme: Theme,
@@ -575,7 +585,6 @@ impl App {
             pane_size: None,
             screen_size: None,
             message: None,
-            message_kind: MessageKind::Error,
             message_seen: false,
             git_stats: HashMap::new(),
             selection: None,
@@ -599,9 +608,6 @@ impl App {
             presets: config.presets,
             commands: config.commands,
             comments: HashMap::new(),
-            help_filter: String::new(),
-            help_typing: false,
-            help_scroll: 0,
             screen_mode: ScreenMode::Normal,
             gh: false,
             approved_setups: Vec::new(),
@@ -744,11 +750,13 @@ impl App {
     /// A message shows for `MESSAGE_TTL`; an error also stays after that until the user
     /// presses a key or clicks, so it is never gone before anyone was there to read it.
     pub fn current_message(&self, now: Instant) -> Option<&str> {
-        let unread = self.message_kind == MessageKind::Error && !self.message_seen;
-        self.message
-            .as_ref()
-            .filter(|(_, at)| unread || now.saturating_duration_since(*at) < MESSAGE_TTL)
-            .map(|(message, _)| message.as_str())
+        self.shown_message(now).map(|m| m.text.as_str())
+    }
+
+    pub fn shown_message(&self, now: Instant) -> Option<&Message> {
+        let message = self.message.as_ref()?;
+        let unread = message.kind == MessageKind::Error && !self.message_seen;
+        (unread || now.saturating_duration_since(message.at) < MESSAGE_TTL).then_some(message)
     }
 
     pub fn animating(&self) -> bool {
@@ -758,14 +766,19 @@ impl App {
     }
 
     pub fn fail(&mut self, message: impl Into<String>) {
-        self.message = Some((message.into(), Instant::now()));
-        self.message_kind = MessageKind::Error;
-        self.message_seen = false;
+        self.post(message.into(), MessageKind::Error);
     }
 
     pub fn inform(&mut self, message: impl Into<String>) {
-        self.message = Some((message.into(), Instant::now()));
-        self.message_kind = MessageKind::Info;
+        self.post(message.into(), MessageKind::Info);
+    }
+
+    fn post(&mut self, text: String, kind: MessageKind) {
+        self.message = Some(Message {
+            text,
+            kind,
+            at: Instant::now(),
+        });
         self.message_seen = false;
     }
 
@@ -1149,8 +1162,9 @@ impl App {
 
     /// The status bar repeats the notification unless it is showing an error.
     fn notify(&mut self, body: String) -> Effect {
-        let error_shown = self.message_kind == MessageKind::Error
-            && self.current_message(Instant::now()).is_some();
+        let error_shown = self
+            .shown_message(Instant::now())
+            .is_some_and(|m| m.kind == MessageKind::Error);
         if !error_shown {
             self.inform(body.clone());
         }
@@ -1775,9 +1789,9 @@ impl App {
             Some(Popup::Rename { input, .. }) => input.push_str(&line),
             Some(Popup::CommandPrompt(run)) => run.input.push_str(&line),
             Some(Popup::Comment { input, .. }) => input.push_str(&line),
-            Some(Popup::Help) if self.help_typing => {
-                self.help_filter.push_str(&line);
-                self.help_scroll = 0;
+            Some(Popup::Help(help)) if help.typing => {
+                help.filter.push_str(&line);
+                help.scroll = 0;
             }
             Some(Popup::Reply { input, .. }) => {
                 input.push_str(&text.replace("\r\n", " ").replace(['\r', '\n'], " "))
@@ -1798,7 +1812,7 @@ impl App {
                 return self.set_filter(filter);
             }
             Some(
-                Popup::Help
+                Popup::Help(_)
                 | Popup::ProjectPicker { .. }
                 | Popup::Confirm { .. }
                 | Popup::Commands { .. }
@@ -2074,12 +2088,7 @@ impl App {
                     action: Confirmed::StopDaemon,
                 });
             }
-            Action::Help => {
-                self.help_filter.clear();
-                self.help_typing = false;
-                self.help_scroll = 0;
-                self.popup = Some(Popup::Help);
-            }
+            Action::Help => self.popup = Some(Popup::Help(Help::default())),
             Action::Down => self.step(1),
             Action::Up => self.step(-1),
             Action::FocusProjects => self.focus = Focus::Projects,
@@ -2338,8 +2347,8 @@ impl App {
             return Vec::new();
         };
         match popup {
-            Popup::Help => {
-                self.on_help_key(&key);
+            Popup::Help(help) => {
+                self.on_help_key(help, &key);
                 Vec::new()
             }
             Popup::Commands { index } => self.on_commands_key(index, key),
@@ -2448,49 +2457,43 @@ impl App {
     /// After `/`, keys edit the filter until `enter` keeps it or `esc` clears it; otherwise
     /// they scroll, `esc` clears a kept filter, and the help key closes the popup like the
     /// table's close keys. A close key held with ctrl closes it even while typing.
-    fn on_help_key(&mut self, key: &KeyEvent) {
+    fn on_help_key(&mut self, mut help: Help, key: &KeyEvent) {
         let action = fixed_keys::help_key(key);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let closes = action == Some(HelpKey::Close) && (ctrl || !self.help_typing)
-            || !self.help_typing && self.keymap.sidebar(key) == Some(Action::Help);
-        let clears = !self.help_typing && key.code == KeyCode::Esc && !self.help_filter.is_empty();
+        let closes = action == Some(HelpKey::Close) && (ctrl || !help.typing)
+            || !help.typing && self.keymap.sidebar(key) == Some(Action::Help);
+        let clears = !help.typing && key.code == KeyCode::Esc && !help.filter.is_empty();
         if closes && !clears {
-            self.popup = None;
-            self.help_filter.clear();
-            self.help_typing = false;
-            self.help_scroll = 0;
             return;
         }
-        self.popup = Some(Popup::Help);
         if clears {
-            self.help_filter.clear();
-            self.help_scroll = 0;
-            return;
-        }
-        if self.help_typing {
-            let before = self.help_filter.clone();
-            match edit(&mut self.help_filter, key) {
-                Edit::Submit => self.help_typing = false,
+            help.filter.clear();
+            help.scroll = 0;
+        } else if help.typing {
+            let before = help.filter.clone();
+            match edit(&mut help.filter, key) {
+                Edit::Submit => help.typing = false,
                 Edit::Cancel => {
-                    self.help_typing = false;
-                    self.help_filter.clear();
+                    help.typing = false;
+                    help.filter.clear();
                 }
                 Edit::Continue => {}
             }
-            if self.help_filter != before {
-                self.help_scroll = 0;
+            if help.filter != before {
+                help.scroll = 0;
             }
-            return;
-        }
-        match action {
-            Some(HelpKey::Filter) => self.help_typing = true,
-            Some(HelpKey::Move(motion)) => {
-                let screen = self.screen_size.unwrap_or(DEFAULT_SIZE);
-                let (last, page) = crate::ui::help_scroll_limits(self, screen);
-                self.help_scroll = motion.position(self.help_scroll, page, last);
+        } else {
+            match action {
+                Some(HelpKey::Filter) => help.typing = true,
+                Some(HelpKey::Move(motion)) => {
+                    let screen = self.screen_size.unwrap_or(DEFAULT_SIZE);
+                    let (last, page) = crate::ui::help_scroll_limits(self, &help, screen);
+                    help.scroll = motion.position(help.scroll, page, last);
+                }
+                Some(HelpKey::Close) | None => {}
             }
-            Some(HelpKey::Close) | None => {}
         }
+        self.popup = Some(Popup::Help(help));
     }
 
     /// `None` keeps the prompt open.
@@ -3070,8 +3073,9 @@ impl App {
                 lines: output.lines().map(str::to_string).collect(),
                 scroll: 0,
             });
-            if self.current_message(Instant::now()).is_some()
-                && self.message_kind == MessageKind::Info
+            if self
+                .shown_message(Instant::now())
+                .is_some_and(|m| m.kind == MessageKind::Info)
             {
                 self.message = None;
             }
@@ -3981,7 +3985,7 @@ pub(crate) mod tests {
         assert!(!app.prefix_pending);
         assert_eq!(app.focus, Focus::Pane);
         assert_eq!(
-            app.message.as_ref().map(|(m, _)| m.as_str()),
+            app.message.as_ref().map(|m| m.text.as_str()),
             Some("ctrl-q: j/k switch · q/esc sidebar · s scroll · + screen · ctrl-q send")
         );
         assert_eq!(
@@ -4687,7 +4691,7 @@ pub(crate) mod tests {
         let _ = app.on_key(ctrl('a'));
         assert!(app.on_key(key('z')).is_empty());
         assert_eq!(
-            app.message.as_ref().map(|(m, _)| m.as_str()),
+            app.message.as_ref().map(|m| m.text.as_str()),
             Some("ctrl-a: n/p switch · x sidebar · s scroll · + screen · ctrl-a send")
         );
     }
@@ -4713,7 +4717,7 @@ pub(crate) mod tests {
         let (mut app, _) = loaded_with(config, vec![], vec![]);
         let _ = app.on_key(key('n'));
         assert_eq!(
-            app.message.as_ref().map(|(m, _)| m.as_str()),
+            app.message.as_ref().map(|m| m.text.as_str()),
             Some("add a project first (P)")
         );
         let config = configured("[keys.sidebar]\nopen = \"ctrl-o\"\n");
@@ -4726,7 +4730,7 @@ pub(crate) mod tests {
         let areas = screen_areas(&app);
         let _ = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 1, 1)), &areas);
         assert_eq!(
-            app.message.as_ref().map(|(m, _)| m.as_str()),
+            app.message.as_ref().map(|m| m.text.as_str()),
             Some("a is not running — ctrl-o starts it")
         );
     }
@@ -4757,7 +4761,7 @@ pub(crate) mod tests {
         assert!(app.on_key(key('n')).is_empty());
         assert_eq!(app.popup, None);
         assert_eq!(
-            app.message.as_ref().map(|(m, _)| m.as_str()),
+            app.message.as_ref().map(|m| m.text.as_str()),
             Some("add a project first (a)")
         );
     }
@@ -4893,7 +4897,7 @@ pub(crate) mod tests {
         let _ = app.apply_reply(&request, Err("refused".into()));
         assert_eq!(submission(&app), Submission::Editing);
         assert_eq!(
-            app.message.as_ref().map(|(m, _)| m.as_str()),
+            app.message.as_ref().map(|m| m.text.as_str()),
             Some("refused")
         );
     }
@@ -5304,7 +5308,7 @@ pub(crate) mod tests {
         let _ = app.on_key(key('?'));
         let _ = app.on_key(key('/'));
         let _ = app.on_key(ctrl('c'));
-        assert_eq!((&app.popup, app.help_typing), (&None, false));
+        assert_eq!(app.popup, None);
         for close in [
             code(KeyCode::Esc),
             code(KeyCode::Enter),
@@ -5313,9 +5317,9 @@ pub(crate) mod tests {
         ] {
             let (mut app, _, _) = two_agents();
             let _ = app.on_key(key('?'));
-            assert_eq!(app.popup, Some(Popup::Help));
+            assert!(matches!(app.popup, Some(Popup::Help(_))), "{:?}", app.popup);
             let _ = app.on_key(key('z'));
-            assert_eq!(app.popup, Some(Popup::Help));
+            assert!(matches!(app.popup, Some(Popup::Help(_))), "{:?}", app.popup);
             let _ = app.on_key(close);
             assert_eq!(app.popup, None, "{close:?}");
         }
@@ -5922,8 +5926,11 @@ pub(crate) mod tests {
         let _ = app.on_key(key('?'));
         let _ = app.on_key(with(KeyCode::Down, KeyModifiers::SHIFT));
         let _ = app.on_key(with(KeyCode::PageDown, KeyModifiers::CONTROL));
-        assert_eq!(app.popup, Some(Popup::Help));
-        assert!(app.help_scroll > 1, "{}", app.help_scroll);
+        assert!(matches!(app.popup, Some(Popup::Help(_))), "{:?}", app.popup);
+        let Some(Popup::Help(help)) = &app.popup else {
+            panic!("no help: {:?}", app.popup);
+        };
+        assert!(help.scroll > 1, "{}", help.scroll);
     }
 
     #[test]
@@ -6638,7 +6645,7 @@ pub(crate) mod tests {
             app.on_mouse(mouse(MouseKind::Up, inside), &areas)
                 .is_empty()
         );
-        assert_eq!(app.popup, Some(Popup::Help));
+        assert!(matches!(app.popup, Some(Popup::Help(_))), "{:?}", app.popup);
         assert!(
             app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 0)), &areas)
                 .is_empty()
@@ -7326,6 +7333,13 @@ mod help_tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
+    fn help(app: &App) -> &Help {
+        match &app.popup {
+            Some(Popup::Help(help)) => help,
+            other => panic!("no help popup: {other:?}"),
+        }
+    }
+
     fn stopped() -> App {
         let p = project("p");
         loaded(vec![p.clone()], vec![agent(&p, "api", Status::Stopped)]).0
@@ -7339,40 +7353,33 @@ mod help_tests {
         for c in "diff?".chars() {
             let _ = app.on_key(key(c));
         }
-        assert_eq!(app.popup, Some(Popup::Help));
-        assert_eq!(app.help_filter, "diff?");
+        assert!(matches!(app.popup, Some(Popup::Help(_))), "{:?}", app.popup);
+        assert_eq!(help(&app).filter, "diff?");
         let _ = app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(app.help_filter, "diff");
+        assert_eq!(help(&app).filter, "diff");
         let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(
-            (&app.popup, app.help_filter.as_str()),
-            (&Some(Popup::Help), "diff")
-        );
+        assert_eq!(help(&app).filter, "diff");
         let _ = app.on_key(key('j'));
-        assert_eq!(app.help_filter, "diff");
+        assert_eq!(help(&app).filter, "diff");
         let _ = app.on_key(key('/'));
         let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(
-            (&app.popup, app.help_filter.as_str()),
-            (&Some(Popup::Help), "")
-        );
+        assert_eq!(help(&app).filter, "");
         let _ = app.on_key(key('/'));
         let _ = app.on_paste("pane\nmore".into());
-        assert_eq!(app.help_filter, "pane");
+        assert_eq!(help(&app).filter, "pane");
         let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let _ = app.on_key(key('/'));
         let _ = app.on_key(key('x'));
         let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        app.help_scroll = 2;
+        if let Some(Popup::Help(help)) = &mut app.popup {
+            help.scroll = 2;
+        }
         let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(
-            (&app.popup, app.help_filter.as_str(), app.help_scroll),
-            (&Some(Popup::Help), "", 0)
-        );
+        assert_eq!((help(&app).filter.as_str(), help(&app).scroll), ("", 0));
         let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.popup, None);
         let _ = app.on_key(key('?'));
-        assert_eq!(app.help_filter, "");
+        assert_eq!(help(&app).filter, "");
         let _ = app.on_key(key('?'));
         assert_eq!(app.popup, None);
     }
@@ -7383,27 +7390,27 @@ mod help_tests {
         app.set_screen_size(60, 20);
         let _ = app.on_key(key('?'));
         let _ = app.on_key(key('k'));
-        assert_eq!(app.help_scroll, 0);
+        assert_eq!(help(&app).scroll, 0);
         let _ = app.on_key(key('j'));
         let _ = app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.help_scroll, 2);
+        assert_eq!(help(&app).scroll, 2);
         let _ = app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-        assert_eq!(app.popup, Some(Popup::Help));
-        assert!(app.help_scroll > 2, "{}", app.help_scroll);
+        assert!(matches!(app.popup, Some(Popup::Help(_))), "{:?}", app.popup);
+        assert!(help(&app).scroll > 2, "{}", help(&app).scroll);
         let _ = app.on_key(key('G'));
-        let last = app.help_scroll;
+        let last = help(&app).scroll;
         let _ = app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         let _ = app.on_key(key('j'));
-        assert_eq!(app.help_scroll, last);
+        assert_eq!(help(&app).scroll, last);
         let _ = app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
-        assert!(app.help_scroll < last);
+        assert!(help(&app).scroll < last);
         let _ = app.on_key(key('g'));
-        assert_eq!((&app.popup, app.help_scroll), (&Some(Popup::Help), 0));
+        assert_eq!(help(&app).scroll, 0);
         let _ = app.on_key(key('G'));
         let _ = app.on_key(key('q'));
         assert_eq!(app.popup, None);
         let _ = app.on_key(key('?'));
-        assert_eq!(app.help_scroll, 0);
+        assert_eq!(help(&app).scroll, 0);
     }
 
     #[test]
@@ -7671,7 +7678,10 @@ mod finish_tests {
             app.current_message(Instant::now()),
             Some("removed api, its worktree and branch")
         );
-        assert_eq!(app.message_kind, MessageKind::Info);
+        assert_eq!(
+            app.message.as_ref().map(|m| m.kind),
+            Some(MessageKind::Info)
+        );
     }
 
     #[test]

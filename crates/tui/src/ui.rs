@@ -11,8 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{
-    AgentView, App, CommandRun, DiffView, Field, Focus, MIN_PANE, MessageKind, NewAgentForm, Popup,
-    Preset, ProjectField, ProjectForm, ScreenMode, Selection, Submission,
+    AgentView, App, CommandRun, DiffView, Field, Focus, Help, MIN_PANE, MessageKind, NewAgentForm,
+    Popup, Preset, ProjectField, ProjectForm, ScreenMode, Selection, Submission,
 };
 use crate::commands::Prompt;
 use crate::config::Theme;
@@ -1038,12 +1038,12 @@ fn fitted(hints: &[String], room: usize) -> String {
 fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
     let theme = &app.theme;
     let mut spans = Vec::new();
-    if let Some(message) = app.current_message(now) {
-        let colour = match app.message_kind {
+    if let Some(message) = app.shown_message(now) {
+        let colour = match message.kind {
             MessageKind::Error => theme.error,
             MessageKind::Info => theme.accent,
         };
-        let message = fitted_message(message, usize::from(area.width));
+        let message = fitted_message(&message.text, usize::from(area.width));
         spans.push(Span::raw(message).fg(colour));
         spans.push(Span::raw(" │ ").fg(theme.dim));
     }
@@ -1380,13 +1380,13 @@ pub fn popup_area(app: &App, screen: Rect) -> Option<Rect> {
 fn popup_content(popup: &Popup, app: &App, screen: (u16, u16)) -> PopupContent {
     let theme = &app.theme;
     match popup {
-        Popup::Help => {
-            let title = match (app.help_typing, app.help_filter.as_str()) {
+        Popup::Help(help) => {
+            let title = match (help.typing, help.filter.as_str()) {
                 (false, "") | (true, _) => " Help ".to_string(),
                 (false, filter) => format!(" Help · /{filter} "),
             };
-            let view = HelpView::new(app, screen);
-            let (lines, cursor) = view.lines(app);
+            let view = HelpView::new(app, help, screen);
+            let (lines, cursor) = view.lines(app, help);
             let row = lines.len().saturating_sub(1) as u16;
             let mut content = PopupContent::new(title, view.width, lines);
             content.cursor = cursor.map(|col| (col as u16, row));
@@ -1554,10 +1554,10 @@ fn field_line(label: &'static str, value: String, focused: bool, theme: &Theme) 
 }
 
 /// Rows are `(keys, description, applies)`; a sidebar action that cannot act on the
-/// selection is dimmed. `app.help_filter` keeps only the rows whose keys or description
+/// selection is dimmed. `filter` keeps only the rows whose keys or description
 /// contain it, ignoring case, and the key column keeps its width while filtering.
 /// Descriptions wrap under themselves to fit `width` cells.
-fn help_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+fn help_lines(app: &App, filter: &str, width: usize) -> Vec<Line<'static>> {
     let keymap = &app.keymap;
     let sidebar: Vec<(String, String, bool)> = SIDEBAR_HELP
         .iter()
@@ -1610,9 +1610,9 @@ fn help_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         .unwrap_or(0);
     let indent = 2 + key_width + 2;
     let room = width.saturating_sub(indent).max(HELP_MIN_TEXT);
-    let filter = app.help_filter.to_lowercase();
+    let needle = filter.to_lowercase();
     let matches = |key: &str, text: &str| {
-        key.to_lowercase().contains(&filter) || text.to_lowercase().contains(&filter)
+        key.to_lowercase().contains(&needle) || text.to_lowercase().contains(&needle)
     };
     let dim = app.theme.dim;
     let mut lines = Vec::new();
@@ -1647,7 +1647,7 @@ fn help_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         lines.extend(rows);
     }
     if lines.is_empty() {
-        lines.push(Line::from(format!("no key matches \"{}\"", app.help_filter)).fg(dim));
+        lines.push(Line::from(format!("no key matches \"{filter}\"")).fg(dim));
     }
     lines
 }
@@ -1664,9 +1664,9 @@ struct HelpView {
 }
 
 impl HelpView {
-    fn new(app: &App, screen: (u16, u16)) -> Self {
+    fn new(app: &App, help: &Help, screen: (u16, u16)) -> Self {
         let inner = usize::from(screen.0).saturating_sub(4);
-        let rows = help_lines(app, inner);
+        let rows = help_lines(app, &help.filter, inner);
         let widest = rows.iter().map(Line::width).max().unwrap_or(0);
         let hint = fixed_keys::help_hints().join(" · ");
         let width = (widest.max(text_width(&hint)) + 4).min(usize::from(screen.0));
@@ -1689,9 +1689,9 @@ impl HelpView {
 
     /// The rows from `scroll` on, the marker and the hint; and the column of the text cursor
     /// in the hint row while the filter is being typed.
-    fn lines(&self, app: &App) -> (Vec<Line<'static>>, Option<usize>) {
+    fn lines(&self, app: &App, help: &Help) -> (Vec<Line<'static>>, Option<usize>) {
         let theme = &app.theme;
-        let scroll = app.help_scroll.min(self.max_scroll());
+        let scroll = help.scroll.min(self.max_scroll());
         let mut lines: Vec<Line> = self.rows[scroll..scroll + self.room].to_vec();
         if self.max_scroll() > 0 {
             let below = self.max_scroll() - scroll;
@@ -1703,8 +1703,8 @@ impl HelpView {
             lines.push(Line::from(marker).fg(theme.dim));
         }
         let room = usize::from(self.width.saturating_sub(2));
-        if app.help_typing {
-            let filter = format!("/{}", app.help_filter);
+        if help.typing {
+            let filter = format!("/{}", help.filter);
             let cursor = text_width(&filter);
             lines.push(Line::from(vec![
                 Span::raw(filter).fg(theme.accent),
@@ -1714,7 +1714,7 @@ impl HelpView {
             return (lines, Some(cursor));
         }
         let mut hints = fixed_keys::help_hints();
-        if !app.help_filter.is_empty() {
+        if !help.filter.is_empty() {
             hints.insert(0, "esc clear filter".to_string());
         }
         let hint = fitted(&hints, room);
@@ -1724,8 +1724,8 @@ impl HelpView {
 }
 
 /// How far the help popup can scroll on `screen`, and how many rows a page moves.
-pub fn help_scroll_limits(app: &App, screen: (u16, u16)) -> (usize, usize) {
-    let view = HelpView::new(app, screen);
+pub fn help_scroll_limits(app: &App, help: &Help, screen: (u16, u16)) -> (usize, usize) {
+    let view = HelpView::new(app, help, screen);
     (view.max_scroll(), view.room)
 }
 
@@ -2114,22 +2114,32 @@ mod tests {
     fn the_help_shows_only_rows_matching_the_filter() {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
-        app.popup = Some(Popup::Help);
+        app.popup = Some(Popup::Help(Help::default()));
         let (text, _) = render(&app);
         assert!(text.contains("╭ Help ─"), "{text}");
         assert!(text.contains("/ filter"), "{text}");
-        app.help_typing = true;
-        app.help_filter = "DIFF".into();
+        let typing = Help {
+            filter: "DIFF".into(),
+            typing: true,
+            scroll: 0,
+        };
+        app.popup = Some(Popup::Help(typing.clone()));
         let (text, _) = render(&app);
         assert!(text.contains("/DIFF │ enter keep · esc clear"), "{text}");
-        app.help_typing = false;
+        app.popup = Some(Popup::Help(Help {
+            typing: false,
+            ..typing
+        }));
         let (text, _) = render(&app);
         assert!(text.contains(" Help · /DIFF "), "{text}");
         assert!(text.contains("esc clear filter · j/k scroll"), "{text}");
         assert!(text.contains("diff / finish"), "{text}");
         assert!(!text.contains("  new agent"), "{text}");
         assert!(!text.contains("Agent pane"), "{text}");
-        app.help_filter = "zzz".into();
+        app.popup = Some(Popup::Help(Help {
+            filter: "zzz".into(),
+            ..Help::default()
+        }));
         let (text, _) = render(&app);
         assert!(text.contains("no key matches \"zzz\""), "{text}");
     }
@@ -2138,7 +2148,7 @@ mod tests {
     fn the_help_scrolls_with_markers_at_60x20() {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
-        app.popup = Some(Popup::Help);
+        app.popup = Some(Popup::Help(Help::default()));
         let (text, _) = render_at(&app, 60, 20);
         assert!(text.contains("more below"), "{text}");
         assert!(!text.contains("more above"), "{text}");
@@ -2146,8 +2156,11 @@ mod tests {
         assert!(!text.contains("Agent pane"), "{text}");
         assert!(text.contains("restarting it if it is"), "{text}");
         assert!(text.contains("not running"), "{text}");
-        let (last, _) = help_scroll_limits(&app, (60, 20));
-        app.help_scroll = last;
+        let (last, _) = help_scroll_limits(&app, &Help::default(), (60, 20));
+        app.popup = Some(Popup::Help(Help {
+            scroll: last,
+            ..Help::default()
+        }));
         let (text, _) = render_at(&app, 60, 20);
         assert!(text.contains("Agent pane"), "{text}");
         assert!(text.contains("send ctrl-q to the agent"), "{text}");
@@ -2161,7 +2174,7 @@ mod tests {
     fn the_help_dims_what_cannot_act_on_the_selection() {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Stopped)]);
-        app.popup = Some(Popup::Help);
+        app.popup = Some(Popup::Help(Help::default()));
         let (text, buffer) = render_at(&app, 100, 40);
         let row = |needle: &str| {
             let y = text
@@ -2371,7 +2384,7 @@ mod tests {
         let (text, _) = render(&app);
         assert!(text.contains(" tests · j/k scroll · q close "), "{text}");
         assert!(text.contains("second") && !text.contains("first"), "{text}");
-        app.popup = Some(Popup::Help);
+        app.popup = Some(Popup::Help(Help::default()));
         let (text, _) = render_at(&app, 100, 40);
         assert!(text.contains("Commands"), "{text}");
         assert!(text.contains("lazygit"), "{text}");
@@ -3099,7 +3112,7 @@ mod tests {
                 && text.contains("enter add"),
             "{text}"
         );
-        app.popup = Some(Popup::Help);
+        app.popup = Some(Popup::Help(Help::default()));
         let (text, _) = render(&app);
         assert!(text.contains(" Help ") && text.contains("ctrl-]"), "{text}");
     }
@@ -3111,7 +3124,7 @@ mod tests {
     #[test]
     fn help_lists_every_binding_at_100x40() {
         let mut app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
-        app.popup = Some(Popup::Help);
+        app.popup = Some(Popup::Help(Help::default()));
         let (text, _) = render_at(&app, 100, 40);
         assert!(!text.contains("more below"), "{text}");
         for (key, action) in [
@@ -3186,7 +3199,7 @@ mod tests {
         );
         let p = project("p");
         let (mut app, _) = loaded_with(config, vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
-        app.popup = Some(Popup::Help);
+        app.popup = Some(Popup::Help(Help::default()));
         let (text, _) = render_at(&app, 100, 40);
         for (key, action) in [
             ("M/ctrl-n", "new agent"),
@@ -3241,7 +3254,7 @@ mod tests {
     fn help_key_column_fits_the_widest_binding() {
         let config = configured("[keys.pane]\nleave = [\"q\", \"esc\", \"ctrl-alt-backspace\"]\n");
         let mut app = App::new("/w".into(), "/bin/sh".into(), None, config);
-        app.popup = Some(Popup::Help);
+        app.popup = Some(Popup::Help(Help::default()));
         let (text, _) = render_at(&app, 100, 40);
         let widest = line_with(&text, "ctrl-q q/esc/ctrl-alt-backspace");
         let start = column(widest, "back to the sidebar");
@@ -3344,7 +3357,7 @@ mod tests {
     fn tiny_terminals_show_a_notice_instead_of_the_layout() {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
-        app.popup = Some(Popup::Help);
+        app.popup = Some(Popup::Help(Help::default()));
         let (text, _) = render_at(&app, 40, 6);
         assert!(text.contains("terminal too small (40×6)"), "{text}");
         assert!(text.contains("needs at least 46×8"), "{text}");
@@ -3827,7 +3840,7 @@ mod tests {
     fn every_box_has_rounded_corners() {
         let p = project("p");
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
-        app.popup = Some(Popup::Help);
+        app.popup = Some(Popup::Help(Help::default()));
         assert_rounded(&render(&app).0);
         app.popup = None;
         let _ = app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
