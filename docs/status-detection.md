@@ -46,6 +46,8 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   daemon the usage figures in the JSON within 200 ms. Without a status line of their own an
   agent gets none, and reports no usage. The lookup happens when the agent starts; changes
   to the status line's other settings apply on restart, changes to their script at once.
+  Claude (2.1.51 and later) runs no status line in a folder whose trust dialog has not been
+  accepted, so a repository's own status line never runs before the user trusts it.
 - **Claude silence**: a `Working` Claude agent with no output for 10 s becomes `Idle`, or
   for 5 min while subagents run. Both count from the latest of its start, its last output
   and its last hook (every hook counts, even one that leaves the status unchanged), so a
