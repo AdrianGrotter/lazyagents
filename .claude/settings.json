@@ -31,6 +31,14 @@
       "Bash(scripts/tmux-harness.sh:*)",
       "Bash(scripts/test-hooks.sh:*)",
       "Bash(scripts/test-harness.sh:*)"
+    ],
+    "ask": [
+      "Bash(just install:*)",
+      "Bash(just dev:*)",
+      "Bash(nix develop -c just install:*)",
+      "Bash(nix develop -c just dev:*)",
+      "Bash(nix develop --command just install:*)",
+      "Bash(nix develop --command just dev:*)"
     ]
   },
   "hooks": {
