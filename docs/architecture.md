@@ -377,7 +377,8 @@ daemon last told it.
   `Incoming::Reply`, each with the request it answers, so a form can tell its own answer
   from another's. A bare `Ok` is dropped except for a removal, whose success the TUI
   reports. When the daemon closes the connection
-  it reports `Closed`, and the TUI exits with "the daemon stopped".
+  it reports `Closed`, and the TUI exits with "lost the connection to the daemon": the
+  daemon may have stopped, or it may have dropped a client that fell too far behind.
 - **Runtime and terminal guard** (`run.rs`): refuses to start without an interactive
   terminal, connects (starting the daemon if needed; on a protocol mismatch it opens the
   restart prompt), then enters raw mode, the alternate screen, mouse capture, bracketed

@@ -298,7 +298,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
                     app.apply_scoped_diff(id, scope, result);
                     Vec::new()
                 }
-                Some(Incoming::Closed) | None => anyhow::bail!("the daemon stopped"),
+                Some(Incoming::Closed) | None => anyhow::bail!("lost the connection to the daemon"),
             },
             done = finished.recv() => {
                 if let Some(done) = done {
