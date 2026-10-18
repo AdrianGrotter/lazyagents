@@ -955,10 +955,13 @@ impl Daemon {
                         );
                         reservation.answer(daemon, Err(message));
                     }),
-                    Some(Err(e)) if plan.fresh => daemon.discard_pending(pending, |daemon, _| {
+                    Some(Err(e)) => {
+                        if plan.fresh {
+                            daemon.forget_pending(&pending);
+                            daemon.persist();
+                        }
                         reservation.answer(daemon, Err(e));
-                    }),
-                    Some(Err(e)) => reservation.answer(daemon, Err(e)),
+                    }
                     None if plan.fresh => daemon.discard_pending(pending, |daemon, _| {
                         reservation.answer(daemon, Err(failed));
                     }),
