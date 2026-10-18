@@ -194,6 +194,8 @@ pub enum Confirmed {
     ForceRemove(AgentId),
     RemoveProject(ProjectId),
     StopDaemon,
+    /// A removal chosen in the finish menu.
+    Finish(AgentId, FinishChoice),
 }
 
 impl Confirmed {
@@ -511,6 +513,8 @@ pub struct App {
     stat_polled: Option<(AgentId, Instant)>,
     pending_remove: Option<PendingRemove>,
     pending_select: Option<PendingCreate>,
+    /// What to report once the removal of an agent with a worktree succeeds.
+    removals: HashMap<AgentId, String>,
     /// The agent `enter` restarted; its pane opens if the agent's next update shows it
     /// running while it is still selected.
     open_on_start: Option<AgentId>,
@@ -578,6 +582,7 @@ impl App {
             stat_polled: None,
             pending_remove: None,
             pending_select: None,
+            removals: HashMap::new(),
             open_on_start: None,
             interactions: 0,
             subscribed_running: false,
@@ -892,6 +897,12 @@ impl App {
         request: &Request,
         result: Result<Response, String>,
     ) -> Vec<Effect> {
+        if let Request::RemoveAgent { id, .. } = request
+            && let Some(done) = self.removals.remove(id)
+            && result.is_ok()
+        {
+            self.inform(done);
+        }
         let form = self
             .popup
             .as_mut()
@@ -2429,6 +2440,9 @@ impl App {
             (Confirmed::StopDaemon, KeyCode::Char('y') | KeyCode::Enter) => {
                 vec![Effect::StopDaemonAndQuit]
             }
+            (Confirmed::Finish(id, choice), KeyCode::Char('y') | KeyCode::Enter) => {
+                self.finish(*id, *choice)
+            }
             _ => return None,
         };
         Some(effects)
@@ -2437,6 +2451,16 @@ impl App {
     /// Remembers a remove that the daemon may refuse for a dirty worktree, so the refusal
     /// can offer to force it.
     fn remove(&mut self, id: AgentId, remove_worktree: bool, force: bool) -> Vec<Effect> {
+        if remove_worktree
+            && let Some(agent) = self.agents.iter().find(|a| a.id == id)
+            && let Some(worktree) = &agent.worktree
+        {
+            let done = format!(
+                "removed {} and its worktree, kept branch {}",
+                agent.name, worktree.branch
+            );
+            self.removals.insert(id, done);
+        }
         self.pending_remove = (remove_worktree && !force).then_some(PendingRemove {
             agent: id,
             interactions: self.interactions,
@@ -3082,7 +3106,7 @@ impl App {
         });
     }
 
-    /// The menu choice is the confirmation: the destructive entries name what they remove.
+    /// The removing choices ask for confirmation first, like `d`.
     fn on_finish_key(&mut self, agent: AgentId, index: usize, key: KeyEvent) -> Vec<Effect> {
         let choices = self.finish_choices();
         match key.code {
@@ -3101,6 +3125,10 @@ impl App {
                 Vec::new()
             }
             KeyCode::Enter => match choices.get(index) {
+                Some(choice @ (FinishChoice::Remove | FinishChoice::RemoveWithBranch)) => {
+                    self.confirm_finish(agent, *choice);
+                    Vec::new()
+                }
                 Some(choice) => self.finish(agent, *choice),
                 None => Vec::new(),
             },
@@ -3110,6 +3138,26 @@ impl App {
                 Vec::new()
             }
         }
+    }
+
+    fn confirm_finish(&mut self, id: AgentId, choice: FinishChoice) {
+        let Some(agent) = self.agents.iter().find(|a| a.id == id) else {
+            return;
+        };
+        let Some(worktree) = &agent.worktree else {
+            return;
+        };
+        let (name, branch) = (&agent.name, &worktree.branch);
+        let prompt = match choice {
+            FinishChoice::RemoveWithBranch => {
+                format!("Remove {name}, its worktree and {branch} (merged only)?")
+            }
+            _ => format!("Remove {name} and its worktree, keep {branch}?"),
+        };
+        self.popup = Some(Popup::Confirm {
+            prompt,
+            action: Confirmed::Finish(id, choice),
+        });
     }
 
     fn finish(&mut self, id: AgentId, choice: FinishChoice) -> Vec<Effect> {
@@ -3142,12 +3190,16 @@ impl App {
                 }]
             }
             FinishChoice::Remove => self.remove(id, true, false),
-            FinishChoice::RemoveWithBranch => vec![Effect::Send(Request::RemoveAgent {
-                id,
-                remove_worktree: true,
-                force: false,
-                delete_branch: true,
-            })],
+            FinishChoice::RemoveWithBranch => {
+                let done = format!("removed {}, its worktree and branch", agent.name);
+                self.removals.insert(id, done);
+                vec![Effect::Send(Request::RemoveAgent {
+                    id,
+                    remove_worktree: true,
+                    force: false,
+                    delete_branch: true,
+                })]
+            }
         }
     }
 }
@@ -7257,20 +7309,94 @@ mod finish_tests {
                 cwd: "/w/api".into(),
             }]
         );
+    }
+
+    fn confirm_prompt(app: &App) -> String {
+        match &app.popup {
+            Some(Popup::Confirm { prompt, .. }) => prompt.clone(),
+            other => panic!("not confirming: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn removing_from_the_finish_menu_asks_first_and_reports_success() {
+        let (mut app, a) = worktree_app(false);
+        let _ = app.on_key(key('F'));
+        let _ = app.on_key(key('j'));
+        assert!(app.on_key(enter()).is_empty());
+        assert_eq!(
+            confirm_prompt(&app),
+            "Remove api and its worktree, keep lazyagents/api?"
+        );
+        assert!(app.on_key(key('n')).is_empty());
+        assert_eq!(app.popup, None);
 
         let _ = app.on_key(key('F'));
-        for _ in 0..3 {
-            let _ = app.on_key(key('j'));
-        }
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(key('j'));
+        assert!(app.on_key(enter()).is_empty());
         assert_eq!(
-            app.on_key(enter()),
-            vec![Effect::Send(Request::RemoveAgent {
-                id: a.id,
-                remove_worktree: true,
-                force: false,
-                delete_branch: true,
-            })]
+            confirm_prompt(&app),
+            "Remove api, its worktree and lazyagents/api (merged only)?"
         );
+        let removal = Request::RemoveAgent {
+            id: a.id,
+            remove_worktree: true,
+            force: false,
+            delete_branch: true,
+        };
+        assert_eq!(app.on_key(key('y')), vec![Effect::Send(removal.clone())]);
+        let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
+        let _ = app.apply_reply(&removal, Ok(Response::Ok));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("removed api, its worktree and branch")
+        );
+        assert_eq!(app.message_kind, MessageKind::Info);
+    }
+
+    #[test]
+    fn removing_a_worktree_reports_the_branch_it_kept() {
+        let (mut app, a) = worktree_app(false);
+        let _ = app.on_key(key('F'));
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(enter());
+        let removal = Request::RemoveAgent {
+            id: a.id,
+            remove_worktree: true,
+            force: false,
+            delete_branch: false,
+        };
+        assert_eq!(app.on_key(enter()), vec![Effect::Send(removal.clone())]);
+        let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
+        let _ = app.apply_reply(&removal, Ok(Response::Ok));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("removed api and its worktree, kept branch lazyagents/api")
+        );
+    }
+
+    #[test]
+    fn a_refused_removal_reports_only_the_refusal() {
+        let (mut app, a) = worktree_app(false);
+        let _ = app.on_key(key('F'));
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(enter());
+        let effects = app.on_key(key('y'));
+        let [Effect::Send(removal)] = effects.as_slice() else {
+            panic!("{effects:?}")
+        };
+        let _ = app.apply_reply(
+            removal,
+            Err("lazyagents/api is not merged into main".into()),
+        );
+        let _ = app.apply_reply(removal, Ok(Response::Ok));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("lazyagents/api is not merged into main")
+        );
+        assert!(app.agents.iter().any(|x| x.id == a.id));
     }
 
     #[test]

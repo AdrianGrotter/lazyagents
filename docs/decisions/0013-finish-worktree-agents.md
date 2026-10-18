@@ -51,3 +51,6 @@ Finishing an agent takes one menu, and `lazyagents/<name>` branches go away once
 The daemon now changes the user's checkout, but only through a merge git itself would
 perform, from a clean state, and it never leaves a half-done merge behind. Squash and
 rebase merges are not offered; a custom command can do those.
+
+Amended by [0020](0020-keep-tui-errors-readable.md): picking either removal now asks for
+confirmation first, as `d` does, and its success is reported in the status bar.

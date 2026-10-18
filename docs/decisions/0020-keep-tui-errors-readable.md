@@ -23,6 +23,9 @@ user looked elsewhere.
 - A status line notice lasts 5 s. An error lasts 5 s and after that until the next key
   press or click: the user's next action shows they were there, and an error never goes
   before anyone could have read it.
+- The finish menu's two removals ask for confirmation, as `d` does, instead of the menu
+  choice being the confirmation (ADR 0013), and a removal that took a worktree says so in the
+  status bar once it succeeds.
 - Whether a project can have a worktree is judged in the TUI by looking for `.git` in the
   project's path or above it, as git does; outside a repository the form's Worktree row
   says so and is skipped.
