@@ -90,7 +90,8 @@ it never acts; `s` (skip the setup) and `n`/`esc` work at any time.
 Popups: `y`/`enter` confirms and `n`/`esc` cancels a confirmation. In the new agent form,
 `tab`/`shift-tab` (or `↓`/`↑`) move between the visible fields, `enter` starts the agent and
 `esc` cancels. The fields are Name, Preset (`←`/`→`/`space` change it), Command (only for the
-custom preset), Worktree (`space`/`←`/`→` toggle it), Base (only while Worktree is on) and
+custom preset), Worktree (`space`/`←`/`→` toggle it; for a project outside a git repository it
+reads `off (not a git repository)` and `tab` skips it), Base (only while Worktree is on) and
 Prompt, the agent's first message (empty means none; a pasted newline becomes a space).
 Spaces in an agent's name (new agent form and rename) become dashes: `my new agent` is
 stored as `my-new-agent`. An empty name becomes `<preset>-<n>` with the lowest number no

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use protocol::{
@@ -112,6 +112,8 @@ pub struct NewAgentForm {
     pub prompt: String,
     pub field: Field,
     pub submission: Submission,
+    /// The project is not in a git repository, so the agent cannot have a worktree.
+    pub outside_git: bool,
 }
 
 /// A run of whitespace, with any dashes touching it, becomes one dash; dashes typed without
@@ -142,7 +144,9 @@ impl NewAgentForm {
         if self.preset == Preset::Custom {
             fields.push(Field::Command);
         }
-        fields.push(Field::Worktree);
+        if !self.outside_git {
+            fields.push(Field::Worktree);
+        }
         if self.worktree {
             fields.push(Field::Base);
         }
@@ -524,6 +528,8 @@ pub struct App {
     /// Review comments per agent, kept until they are sent.
     pub comments: HashMap<AgentId, Vec<Comment>>,
     pub theme: Theme,
+    /// Decides whether the new agent form offers a worktree for a project's path.
+    pub is_git_repo: fn(&Path) -> bool,
     cwd: PathBuf,
     home: Option<PathBuf>,
     shell: String,
@@ -575,6 +581,7 @@ impl App {
             gh: false,
             approved_setups: Vec::new(),
             theme: config.theme,
+            is_git_repo: in_git_repo,
             cwd,
             home,
             shell,
@@ -2213,7 +2220,13 @@ impl App {
             self.fail(format!("add a project first ({add})"));
             return;
         }
-        self.popup = Some(Popup::NewAgent(NewAgentForm::default()));
+        let outside_git = self
+            .selected_project()
+            .is_some_and(|p| !(self.is_git_repo)(&p.path));
+        self.popup = Some(Popup::NewAgent(NewAgentForm {
+            outside_git,
+            ..NewAgentForm::default()
+        }));
     }
 
     fn next_attention(&mut self) {
@@ -3119,6 +3132,12 @@ impl App {
     }
 }
 
+/// Whether `path` is in a git repository as git finds one: a `.git` directory or file in it
+/// or in a directory above it.
+fn in_git_repo(path: &Path) -> bool {
+    path.ancestors().any(|dir| dir.join(".git").exists())
+}
+
 fn prefix_help(keymap: &Keymap) -> String {
     let keys = |actions: &[Action]| {
         let keys: Vec<_> = actions.iter().flat_map(|a| keymap.keys(*a)).collect();
@@ -3233,6 +3252,7 @@ pub(crate) mod tests {
             Some("/home/u".into()),
             config,
         );
+        app.is_git_repo = |_| true;
         let mut effects = app.apply_response(Response::Projects(projects));
         effects.extend(app.apply_response(Response::Agents(agents)));
         (app, effects)
@@ -5316,6 +5336,39 @@ pub(crate) mod tests {
         type_text(&mut app, "api");
         let c = created(app.on_key(code(KeyCode::Enter)));
         assert_eq!(c.worktree, None);
+    }
+
+    #[test]
+    fn a_project_outside_git_offers_no_worktree() {
+        let (mut app, _, _) = two_agents();
+        app.is_git_repo = |_| false;
+        let _ = app.on_key(key('n'));
+        assert!(form(&app).outside_git);
+        let mut order = vec![form(&app).field];
+        for _ in 0..3 {
+            let _ = app.on_key(code(KeyCode::Tab));
+            order.push(form(&app).field);
+        }
+        assert_eq!(
+            order,
+            [Field::Name, Field::Preset, Field::Prompt, Field::Name]
+        );
+    }
+
+    #[test]
+    fn a_git_repo_is_found_from_any_directory_inside_it() {
+        let dir = tempfile::tempdir().expect("dir");
+        let repo = dir.path().join("repo");
+        let nested = repo.join("src/deep");
+        std::fs::create_dir_all(&nested).expect("dirs");
+        assert!(!in_git_repo(&repo));
+        std::fs::create_dir(repo.join(".git")).expect(".git");
+        assert!(in_git_repo(&repo));
+        assert!(in_git_repo(&nested));
+        let linked = dir.path().join("linked");
+        std::fs::create_dir(&linked).expect("linked");
+        std::fs::write(linked.join(".git"), "gitdir: ../repo/.git\n").expect(".git file");
+        assert!(in_git_repo(&linked));
     }
 
     fn stat(insertions: u32) -> GitStat {

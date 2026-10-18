@@ -1572,7 +1572,11 @@ fn form_lines(form: &NewAgentForm, app: &App) -> (Vec<Line<'static>>, Option<usi
     if form.preset == Preset::Custom {
         rows.push((Field::Command, "Command: ", form.command.clone()));
     }
-    let toggle = if form.worktree { "[x]" } else { "[ ]" };
+    let toggle = match (form.outside_git, form.worktree) {
+        (true, _) => "off (not a git repository)",
+        (false, true) => "[x]",
+        (false, false) => "[ ]",
+    };
     rows.push((Field::Worktree, "Worktree: ", toggle.to_string()));
     if form.worktree {
         let base = if form.base.is_empty() && form.field != Field::Base {
@@ -1597,7 +1601,12 @@ fn form_lines(form: &NewAgentForm, app: &App) -> (Vec<Line<'static>>, Option<usi
     });
     let mut lines: Vec<Line> = rows
         .into_iter()
-        .map(|(field, label, value)| field_line(label, value, field == form.field, &app.theme))
+        .map(|(field, label, value)| match field {
+            Field::Worktree if form.outside_git => {
+                Line::from(format!("{label}{value}")).fg(app.theme.dim)
+            }
+            _ => field_line(label, value, field == form.field, &app.theme),
+        })
         .collect();
     lines.push(Line::default());
     lines.extend(form_footer(
@@ -2408,6 +2417,7 @@ mod tests {
             prompt: String::new(),
             field: Field::Name,
             submission: Default::default(),
+            outside_git: false,
         };
         app.popup = Some(Popup::NewAgent(form.clone()));
         let (buffer, cursor) = cursor_of(&app);
@@ -2721,6 +2731,19 @@ mod tests {
     }
 
     #[test]
+    fn the_worktree_row_says_why_a_project_outside_git_has_none() {
+        use crate::app::NewAgentForm;
+        let (mut app, _) = loaded(vec![project("p")], Vec::new());
+        app.popup = Some(Popup::NewAgent(NewAgentForm {
+            outside_git: true,
+            ..Default::default()
+        }));
+        let (_, buffer) = render(&app);
+        let at = find_text(&buffer, buffer.area, "Worktree: off (not a git repository)");
+        assert_eq!(buffer[at].fg, app.theme.dim);
+    }
+
+    #[test]
     fn a_form_shows_its_error_in_words_and_says_while_it_waits() {
         use crate::app::{NewAgentForm, Submission};
         let (mut app, _) = loaded(vec![project("p")], Vec::new());
@@ -2780,6 +2803,7 @@ mod tests {
             prompt: String::new(),
             field: Field::Name,
             submission: Default::default(),
+            outside_git: false,
         };
         app.popup = Some(Popup::NewAgent(form(Preset::Claude)));
         let (text, _) = render(&app);
