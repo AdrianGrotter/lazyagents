@@ -3788,3 +3788,22 @@ async fn a_pending_worktree_an_agent_records_is_kept_at_the_next_start() {
     let mut conn = Conn::open(daemon.path()).await;
     assert_eq!(list_agents(&mut conn).await.len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pending_worktree_whose_repo_is_gone_is_dropped_at_the_next_start() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let leftover = worktree_path(&daemon, &project, "ghost");
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree(&daemon, &project, "ghost", &leftover);
+    std::fs::remove_dir_all(repo.path()).expect("remove the repo");
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    let mut conn = Conn::open(daemon.path()).await;
+    conn.request(Request::RemoveProject { id: project.id })
+        .await
+        .expect("the project can be removed");
+}

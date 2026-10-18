@@ -970,6 +970,17 @@ impl Daemon {
             .iter()
             .find(|p| p.id == pending.project)
             .map(|p| p.path.clone())
+            .filter(|repo| {
+                let exists = repo.exists();
+                if !exists {
+                    tracing::info!(
+                        repo = %repo.display(),
+                        path = %pending.path.display(),
+                        "dropping a pending worktree whose repository no longer exists"
+                    );
+                }
+                exists
+            })
         else {
             self.forget_pending(&pending);
             self.persist();
