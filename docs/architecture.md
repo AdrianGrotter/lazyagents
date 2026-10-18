@@ -147,6 +147,13 @@ its `Welcome` from its own task before the loop sees it, so a client is greeted 
 a hook never waits behind other work. Shutdown is the one exception: it runs on the loop,
 which ends with it.
 
+Nothing waits for a client either: each connection has a bounded queue, which its own
+task writes to the socket (`outbox.rs`, ADR 0022). Frames go only while fewer than 4 are
+queued; a frame that finds 4 is dropped, and the next frame for that connection is full,
+so a client that stalled sees the current screen as soon as it reads again. Every other
+message (replies and events) must arrive: up to 16384 of them may queue, and a connection
+whose queue overflows is closed, since its client stopped reading.
+
 While such work is in flight the daemon keeps its state consistent (ADR 0019):
 
 - **Kill, restart, remove and merge** mark the agent busy until they are answered. A kill,

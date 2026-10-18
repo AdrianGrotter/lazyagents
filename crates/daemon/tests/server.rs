@@ -3523,3 +3523,156 @@ async fn shutdown_stops_waiting_for_a_hung_create_and_the_next_start_cleans_up()
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_stops_reading_gets_a_full_frame_when_it_reads_again() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let chatty = create(
+        &mut conn,
+        &project,
+        "chatty",
+        AgentKind::Generic,
+        &[
+            "sh",
+            "-c",
+            "i=0; while :; do i=$((i+1)); echo line-$i; done",
+        ],
+    )
+    .await
+    .expect("create");
+    conn.request(Request::Resize {
+        id: chatty.id,
+        cols: 250,
+        rows: 100,
+    })
+    .await
+    .expect("resize");
+    let mut stalled = Conn::open(daemon.path()).await;
+    stalled
+        .request(Request::Subscribe { id: chatty.id })
+        .await
+        .expect("subscribe");
+    stalled
+        .wait_for(|m| matches!(m, ServerMessage::Frame(frame) if frame.full))
+        .await;
+    stalled.pending.clear();
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        matches!(
+            conn.request(Request::ListAgents).await,
+            Ok(Response::Agents(_))
+        ),
+        "the daemon stopped answering"
+    );
+    stalled
+        .wait_for(|m| matches!(m, ServerMessage::Frame(frame) if frame.full))
+        .await;
+    conn.request(Request::KillAgent { id: chatty.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_stops_reading_while_events_pile_up_is_disconnected() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _dir) = add_project(&mut conn).await;
+    let agent = create(
+        &mut conn,
+        &project,
+        "busy",
+        AgentKind::Claude,
+        &["sh", "-c", "exec sleep 300"],
+    )
+    .await
+    .expect("create");
+    let mut stalled = Conn::open(daemon.path()).await;
+    assert!(matches!(
+        stalled.request(Request::ListAgents).await,
+        Ok(Response::Agents(_))
+    ));
+    drop(conn);
+
+    let hooks: u64 = 20_000;
+    let hooker = UnixStream::connect(StatePaths::new(daemon.path()).socket())
+        .await
+        .expect("connect");
+    let (mut read, mut write) = hooker.into_split();
+    let answered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = std::sync::Arc::clone(&answered);
+    let reader = tokio::spawn(async move {
+        loop {
+            match read_message::<_, ServerMessage>(&mut read).await {
+                Ok(Some(ServerMessage::Response { result, .. })) => {
+                    result.expect("hook");
+                    let done = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if done == hooks {
+                        return;
+                    }
+                }
+                Ok(Some(_)) => {}
+                other => panic!("the hooking client lost its connection: {other:?}"),
+            }
+        }
+    });
+    write_message(
+        &mut write,
+        &ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )
+    .await
+    .expect("hello");
+    let deadline = tokio::time::Instant::now() + WAIT * 2;
+    for id in 0..hooks {
+        while id >= answered.load(std::sync::atomic::Ordering::SeqCst) + 200 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the hooks were never all answered"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let kind = if id % 2 == 0 {
+            HookKind::PreToolUse
+        } else {
+            HookKind::Stop
+        };
+        let request = Request::Hook {
+            id: agent.id,
+            kind,
+            session_id: None,
+            source: None,
+            detail: None,
+            subagent: None,
+        };
+        write_message(&mut write, &ClientMessage::Request { id, request })
+            .await
+            .expect("send hook");
+    }
+    tokio::time::timeout(WAIT * 2, reader)
+        .await
+        .expect("the hooks were never all answered")
+        .expect("reader");
+
+    let closed = tokio::time::timeout(WAIT, async {
+        loop {
+            match read_message::<_, ServerMessage>(&mut stalled.read).await {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return,
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the stalled client was never disconnected");
+    let mut conn = Conn::open(daemon.path()).await;
+    assert!(matches!(
+        conn.request(Request::ListAgents).await,
+        Ok(Response::Agents(_))
+    ));
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}

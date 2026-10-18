@@ -16,14 +16,15 @@ use protocol::{
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tokio::task::JoinSet;
+use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::task::{AbortHandle, JoinSet};
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::claude_settings;
 use crate::encode::encode;
 use crate::lock::InstanceLock;
+use crate::outbox::{self, Outbox, Outgoing};
 use crate::reap::{self, ProcessTable, Tracked};
 use crate::spawn::{Launch, SpawnContext, blocked_envrc_hint, hook_settings, spawn_spec};
 use crate::status::{awaits_trust, on_hook, settle, trust_keys};
@@ -141,11 +142,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 busy_at = Instant::now();
                 let client = next_client;
                 next_client += 1;
-                let (tx, rx) = mpsc::unbounded_channel();
-                daemon.add_client(client, tx);
+                let (outbox, outgoing) = outbox::outbox();
                 let (read, write) = stream.into_split();
-                readers.spawn(read_loop(client, read, commands_tx.clone()));
-                writers.spawn(write_loop(write, rx));
+                let reader = readers.spawn(read_loop(client, read, commands_tx.clone()));
+                let writer = writers.spawn(write_loop(write, outgoing));
+                daemon.add_client(client, outbox, vec![reader, writer]);
             }
             Some(command) = commands.recv() => {
                 if daemon.handle_command(command) == Flow::Stop {
@@ -255,12 +256,8 @@ async fn read_loop(client: ClientId, mut read: OwnedReadHalf, commands: Unbounde
     let _ = commands.send(Command::Disconnected { client });
 }
 
-async fn write_loop(mut write: OwnedWriteHalf, mut outgoing: UnboundedReceiver<ServerMessage>) {
-    while let Some(message) = outgoing.recv().await {
-        if write_message(&mut write, &message).await.is_err() {
-            break;
-        }
-    }
+async fn write_loop(mut write: OwnedWriteHalf, outgoing: Outgoing) {
+    outgoing.write_to(&mut write).await;
 }
 
 struct Agent {
@@ -412,8 +409,10 @@ struct Subscription {
 }
 
 struct Client {
-    tx: UnboundedSender<ServerMessage>,
+    outbox: Outbox,
     subscription: Option<Subscription>,
+    /// The tasks reading and writing its connection.
+    connection: Vec<AbortHandle>,
 }
 
 struct Daemon {
@@ -503,14 +502,34 @@ impl Daemon {
         }
     }
 
-    fn add_client(&mut self, client: ClientId, tx: UnboundedSender<ServerMessage>) {
+    fn add_client(&mut self, client: ClientId, outbox: Outbox, connection: Vec<AbortHandle>) {
         self.clients.insert(
             client,
             Client {
-                tx,
+                outbox,
                 subscription: None,
+                connection,
             },
         );
+    }
+
+    /// Closes the connection of each client whose queue overflowed with messages it must
+    /// not miss; it stopped reading, and a client that reconnects starts afresh.
+    fn disconnect_overflowed(&mut self) {
+        let overflowed: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| c.outbox.overflowed())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in overflowed {
+            tracing::warn!(client = id, "the client stopped reading; disconnecting it");
+            if let Some(client) = self.clients.remove(&id) {
+                for task in client.connection {
+                    task.abort();
+                }
+            }
+        }
     }
 
     fn busy(&self) -> bool {
@@ -610,7 +629,7 @@ impl Daemon {
 
     fn reply(&self, client: ClientId, id: u64, result: Result<Response, String>) {
         if let Some(c) = self.clients.get(&client) {
-            let _ = c.tx.send(ServerMessage::Response { id, result });
+            c.outbox.send(ServerMessage::Response { id, result });
         }
     }
 
@@ -701,7 +720,7 @@ impl Daemon {
 
     fn broadcast(&self, message: &ServerMessage) {
         for client in self.clients.values() {
-            let _ = client.tx.send(message.clone());
+            client.outbox.send(message.clone());
         }
     }
 
@@ -1623,7 +1642,7 @@ impl Daemon {
             Ok(agent) => agent,
             Err(e) => return Reply::Now(Box::new(Err(e))),
         };
-        let Some(tx) = self.clients.get(&client).map(|c| c.tx.clone()) else {
+        let Some(outbox) = self.clients.get(&client).map(|c| c.outbox.clone()) else {
             return Reply::Deferred;
         };
         let dir = agent.record.cwd.clone();
@@ -1632,7 +1651,7 @@ impl Daemon {
             .name("git".into())
             .spawn(move || {
                 let result = run_git_query(&dir, base.as_deref(), query);
-                let _ = tx.send(ServerMessage::Response {
+                outbox.send(ServerMessage::Response {
                     id: request_id,
                     result,
                 });
@@ -1955,6 +1974,7 @@ impl Daemon {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        self.disconnect_overflowed();
         self.finish_jobs();
         self.collect_reapers();
         self.retry_leftovers(now);
@@ -1989,10 +2009,11 @@ impl Daemon {
             let screen = screens
                 .entry(sub.agent)
                 .or_insert_with(|| terminal.screen());
-            if let Some(frame) = screen.diff(sub.last.as_ref(), sub.agent) {
-                let _ = client.tx.send(ServerMessage::Frame(frame));
-            }
-            sub.last = Some(screen.clone());
+            let sent = match screen.diff(sub.last.as_ref(), sub.agent) {
+                Some(frame) => client.outbox.send_frame(frame),
+                None => true,
+            };
+            sub.last = sent.then(|| screen.clone());
         }
         for agent in self.agents.values_mut() {
             agent.dirty = false;
@@ -2254,8 +2275,8 @@ mod tests {
     fn shutdown_answers_a_create_it_stops_waiting_for() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut daemon = test_daemon(dir.path());
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        daemon.add_client(7, tx);
+        let (outbox, mut outgoing) = outbox::outbox();
+        daemon.add_client(7, outbox, Vec::new());
         daemon.creating.push(Reservation {
             project: ProjectId::random(),
             name: "hung".into(),
@@ -2273,8 +2294,8 @@ mod tests {
         );
         assert!(daemon.jobs.is_empty());
         assert!(daemon.creating.is_empty());
-        match rx.try_recv() {
-            Ok(ServerMessage::Response {
+        match outgoing.try_recv() {
+            Some(ServerMessage::Response {
                 id: 3,
                 result: Err(e),
             }) => assert!(e.contains("shut down before hung started"), "{e}"),

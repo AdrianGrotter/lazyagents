@@ -5,6 +5,7 @@ pub mod direnv;
 pub mod encode;
 pub mod git;
 mod lock;
+mod outbox;
 pub mod reap;
 mod server;
 pub mod spawn;

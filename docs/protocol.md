@@ -182,8 +182,11 @@ changed path per line, and leaves the agent running.
 `Subscribe { id }` makes the daemon push `Frame`s for that agent; one subscription is
 active per connection, and a new `Subscribe` replaces it. Frames flow whenever the
 agent has a terminal: an exited agent's last screen is sent, a stopped agent sends
-nothing until it is restarted. A frame is full (`full: true`, every row) on subscribe and after a size change. Other
-frames carry only the changed rows plus the cursor position. `Frame` has the fields
+nothing until it is restarted. A frame is full (`full: true`, every row) on subscribe, after a
+size change and after frames were dropped. Other frames carry only the changed rows plus the
+cursor position. A connection that does not keep up (4 frames queued or being written)
+has frames dropped, and the next frame that goes through is full. Every other message is
+queued, up to 16384; a connection with more pending is closed (ADR 0022). `Frame` has the fields
 `agent`, `cols`, `rows`, `full`, `lines` and `cursor`. A cell with an empty `text`
 is the spacer that follows a wide character.
 
