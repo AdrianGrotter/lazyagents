@@ -966,6 +966,34 @@ impl Daemon {
         self.pending_worktrees.retain(|p| p != pending);
     }
 
+    /// Git cannot remove a worktree of a repository that is gone, so the directory is
+    /// deleted directly, but only when it lies inside the state directory's `worktrees`.
+    fn drop_pending_without_repo(&mut self, pending: &PendingWorktree) {
+        tracing::info!(
+            path = %pending.path.display(),
+            "dropping a pending worktree whose repository no longer exists"
+        );
+        if !inside_worktrees_dir(self.paths.dir(), &pending.path) {
+            tracing::info!(
+                path = %pending.path.display(),
+                "leaving the directory of a dropped pending worktree: it is not inside the worktrees directory"
+            );
+            return;
+        }
+        let path = pending.path.clone();
+        self.off_loop(
+            "worktree",
+            move || {
+                if let Err(e) = std::fs::remove_dir_all(&path)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!(path = %path.display(), "could not remove the leftover directory: {e}");
+                }
+            },
+            |_, _| {},
+        );
+    }
+
     /// Removes, off the event loop, the worktree and branch a create may have left, then
     /// runs `then` with whether they are gone. Until they are, the worktree stays pending,
     /// in `state.toml` and keeping its name, so the next start tries again.
@@ -974,23 +1002,18 @@ impl Daemon {
         pending: PendingWorktree,
         then: impl FnOnce(&mut Daemon, bool) + Send + 'static,
     ) {
-        let Some(repo) = self
+        let repo = self
             .projects
             .iter()
             .find(|p| p.id == pending.project)
-            .map(|p| p.path.clone())
-            .filter(|repo| {
-                let exists = repo.exists();
-                if !exists {
-                    tracing::info!(
-                        repo = %repo.display(),
-                        path = %pending.path.display(),
-                        "dropping a pending worktree whose repository no longer exists"
-                    );
-                }
-                exists
-            })
-        else {
+            .map(|p| p.path.clone());
+        let repo_gone = repo
+            .as_ref()
+            .is_some_and(|repo| matches!(repo.try_exists(), Ok(false)));
+        let Some(repo) = repo.filter(|_| !repo_gone) else {
+            if repo_gone {
+                self.drop_pending_without_repo(&pending);
+            }
             self.forget_pending(&pending);
             self.persist();
             then(self, true);
@@ -2168,6 +2191,22 @@ fn await_snapshot(snapshot: &Receiver<Vec<Tracked>>) -> Vec<Tracked> {
         }
         Err(RecvTimeoutError::Disconnected) => Vec::new(),
     }
+}
+
+/// Whether `path` lies strictly inside `<state>/worktrees`, with the state directory taken
+/// as given or resolved; a path with `..` components never does.
+fn inside_worktrees_dir(state: &Path, path: &Path) -> bool {
+    use std::path::Component;
+
+    if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+        return false;
+    }
+    let roots = [std::path::absolute(state).ok(), state.canonicalize().ok()];
+    roots
+        .into_iter()
+        .flatten()
+        .map(|root| root.join("worktrees"))
+        .any(|root| path != root && path.starts_with(&root))
 }
 
 /// Where a new agent's worktree goes, its branch and its base; `fresh` unless the path or

@@ -3806,6 +3806,8 @@ async fn a_pending_worktree_whose_repo_is_gone_is_dropped_at_the_next_start() {
     let mut conn = Conn::open(daemon.path()).await;
     let (project, repo) = add_repo_project(&mut conn).await;
     let leftover = worktree_path(&daemon, &project, "ghost");
+    std::fs::create_dir_all(&leftover).expect("leftover directory");
+    std::fs::write(leftover.join("file"), "x").expect("leftover file");
     drop(conn);
     stop_daemon(&mut daemon).await;
     record_pending_worktree(&daemon, &project, "ghost", &leftover);
@@ -3813,8 +3815,35 @@ async fn a_pending_worktree_whose_repo_is_gone_is_dropped_at_the_next_start() {
 
     daemon.task = Some(spawn_daemon(daemon.path()).await);
     wait_until_no_pending_worktree(&daemon).await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while leftover.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the leftover directory was never removed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let mut conn = Conn::open(daemon.path()).await;
     conn.request(Request::RemoveProject { id: project.id })
         .await
         .expect("the project can be removed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leftover_outside_the_worktrees_dir_survives_its_dropped_entry() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let outside = tempfile::tempdir().expect("outside");
+    let precious = outside.path().join("precious");
+    std::fs::create_dir_all(&precious).expect("precious");
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree(&daemon, &project, "ghost", &precious);
+    std::fs::remove_dir_all(repo.path()).expect("remove the repo");
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(precious.exists());
 }
