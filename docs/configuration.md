@@ -18,8 +18,9 @@ file does not mention keeps its default.
 ## Warnings
 
 The loader never fails. Anything it cannot use stays at its default and becomes a
-warning, and all warnings are shown together in the status bar when the TUI starts. The
-full list:
+warning. When the TUI starts with warnings it opens a `Config warnings` popup that lists
+each on its own line, wrapped to the screen; `j`/`k` scroll it and `esc`, `enter` or `q`
+close it. The full list:
 
 - a file that cannot be read, as `<path>: <error>`, or a syntax error, as `<path>: line N:
   <message>`; the whole file is then ignored;

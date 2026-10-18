@@ -537,21 +537,29 @@ pub struct App {
 
 impl App {
     pub fn new(cwd: PathBuf, shell: String, home: Option<PathBuf>, config: Config) -> Self {
-        let message =
-            (!config.warnings.is_empty()).then(|| (config.warnings.join("; "), Instant::now()));
+        let popup = (!config.warnings.is_empty()).then(|| Popup::Output {
+            title: "Config warnings".into(),
+            lines: config
+                .warnings
+                .iter()
+                .flat_map(|w| w.lines())
+                .map(String::from)
+                .collect(),
+            scroll: 0,
+        });
         Self {
             projects: Vec::new(),
             agents: Vec::new(),
             focus: Focus::Agents,
             view: AgentView::Project,
-            popup: None,
+            popup,
             project_index: 0,
             agent_index: 0,
             subscribed: None,
             screen: Screen::blank(0, 0),
             pane_size: None,
             screen_size: None,
-            message,
+            message: None,
             message_kind: MessageKind::Error,
             git_stats: HashMap::new(),
             diff: None,
@@ -4422,18 +4430,34 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn config_warnings_become_the_startup_message() {
+    fn config_warnings_open_a_popup_with_one_warning_per_line() {
         let config = Config {
-            warnings: vec!["unknown table [x]".into(), "theme.accent: bad".into()],
+            warnings: vec![
+                "unknown table [x]".into(),
+                "config.toml: line 3: expected a value\nbroken = ".into(),
+            ],
             ..Config::default()
         };
-        let app = App::new("/w".into(), "/bin/sh".into(), None, config);
+        let mut app = App::new("/w".into(), "/bin/sh".into(), None, config);
         assert_eq!(
-            app.current_message(Instant::now()),
-            Some("unknown table [x]; theme.accent: bad")
+            app.popup,
+            Some(Popup::Output {
+                title: "Config warnings".into(),
+                lines: vec![
+                    "unknown table [x]".into(),
+                    "config.toml: line 3: expected a value".into(),
+                    "broken = ".into(),
+                ],
+                scroll: 0,
+            })
         );
-        let app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
         assert_eq!(app.message, None);
+        let _ = app.on_key(key('x'));
+        assert!(app.popup.is_some());
+        let _ = app.on_key(code(KeyCode::Esc));
+        assert_eq!(app.popup, None);
+        let app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
+        assert_eq!((app.popup, app.message), (None, None));
     }
 
     #[test]

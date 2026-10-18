@@ -1111,15 +1111,19 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     rows
 }
 
-/// Splits `text` into rows of at most `width` cells, between words where a word fits.
+/// Splits each line of `text` into rows of at most `width` cells, between words where a word
+/// fits; a line's leading spaces stay.
 fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut rows = Vec::new();
-    for line in text.lines() {
+    for line in text.split('\n') {
         let mut row = String::new();
-        for word in line.split(' ') {
-            if !row.is_empty() && text_width(&row) + 1 + text_width(word) > width {
+        for (index, word) in line.trim_end_matches('\r').split(' ').enumerate() {
+            if index > 0
+                && !row.trim_start().is_empty()
+                && text_width(&row) + 1 + text_width(word) > width
+            {
                 rows.extend(wrap(&std::mem::take(&mut row), width));
-            } else if !row.is_empty() {
+            } else if index > 0 {
                 row.push(' ');
             }
             row.push_str(word);
@@ -1244,10 +1248,12 @@ fn popup_content(popup: &Popup, app: &App, screen: (u16, u16)) -> PopupContent {
             lines,
             scroll,
         } => {
+            let room = usize::from(screen.0.saturating_sub(4)).max(1);
             let lines: Vec<Line> = lines
                 .iter()
                 .skip(*scroll)
-                .map(|l| Line::from(l.clone()))
+                .flat_map(|l| wrap_words(l, room))
+                .map(Line::from)
                 .collect();
             let lines = if lines.is_empty() {
                 vec![Line::from("(no output)").fg(theme.dim)]
@@ -1946,6 +1952,21 @@ mod tests {
         let (text, _) = render_at(&app, 100, 40);
         assert!(text.contains("Commands"), "{text}");
         assert!(text.contains("lazygit"), "{text}");
+    }
+
+    #[test]
+    fn output_lines_wrap_to_the_screen_and_keep_their_indent() {
+        let mut app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
+        let warning =
+            "/home/u/.config/lazyagents/config.toml: line 3: expected a value, found a newline";
+        app.popup = Some(Popup::Output {
+            title: "Config warnings".into(),
+            lines: vec![warning.into(), String::new(), "  indented".into()],
+            scroll: 0,
+        });
+        let (text, _) = render_at(&app, 50, 20);
+        assert!(text.contains("found a newline"), "{text}");
+        assert!(text.contains("│  indented"), "{text}");
     }
 
     fn asking_to_run(script: &str, scroll: usize) -> App {
