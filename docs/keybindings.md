@@ -85,6 +85,9 @@ the pane say `no agents match /<text> · esc clears`.
 sidebar. Moving to another agent, or opening the pane with `enter`, scrolls it back to the
 bottom. A stopped agent has no terminal to scroll.
 
+Before the first project is added, the Projects box, the Agents box and the pane all point
+at `a` (add a project), since `n` needs a project to put the agent in.
+
 The add project picker lists `+ new project…` and then every known project that is not in
 the sidebar, most recently added first. `j`/`k` (or `↓`/`↑`) move, `enter` adds the
 highlighted project with its old name or opens the new project form, `x` forgets the

@@ -8,9 +8,7 @@ use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
-};
+use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{
     AgentView, App, CommandRun, DiffView, Field, Focus, MIN_PANE, MessageKind, NewAgentForm, Popup,
@@ -106,6 +104,8 @@ pub struct Areas {
 
 const INFO_MIN_HEIGHT: u16 = 6;
 const AGENTS_MIN_HEIGHT: u16 = 8;
+/// Rows inside the Projects box while it is empty, for its wrapped hint.
+const EMPTY_PROJECTS_ROWS: u16 = 2;
 
 pub fn layout(area: Rect, app: &App) -> Areas {
     areas_in(
@@ -133,7 +133,11 @@ pub fn areas_in(area: Rect, project_count: usize, info_lines: usize, mode: Scree
         ScreenMode::Full => 0,
     }
     .min(area.width);
-    let projects_height = (project_count.clamp(1, 6) as u16 + 2).min(body_height);
+    let project_rows = match project_count {
+        0 => EMPTY_PROJECTS_ROWS,
+        count => count.min(6) as u16,
+    };
+    let projects_height = (project_rows + 2).min(body_height);
     let below_projects = body_height - projects_height;
     let wanted = u16::try_from(info_lines)
         .unwrap_or(u16::MAX)
@@ -317,12 +321,10 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
     let title = numbered(&app.keymap, Action::FocusProjects, "Projects");
     let block = block(title, app.focus == Focus::Projects, &app.theme);
     if app.projects.is_empty() {
-        let open_sides = block.borders(Borders::TOP | Borders::BOTTOM);
         let add = app.keymap.first_key(Action::AddProject);
-        frame.render_widget(
-            Paragraph::new(format!("press {add} to add a project")).block(open_sides),
-            area,
-        );
+        let hint =
+            Paragraph::new(format!("press {add} to add a project")).wrap(Wrap { trim: true });
+        frame.render_widget(hint.block(block), area);
         return;
     }
     let items = app
@@ -392,8 +394,16 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect, tick: u64) {
     let block = block(title, app.focus == Focus::Agents, &app.theme);
     let agents = app.visible_agents();
     if agents.is_empty() {
-        let new = app.keymap.first_key(Action::NewAgent);
-        let text = filter_miss(app).unwrap_or_else(|| format!("no agents — press {new}"));
+        let text = filter_miss(app).unwrap_or_else(|| match app.projects.is_empty() {
+            true => format!(
+                "no projects — press {}",
+                app.keymap.first_key(Action::AddProject)
+            ),
+            false => format!(
+                "no agents — press {}",
+                app.keymap.first_key(Action::NewAgent)
+            ),
+        });
         let text = Paragraph::new(text).wrap(Wrap { trim: true });
         frame.render_widget(text.block(block), area);
         return;
@@ -681,8 +691,16 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     };
     frame.render_widget(pane_block, areas.pane);
     let Some(agent) = agent else {
-        let new = app.keymap.first_key(Action::NewAgent);
-        let text = filter_miss(app).unwrap_or_else(|| format!("press {new} to start an agent"));
+        let text = filter_miss(app).unwrap_or_else(|| match app.projects.is_empty() {
+            true => format!(
+                "press {} to add a project",
+                app.keymap.first_key(Action::AddProject)
+            ),
+            false => format!(
+                "press {} to start an agent",
+                app.keymap.first_key(Action::NewAgent)
+            ),
+        });
         frame.render_widget(Paragraph::new(text), areas.pane_inner);
         return;
     };
@@ -1924,8 +1942,42 @@ mod tests {
         let app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
         let (text, _) = render(&app);
         assert!(text.contains("press a to add a project"), "{text}");
-        assert!(text.contains("press n to start an agent"), "{text}");
+        assert!(text.contains("no projects — press a"), "{text}");
+        assert!(!text.contains("press n"), "{text}");
         assert!(text.contains(" lazyagents "), "{text}");
+        assert!(
+            text.lines()
+                .last()
+                .unwrap_or_default()
+                .starts_with("a add a project · ? help")
+        );
+    }
+
+    #[test]
+    fn the_empty_projects_box_has_all_its_borders_and_its_hint() {
+        let mut app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
+        for mode in [ScreenMode::Normal, ScreenMode::Wide] {
+            app.screen_mode = mode;
+            for (width, height) in [(60, 20), (120, 40)] {
+                let (text, _) = render_at(&app, width, height);
+                let projects = layout(Rect::new(0, 0, width, height), &app).projects;
+                let rows: Vec<String> = text
+                    .lines()
+                    .take(usize::from(projects.height))
+                    .map(|row| row.chars().take(usize::from(projects.width)).collect())
+                    .collect();
+                for row in &rows[1..rows.len() - 1] {
+                    assert!(row.starts_with('│') && row.ends_with('│'), "{row}\n{text}");
+                }
+                let inside: String = rows
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(inside.contains("press a to add a"), "{text}");
+                assert!(inside.contains("project │"), "{text}");
+            }
+        }
     }
 
     #[test]
@@ -3049,7 +3101,7 @@ mod tests {
         );
         let (text, _) = render(&app);
         assert!(text.contains("press P to add a project"), "{text}");
-        assert!(text.contains("press N to start an agent"), "{text}");
+        assert!(!text.contains("press N"), "{text}");
         let (app, _) = loaded_with(
             configured("[keys.sidebar]\nnew_agent = \"N\"\n"),
             vec![project("p")],
