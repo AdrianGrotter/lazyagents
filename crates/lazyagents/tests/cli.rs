@@ -827,13 +827,14 @@ fn a_daemon_started_in_another_locale_and_time_zone_can_be_stopped() {
 
 #[test]
 fn daemon_that_dies_at_startup_fails_fast() {
-    let parent = tempfile::tempdir().expect("parent");
-    let state = parent.path().join("s".repeat(110));
+    let state = tempfile::tempdir().expect("state");
+    let state = state.path();
+    std::fs::write(state.join("state.toml"), "[[[ not toml").expect("corrupt");
     warm_up();
     let started = Instant::now();
     let out = Command::new(BIN)
         .arg("ls")
-        .env("LAZYAGENTS_STATE_DIR", &state)
+        .env("LAZYAGENTS_STATE_DIR", state)
         .stdin(Stdio::null())
         .output()
         .expect("run lazyagents");
@@ -1135,4 +1136,19 @@ fn a_command_that_cannot_start_leaves_a_kept_agent_that_ls_explains() {
         ls.contains("last error: failed to start `/nonexistent/lazyagents-cmd`"),
         "{ls}"
     );
+}
+
+#[test]
+fn a_state_dir_too_long_for_a_socket_is_named_as_the_problem() {
+    let parent = tempfile::tempdir().expect("parent");
+    let state = parent.path().join("s".repeat(110));
+    let out = Command::new(BIN)
+        .arg("ls")
+        .env("LAZYAGENTS_STATE_DIR", &state)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lazyagents");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(stderr.contains("too long for a unix socket"), "{stderr}");
 }

@@ -140,6 +140,7 @@ impl Client {
     }
 
     pub async fn connect_or_spawn(paths: &StatePaths, exe: &Path) -> anyhow::Result<Client> {
+        check_socket_path_length(paths)?;
         match Client::connect(paths).await {
             Ok(client) => return Ok(client),
             Err(e) if e.downcast_ref::<VersionMismatch>().is_some() => return Err(e),
@@ -189,6 +190,29 @@ impl Reply {
             Err(_) => anyhow::bail!("daemon closed the connection"),
         }
     }
+}
+
+/// The longest socket path `bind` accepts, counting the terminating NUL as `sun_path`
+/// does: 104 bytes on macOS and the BSDs, 108 on Linux.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const SOCKET_PATH_LIMIT: usize = 108;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const SOCKET_PATH_LIMIT: usize = 104;
+
+fn check_socket_path_length(paths: &StatePaths) -> anyhow::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let socket = paths.socket();
+    let length = socket.as_os_str().as_bytes().len();
+    if length >= SOCKET_PATH_LIMIT {
+        anyhow::bail!(
+            "the state directory path is too long for a unix socket: {} is {length} bytes, \
+             the limit on this platform is {}; point LAZYAGENTS_STATE_DIR at a shorter path",
+            socket.display(),
+            SOCKET_PATH_LIMIT - 1
+        );
+    }
+    Ok(())
 }
 
 async fn wait_for_daemon(paths: &StatePaths, daemon: &mut Child) -> anyhow::Result<Client> {

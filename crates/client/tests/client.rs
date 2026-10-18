@@ -439,3 +439,18 @@ fn pid_only_lock_file_is_still_trusted() {
     result.expect("stop");
     assert!(stopped, "stop_daemon returned without stopping the daemon");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_state_dir_too_long_for_a_socket_is_refused_before_spawning() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let long = dir.path().join("d".repeat(120));
+    let paths = StatePaths::new(&long);
+    let Err(error) = Client::connect_or_spawn(&paths, std::path::Path::new("/usr/bin/false")).await
+    else {
+        panic!("connected through an unusable socket path");
+    };
+    let message = format!("{error:#}");
+    assert!(message.contains("too long for a unix socket"), "{message}");
+    assert!(message.contains("LAZYAGENTS_STATE_DIR"), "{message}");
+    assert!(!long.exists(), "the state dir was created anyway");
+}
