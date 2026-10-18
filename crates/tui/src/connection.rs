@@ -1,4 +1,4 @@
-use client::Client;
+use client::{Client, ConnectionClosed};
 use protocol::{AgentId, DiffScope, GitStat, Request, Response, ServerMessage};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -107,7 +107,7 @@ fn pass_on(
             .is_ok(),
         Err(e) => {
             let message = format!("{e:#}");
-            let closed = message.contains("closed the connection");
+            let closed = e.downcast_ref::<ConnectionClosed>().is_some();
             let sent = incoming
                 .send(Incoming::Reply {
                     request,
@@ -145,6 +145,22 @@ mod tests {
     use protocol::{ClientMessage, PROTOCOL_VERSION, StatePaths, read_message, write_message};
     use std::time::Duration;
     use tokio::net::UnixListener;
+
+    #[test]
+    fn only_a_closed_connection_ends_the_relay() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let refusal = anyhow::anyhow!("git: the remote closed the connection");
+        assert!(pass_on(&tx, Request::ListAgents, Err(refusal)));
+        assert!(
+            matches!(rx.try_recv(), Ok(Incoming::Reply { result: Err(e), .. }) if e.contains("remote")),
+        );
+        assert!(rx.try_recv().is_err());
+
+        let closed = anyhow::Error::new(client::ConnectionClosed);
+        assert!(!pass_on(&tx, Request::ListAgents, Err(closed)));
+        assert!(matches!(rx.try_recv(), Ok(Incoming::Reply { .. })));
+        assert!(matches!(rx.try_recv(), Ok(Incoming::Closed)));
+    }
 
     #[test]
     fn git_replies_of_the_wrong_kind_become_errors() {

@@ -54,6 +54,18 @@ impl std::fmt::Display for VersionMismatch {
 
 impl std::error::Error for VersionMismatch {}
 
+/// The daemon closed the connection, or it was already closed when a request was sent.
+#[derive(Debug)]
+pub struct ConnectionClosed;
+
+impl std::fmt::Display for ConnectionClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("daemon closed the connection")
+    }
+}
+
+impl std::error::Error for ConnectionClosed {}
+
 pub struct Client {
     write: OwnedWriteHalf,
     next_id: u64,
@@ -169,7 +181,7 @@ impl Client {
             .lock()
             .map_err(|_| anyhow::anyhow!("client state poisoned"))?
             .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("daemon closed the connection"))?
+            .ok_or(ConnectionClosed)?
             .insert(id, tx);
         write_message(&mut self.write, &ClientMessage::Request { id, request }).await?;
         Ok(Reply(rx))
@@ -187,7 +199,7 @@ impl Reply {
         match self.0.await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(message)) => Err(anyhow::anyhow!(message)),
-            Err(_) => anyhow::bail!("daemon closed the connection"),
+            Err(_) => Err(ConnectionClosed.into()),
         }
     }
 }

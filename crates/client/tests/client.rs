@@ -467,3 +467,42 @@ async fn a_relative_state_dir_is_measured_as_the_daemon_will_bind_it() {
     let message = format!("{error:#}");
     assert!(message.contains("too long for a unix socket"), "{message}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_connection_is_a_typed_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = StatePaths::new(dir.path());
+    let listener = UnixListener::bind(paths.socket()).expect("bind");
+    let fake = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        write_message(
+            &mut stream,
+            &ServerMessage::Welcome {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_version: "test".into(),
+            },
+        )
+        .await
+        .expect("welcome");
+        let _: Option<ClientMessage> = read_message(&mut stream).await.expect("hello");
+        let _: Option<ClientMessage> = read_message(&mut stream).await.expect("request");
+    });
+    let mut client = Client::connect(&paths).await.expect("connect");
+    let waiting = client.send(Request::ListAgents).await.expect("send");
+    fake.await.expect("fake server");
+    let err = waiting.wait().await.expect_err("closed");
+    assert!(
+        err.downcast_ref::<client::ConnectionClosed>().is_some(),
+        "{err}"
+    );
+    assert_eq!(err.to_string(), "daemon closed the connection");
+    let later = client
+        .send(Request::ListAgents)
+        .await
+        .err()
+        .expect("sending fails once the connection is closed");
+    assert!(
+        later.downcast_ref::<client::ConnectionClosed>().is_some(),
+        "{later}"
+    );
+}
