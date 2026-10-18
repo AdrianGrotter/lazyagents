@@ -2,7 +2,9 @@
 
 Status: implemented: the daemon, protocol, client, CLI and TUI, including daemon-side git
 worktrees with git stat and diff queries, the configurable keymap, presets and theme, the
-diff view, keyboard scroll mode, and mouse focus and text copy.
+diff view with review comments, keyboard scroll mode, mouse focus, text copy and click
+forwarding, custom commands, notifications, project setup scripts, and agent status
+detection from hooks, the screen and silence timers.
 
 ## Purpose
 
@@ -274,8 +276,10 @@ daemon last told it.
 - **Model** (`app.rs`): `App` holds projects, agents, selection, focus (projects, agents,
   pane, diff or scroll), the open popup, the subscribed agent's screen, the git stats and
   diff the daemon sent, and the pane's text selection. Key, paste and mouse events and
-  daemon messages go in; `Effect`s come out (`Send(Request)`, `Copy(String)`,
-  `RememberProjects`, `ForgetProject`, `Quit`, `StopDaemonAndQuit`). It does no I/O, so
+  daemon messages go in; `Effect`s come out: `Send(Request)`, `Copy`, `Notify`,
+  `ApproveSetup` (remember an approved worktree setup script), `RunInTerminal` (a
+  `terminal` command, with the TUI suspended), `RunCommand` (a background command),
+  `RememberProjects`, `ForgetProject`, `Quit` and `StopDaemonAndQuit`. It does no I/O, so
   behaviour is tested without a terminal or a daemon. Selection follows an agent's id
   across list changes. The TUI is subscribed to at most one agent's screen, the selected
   one, and sizes a running agent's PTY to the pane.
@@ -292,11 +296,12 @@ daemon last told it.
   another client, the agent list was replaced).
 - **Keys and config** (`keymap.rs`, `config.rs`): a `Keymap` maps key events to `Action`s
   in three scopes: the sidebar, the keys after the pane prefix (`ctrl-q`), and the direct
-  leave keys (`ctrl-]`, `ctrl-5`). Key strings such as `ctrl-q`, `shift-tab` or `A` parse
+  keys, which act without the prefix: `direct_leave` (`ctrl-]`, `ctrl-5`) and the unbound
+  by default `direct_next` and `direct_previous`. Key strings such as `ctrl-q`, `shift-tab` or `A` parse
   into `KeySpec`s, and `describe` renders an action's keys for the help popup and the
   hints. The pane prefix state lives in `App` and is cleared whenever focus leaves the
   pane. `config::load` reads the config file once at startup into a `Config` (keymap,
-  presets, theme, warnings) that never fails: unusable entries keep their defaults and
+  presets, theme, notifications, custom commands, warnings) that never fails: unusable entries keep their defaults and
   become warnings shown in the status bar ([configuration.md](configuration.md)).
 - **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane or
   the diff view, the status line and popups from `App`; the pane copies the daemon's cell
@@ -343,6 +348,10 @@ daemon last told it.
   restores both afterwards, dropping the SIGINT a ctrl-c also sent the TUI. `popup` and
   `none` commands run on a blocking task and report back to `App::command_finished`;
   `agent` commands become a `CreateAgent` request.
+- **Project setup scripts** (`project_config.rs`, `approved.rs`): a project's
+  `.lazyagents.toml` may carry a `[worktree] setup` script. The user approves it once per
+  exact text (`ApproveSetup`); an edited script asks again ([ADR
+  0014](decisions/0014-approve-project-setup-scripts.md)).
 - **Review comments** (`review.rs`): maps each diff line to its file and line number,
   following the hunk headers' counts, and builds the prompt that sends an agent the
   comments on its diff. `App` keeps the comments per agent in memory.
@@ -363,7 +372,7 @@ daemon last told it.
   only the TUI writes: every project it has seen, kept after removal for the add picker
   (`known.rs`, ADR 0009).
 - Config: `$LAZYAGENTS_CONFIG`, else `$XDG_CONFIG_HOME/lazyagents/config.toml`, else
-  `~/.config/lazyagents/config.toml`: keybindings, agent presets, theme colours. A missing
+  `~/.config/lazyagents/config.toml`: keybindings, agent presets, theme colours, notifications, custom commands. A missing
   file gives the built-in defaults; anything unusable becomes a warning in the TUI status
   line ([configuration.md](configuration.md)).
 - `state.toml` is written atomically (write temp + rename) on every metadata change.
