@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use protocol::lockfile::{self, Holder};
 use protocol::{
-    ClientMessage, PROTOCOL_VERSION, Request, Response, ServerMessage, StatePaths, read_message,
-    write_message,
+    ClientMessage, Failure, PROTOCOL_VERSION, Request, Response, ServerMessage, StatePaths,
+    read_message, write_message,
 };
 use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
@@ -33,7 +33,7 @@ const TERMINAL_VARS: [&str; 13] = [
 ];
 
 /// `None` once the connection is closed; no request can register after that.
-type Pending = Arc<Mutex<Option<HashMap<u64, oneshot::Sender<Result<Response, String>>>>>>;
+type Pending = Arc<Mutex<Option<HashMap<u64, oneshot::Sender<Result<Response, Failure>>>>>>;
 
 #[derive(Debug)]
 pub struct VersionMismatch {
@@ -192,13 +192,13 @@ impl Client {
     }
 }
 
-pub struct Reply(oneshot::Receiver<Result<Response, String>>);
+pub struct Reply(oneshot::Receiver<Result<Response, Failure>>);
 
 impl Reply {
     pub async fn wait(self) -> anyhow::Result<Response> {
         match self.0.await {
             Ok(Ok(response)) => Ok(response),
-            Ok(Err(message)) => Err(anyhow::anyhow!(message)),
+            Ok(Err(failure)) => Err(failure.into()),
             Err(_) => Err(ConnectionClosed.into()),
         }
     }

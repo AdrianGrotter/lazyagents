@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use protocol::{
-    AgentId, AgentInfo, AgentKind, CreateAgent, DiffScope, GitStat, InputEvent, Project, ProjectId,
-    Request, Response, Screen, ServerMessage, Status, WorktreeRequest,
+    AgentId, AgentInfo, AgentKind, CreateAgent, DiffScope, Failure, GitStat, InputEvent, Project,
+    ProjectId, Request, Response, Screen, ServerMessage, Status, WorktreeRequest,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Position, Rect};
@@ -775,11 +775,10 @@ impl App {
     /// A dirty-worktree refusal opens the force prompt only while the user is still
     /// waiting for it in the sidebar; otherwise the prompt could take keys typed for an
     /// agent and force-remove its changes.
-    pub fn request_failed(&mut self, message: impl Into<String>) {
-        let message = message.into();
+    pub fn request_failed(&mut self, failure: Failure) {
         self.pending_select = None;
         if let Some(pending) = self.pending_remove.take()
-            && let Some(files) = message.strip_prefix(DIRTY_WORKTREE)
+            && let Failure::DirtyWorktree { files } = &failure
             && let Some(name) = self
                 .agents
                 .iter()
@@ -800,7 +799,7 @@ impl App {
             }
             return;
         }
-        self.fail(message);
+        self.fail(failure.to_string());
     }
 
     /// Asks for the selected agent's git stat when the selection changed, and then every
@@ -922,7 +921,7 @@ impl App {
     pub fn apply_reply(
         &mut self,
         request: &Request,
-        result: Result<Response, String>,
+        result: Result<Response, Failure>,
     ) -> Vec<Effect> {
         if let Request::RemoveAgent { id, .. } = request
             && let Some(done) = self.removals.remove(id)
@@ -941,7 +940,7 @@ impl App {
                 self.apply_response(response)
             }
             (Some(submission), Err(error)) => {
-                *submission = Submission::Failed(error);
+                *submission = Submission::Failed(error.to_string());
                 if matches!(request, Request::CreateAgent(_)) {
                     self.pending_select = None;
                 }
@@ -3313,14 +3312,8 @@ fn wrap(index: usize, step: i32, count: usize) -> usize {
     (index as i64 + i64::from(step)).rem_euclid(count as i64) as usize
 }
 
-/// `files` is the daemon's refusal after `DIRTY_WORKTREE`: a colon, then one path per line.
-fn force_prompt(files: &str) -> String {
-    let files: Vec<&str> = files
-        .strip_prefix(':')
-        .unwrap_or(files)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
+fn force_prompt(files: &[String]) -> String {
+    let files: Vec<&String> = files.iter().filter(|f| !f.trim().is_empty()).collect();
     let mut lines = vec!["Worktree has uncommitted changes:".to_string()];
     lines.extend(files.iter().take(DIRTY_FILES_SHOWN).map(|f| printable(f)));
     if files.len() > DIRTY_FILES_SHOWN {
@@ -3353,7 +3346,7 @@ fn diff_lines(text: &str) -> Vec<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use protocol::{AgentKind, Cell, CreateAgent, Frame, InputEvent, Row};
+    use protocol::{AgentKind, Cell, CreateAgent, Failure, Frame, InputEvent, Row};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     pub(crate) fn project(name: &str) -> Project {
@@ -5702,7 +5695,9 @@ pub(crate) mod tests {
         let (mut app, _) = loaded(vec![p], vec![wt]);
         let _ = app.on_key(key('d'));
         let _ = app.on_key(key('y'));
-        app.request_failed("worktree has uncommitted changes:\nevil\u{1b}[2J\u{7}.txt\ntab\there");
+        app.request_failed(Failure::DirtyWorktree {
+            files: vec!["evil\u{1b}[2J\u{7}.txt".into(), "tab\there".into()],
+        });
         let Some(Popup::Confirm { prompt, .. }) = &app.popup else {
             panic!("no confirm: {:?}", app.popup);
         };
@@ -5748,6 +5743,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn only_a_dirty_worktree_refusal_offers_to_force() {
+        let p = project("p");
+        let wt = worktree_agent(&p, "wt");
+        let (mut app, _) = loaded(vec![p], vec![wt]);
+        let _ = app.on_key(key('d'));
+        let request = sent(&app.on_key(key('y')));
+        let lookalike = "worktree has uncommitted changes: git status failed";
+        let _ = app.apply_reply(&request, Err(lookalike.into()));
+        assert_eq!(app.popup, None);
+        assert_eq!(app.current_message(Instant::now()), Some(lookalike));
+    }
+
+    #[test]
     fn dirty_worktree_refusal_after_the_user_moved_on_is_only_a_message() {
         let p = project("p");
         let wt = worktree_agent(&p, "wt");
@@ -5764,7 +5772,9 @@ pub(crate) mod tests {
             )]
         );
 
-        app.request_failed("worktree has uncommitted changes:\nf.txt");
+        app.request_failed(Failure::DirtyWorktree {
+            files: vec!["f.txt".into()],
+        });
         assert_eq!(app.popup, None);
         assert_eq!(app.focus, Focus::Pane);
         assert_eq!(
@@ -5780,7 +5790,7 @@ pub(crate) mod tests {
         let (mut app, _) = loaded(vec![p], vec![wt.clone()]);
         let dirty = |count: usize| {
             let files: Vec<String> = (1..=count).map(|i| format!("f{i}.txt")).collect();
-            format!("worktree has uncommitted changes:\n{}", files.join("\n"))
+            Failure::DirtyWorktree { files }
         };
 
         let _ = app.on_key(key('d'));

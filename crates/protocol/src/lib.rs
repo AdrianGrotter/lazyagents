@@ -10,7 +10,7 @@ mod types;
 
 pub use framing::{MAX_MESSAGE_LEN, read_message, write_message};
 pub use input::{InputEvent, Key, KeyCode, Modifiers};
-pub use message::{ClientMessage, Request, Response, ServerMessage};
+pub use message::{ClientMessage, Failure, Request, Response, ServerMessage};
 pub use paths::StatePaths;
 pub use screen::{Cell, Color, Frame, Row, Screen, Style};
 pub use types::{
@@ -18,7 +18,7 @@ pub use types::{
     Status, Usage, WorktreeInfo, WorktreeRequest,
 };
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// How long a client waits for the daemon to stop. It covers the daemon's slowest
 /// clean shutdown: waiting out a running process snapshot, then the agents' grace

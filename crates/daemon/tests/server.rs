@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use daemon::{Config, run};
 use protocol::{
-    AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, HookKind, InputEvent, Key, KeyCode,
-    Modifiers, PROTOCOL_VERSION, Project, Request, Response, Screen, ServerMessage, StatePaths,
-    Status, WorktreeRequest, read_message, write_message,
+    AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, Failure, HookKind, InputEvent, Key,
+    KeyCode, Modifiers, PROTOCOL_VERSION, Project, Request, Response, Screen, ServerMessage,
+    StatePaths, Status, WorktreeRequest, read_message, write_message,
 };
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -172,6 +172,15 @@ impl Conn {
     }
 
     async fn response(&mut self, id: u64) -> Result<Response, String> {
+        self.answer(id).await.map_err(|failure| failure.to_string())
+    }
+
+    async fn refusal(&mut self, request: Request) -> Failure {
+        let id = self.send(request).await;
+        self.answer(id).await.expect_err("refused")
+    }
+
+    async fn answer(&mut self, id: u64) -> Result<Response, Failure> {
         let message = self
             .wait_for(|m| matches!(m, ServerMessage::Response { id: got, .. } if *got == id))
             .await;
@@ -2456,16 +2465,20 @@ async fn remove_refuses_a_dirty_worktree_and_lists_files() {
     std::fs::write(path.join("README"), "changed\n").expect("edit");
     std::fs::write(path.join("new.txt"), "new\n").expect("add");
 
-    let err = conn
-        .request(Request::RemoveAgent {
+    let refusal = conn
+        .refusal(Request::RemoveAgent {
             id: agent.id,
             remove_worktree: true,
             force: false,
             delete_branch: false,
         })
-        .await
-        .expect_err("dirty worktree");
-    assert_eq!(err, "worktree has uncommitted changes:\nREADME\nnew.txt");
+        .await;
+    assert_eq!(
+        refusal,
+        Failure::DirtyWorktree {
+            files: vec!["README".into(), "new.txt".into()]
+        }
+    );
     let agents = list_agents(&mut conn).await;
     assert_eq!(agents.len(), 1);
     assert!(agents[0].status.is_running(), "{:?}", agents[0].status);
@@ -2487,16 +2500,20 @@ async fn remove_refuses_untracked_files_hidden_by_the_repo_config() {
     let path = agent.worktree.as_ref().expect("worktree").path.clone();
     std::fs::write(path.join("untracked.txt"), "u\n").expect("untracked");
 
-    let err = conn
-        .request(Request::RemoveAgent {
+    let refusal = conn
+        .refusal(Request::RemoveAgent {
             id: agent.id,
             remove_worktree: true,
             force: false,
             delete_branch: false,
         })
-        .await
-        .expect_err("untracked file");
-    assert_eq!(err, "worktree has uncommitted changes:\nuntracked.txt");
+        .await;
+    assert_eq!(
+        refusal,
+        Failure::DirtyWorktree {
+            files: vec!["untracked.txt".into()]
+        }
+    );
     assert!(path.join("untracked.txt").is_file());
     assert_eq!(list_agents(&mut conn).await.len(), 1);
     conn.request(Request::KillAgent { id: agent.id })

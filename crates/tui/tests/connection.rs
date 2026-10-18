@@ -61,7 +61,7 @@ async fn requests_events_and_closure_flow_through_the_actor() {
         })
         .expect("send");
     assert!(
-        matches!(next(&mut incoming).await, Incoming::Reply { result: Err(e), .. } if e.contains("unknown agent"))
+        matches!(next(&mut incoming).await, Incoming::Reply { result: Err(e), .. } if e.to_string().contains("unknown agent"))
     );
 
     requests.send(Request::Shutdown).expect("send");

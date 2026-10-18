@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use protocol::{
-    AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, DiffScope, HookKind, InputEvent,
-    Key, KeyCode, MAX_MESSAGE_LEN, Modifiers, PROTOCOL_VERSION, Project, ProjectId, Request,
-    Response, Screen, ServerMessage, StatePaths, Status, Usage, WorktreeInfo, WorktreeRequest,
-    read_message, write_message,
+    AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, DiffScope, Failure, HookKind,
+    InputEvent, Key, KeyCode, MAX_MESSAGE_LEN, Modifiers, PROTOCOL_VERSION, Project, ProjectId,
+    Request, Response, Screen, ServerMessage, StatePaths, Status, Usage, WorktreeInfo,
+    WorktreeRequest, read_message, write_message,
 };
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -627,7 +627,8 @@ impl Daemon {
         now(result)
     }
 
-    fn reply(&self, client: ClientId, id: u64, result: Result<Response, String>) {
+    fn reply(&self, client: ClientId, id: u64, result: Result<Response, impl Into<Failure>>) {
+        let result = result.map_err(Into::into);
         if let Some(c) = self.clients.get(&client) {
             c.outbox.send(ServerMessage::Response { id, result });
         }
@@ -1616,11 +1617,11 @@ impl Daemon {
                     if let Some(agent) = daemon.agents.get_mut(&id) {
                         agent.busy = None;
                     }
-                    let message = match refused {
-                        Some(Err(e)) => e,
+                    let failure = match refused {
+                        Some(Err(failure)) => failure,
                         _ => "checking whether the agent can be removed failed".into(),
                     };
-                    daemon.reply(client, request_id, Err(message));
+                    daemon.reply(client, request_id, Err(failure));
                 }
             },
         );
@@ -1722,7 +1723,7 @@ impl Daemon {
         let spawned = std::thread::Builder::new()
             .name("git".into())
             .spawn(move || {
-                let result = run_git_query(&dir, base.as_deref(), query);
+                let result = run_git_query(&dir, base.as_deref(), query).map_err(Failure::from);
                 outbox.send(ServerMessage::Response {
                     id: request_id,
                     result,
@@ -2145,23 +2146,21 @@ fn removable(
     worktree: Option<(PathBuf, PathBuf)>,
     branch: Option<(String, String)>,
     force: bool,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
+    let failure = |e: anyhow::Error| Failure::from(format!("{e:#}"));
     if let (Some((project, _)), Some((branch, base))) = (&worktree, &branch)
-        && !git::is_merged(project, branch, base).map_err(|e| format!("{e:#}"))?
+        && !git::is_merged(project, branch, base).map_err(failure)?
     {
-        return Err(format!(
+        return Err(Failure::from(format!(
             "{branch} is not merged into {base}; merge it first, or keep the branch"
-        ));
+        )));
     }
     if let Some((_, path)) = &worktree
         && !force
     {
-        let dirty = git::dirty_files(path).map_err(|e| format!("{e:#}"))?;
-        if !dirty.is_empty() {
-            return Err(format!(
-                "worktree has uncommitted changes:\n{}",
-                dirty.join("\n")
-            ));
+        let files = git::dirty_files(path).map_err(failure)?;
+        if !files.is_empty() {
+            return Err(Failure::DirtyWorktree { files });
         }
     }
     Ok(())
@@ -2418,7 +2417,7 @@ mod tests {
         let mut answers = HashMap::new();
         while let Some(message) = outgoing.try_recv() {
             if let ServerMessage::Response { id, result: Err(e) } = message {
-                answers.insert(id, e);
+                answers.insert(id, e.to_string());
             }
         }
         assert_eq!(

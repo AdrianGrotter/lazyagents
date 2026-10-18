@@ -16,9 +16,10 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use protocol::{
-    AgentId, AgentInfo, AgentKind, Cell, ClientMessage, Color, CreateAgent, DiffScope, Frame,
-    GitStat, HookKind, InputEvent, Key, KeyCode, Modifiers, PROTOCOL_VERSION, Project, ProjectId,
-    Request, Response, Row, ServerMessage, Status, Style, Usage, WorktreeInfo, WorktreeRequest,
+    AgentId, AgentInfo, AgentKind, Cell, ClientMessage, Color, CreateAgent, DiffScope, Failure,
+    Frame, GitStat, HookKind, InputEvent, Key, KeyCode, Modifiers, PROTOCOL_VERSION, Project,
+    ProjectId, Request, Response, Row, ServerMessage, Status, Style, Usage, WorktreeInfo,
+    WorktreeRequest,
 };
 use uuid::Uuid;
 
@@ -84,6 +85,14 @@ const SCOPE_VARIANTS: usize = 3;
 const AGENT_KIND_VARIANTS: usize = 2;
 const INPUT_EVENT_VARIANTS: usize = 4;
 const HOOK_KIND_VARIANTS: usize = 10;
+const FAILURE_VARIANTS: usize = 2;
+
+fn failure_slot(failure: &Failure) -> usize {
+    match failure {
+        Failure::Message(_) => 0,
+        Failure::DirtyWorktree { .. } => 1,
+    }
+}
 
 fn status_slot(status: &Status) -> usize {
     match status {
@@ -564,6 +573,12 @@ fn server_messages() -> Vec<ServerMessage> {
             id: 5_000_000_001,
             result: Err("nope".into()),
         },
+        ServerMessage::Response {
+            id: 5_000_000_002,
+            result: Err(Failure::DirtyWorktree {
+                files: vec!["README".into(), "dir/new file.txt".into()],
+            }),
+        },
         ServerMessage::AgentUpdated(full_info()),
         ServerMessage::AgentUpdated(bare_info()),
         ServerMessage::AgentRemoved(agent(1)),
@@ -785,6 +800,17 @@ fn samples_cover_every_nested_enum_variant() {
         events.iter().map(|event| input_event_slot(event)),
     );
     assert_covers("HookKind", HOOK_KIND_VARIANTS, hooks.map(hook_kind_slot));
+    assert_covers(
+        "Failure",
+        FAILURE_VARIANTS,
+        messages.iter().filter_map(|message| match message {
+            ServerMessage::Response {
+                result: Err(failure),
+                ..
+            } => Some(failure_slot(failure)),
+            _ => None,
+        }),
+    );
 }
 
 #[test]

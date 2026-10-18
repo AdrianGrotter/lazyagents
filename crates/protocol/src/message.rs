@@ -110,6 +110,42 @@ pub enum Response {
     Done(String),
 }
 
+/// Why the daemon did not do a request. A refusal a client acts on has its own variant;
+/// every other failure is a message for the user.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Failure {
+    Message(String),
+    /// A worktree removal without `force` found these paths changed or untracked.
+    DirtyWorktree {
+        files: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Message(message) => f.write_str(message),
+            Failure::DirtyWorktree { files } => {
+                write!(f, "worktree has uncommitted changes:\n{}", files.join("\n"))
+            }
+        }
+    }
+}
+
+impl std::error::Error for Failure {}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Failure::Message(message)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        Failure::Message(message.to_string())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerMessage {
     Welcome {
@@ -118,7 +154,7 @@ pub enum ServerMessage {
     },
     Response {
         id: u64,
-        result: Result<Response, String>,
+        result: Result<Response, Failure>,
     },
     AgentUpdated(AgentInfo),
     AgentRemoved(AgentId),
@@ -318,6 +354,12 @@ mod tests {
                 result: Err("nope".into()),
             },
             ServerMessage::Response {
+                id: 7,
+                result: Err(Failure::DirtyWorktree {
+                    files: vec!["README".into(), "new file.txt".into()],
+                }),
+            },
+            ServerMessage::Response {
                 id: 3,
                 result: Ok(Response::Agents(vec![info.clone()])),
             },
@@ -361,5 +403,17 @@ mod tests {
         for message in messages {
             round_trip(&message);
         }
+    }
+
+    #[test]
+    fn a_dirty_worktree_reads_as_the_files_it_lists() {
+        let failure = Failure::DirtyWorktree {
+            files: vec!["README".into(), "new.txt".into()],
+        };
+        assert_eq!(
+            failure.to_string(),
+            "worktree has uncommitted changes:\nREADME\nnew.txt"
+        );
+        assert_eq!(Failure::from("nope").to_string(), "nope");
     }
 }

@@ -1,5 +1,5 @@
 use client::{Client, ConnectionClosed};
-use protocol::{AgentId, DiffScope, GitStat, Request, Response, ServerMessage};
+use protocol::{AgentId, DiffScope, Failure, GitStat, Request, Response, ServerMessage};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
@@ -9,7 +9,7 @@ pub enum Incoming {
     /// The daemon's answer to `request`, or why there is none.
     Reply {
         request: Request,
-        result: Result<Response, String>,
+        result: Result<Response, Failure>,
     },
     GitStat {
         id: AgentId,
@@ -106,12 +106,14 @@ fn pass_on(
             })
             .is_ok(),
         Err(e) => {
-            let message = format!("{e:#}");
-            let closed = e.downcast_ref::<ConnectionClosed>().is_some();
+            let closed = e.is::<ConnectionClosed>();
+            let failure = e
+                .downcast::<Failure>()
+                .unwrap_or_else(|e| Failure::from(format!("{e:#}")));
             let sent = incoming
                 .send(Incoming::Reply {
                     request,
-                    result: Err(message),
+                    result: Err(failure),
                 })
                 .is_ok();
             if closed {
@@ -152,7 +154,7 @@ mod tests {
         let refusal = anyhow::anyhow!("git: the remote closed the connection");
         assert!(pass_on(&tx, Request::ListAgents, Err(refusal)));
         assert!(
-            matches!(rx.try_recv(), Ok(Incoming::Reply { result: Err(e), .. }) if e.contains("remote")),
+            matches!(rx.try_recv(), Ok(Incoming::Reply { result: Err(e), .. }) if e.to_string().contains("remote")),
         );
         assert!(rx.try_recv().is_err());
 
@@ -286,7 +288,7 @@ mod tests {
             assert!(matches!(request, Request::ListAgents), "{request:?}");
             for (id, result) in [
                 (list, Ok(Response::Agents(Vec::new()))),
-                (kill, Err("kill failed".to_string())),
+                (kill, Err(Failure::from("kill failed"))),
             ] {
                 write_message(&mut stream, &ServerMessage::Response { id, result })
                     .await
@@ -316,8 +318,8 @@ mod tests {
         assert!(
             matches!(
                 &first,
-                Incoming::Reply { request: Request::KillAgent { .. }, result: Err(message) }
-                    if message == "kill failed"
+                Incoming::Reply { request: Request::KillAgent { .. }, result: Err(failure) }
+                    if failure.to_string() == "kill failed"
             ),
             "{first:?}"
         );

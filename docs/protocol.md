@@ -1,6 +1,6 @@
 # Protocol
 
-Status: implemented in crates/protocol (version 7); that crate is the source of truth.
+Status: implemented in crates/protocol (version 8); that crate is the source of truth.
 
 ## Transport and framing
 
@@ -21,7 +21,7 @@ is rejected.
    the variant indices of `Request` differ between versions.
 3. The client then sends `Request { id, request }`. The daemon answers each request with
    exactly one `Response { id, result }`, where `result` is `Ok(Response)` or
-   `Err(message)`. Requests that take time are answered when their work, done off the
+   `Err(Failure)`. Requests that take time are answered when their work, done off the
    daemon's event loop, finishes: `KillAgent`, `RestartAgent`, `RemoveAgent`, `MergeAgent`,
    `GitStat`, `GitDiff`, and `CreateAgent` with a worktree. Their answers can follow later
    requests' answers, so a client matches answers by `id`; the rest come in request order.
@@ -113,6 +113,13 @@ does not compile in the test until its sample is added.
 - `Diff(String)`: unified diff text
 - `Done(String)`: a finished operation, described for the user
 
+`Failure`, why a request was not done:
+
+- `Message(String)`: a failure described for the user
+- `DirtyWorktree { files }`: `RemoveAgent` with `remove_worktree` and without `force`
+  found changed or untracked paths in the agent's worktree; its text is
+  `worktree has uncommitted changes:` and the paths, one per line
+
 `ServerMessage`:
 
 - `Welcome { protocol_version, daemon_version }`
@@ -177,8 +184,8 @@ and `HEAD` for a worktree agent, with `HEAD` for any other, counting untracked f
 are not ignored as new files (the committed-only diff scope has none). They answer
 `Response::GitStat` or `Response::Diff`, or `Err` for an unknown agent, a directory that
 is not a git repository, or a diff too large for one message. `RemoveAgent` with
-`remove_worktree` answers `Err("worktree has uncommitted changes:\n<path>...")`, one
-changed path per line, and leaves the agent running.
+`remove_worktree` and without `force` answers `Err(Failure::DirtyWorktree { files })`
+while the worktree has changed or untracked paths, and leaves the agent running.
 
 ## Frames
 
