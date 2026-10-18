@@ -771,12 +771,15 @@ impl Daemon {
     fn remove_project(&mut self, id: ProjectId) -> Result<(), String> {
         if self.agents.values().any(|a| a.record.project == id)
             || self.creating.iter().any(|reserved| reserved.project == id)
-            || self
-                .pending_worktrees
-                .iter()
-                .any(|pending| pending.project == id)
         {
             return Err("remove the project's agents first".into());
+        }
+        if let Some(pending) = self.pending_worktrees.iter().find(|p| p.project == id) {
+            return Err(format!(
+                "the project still has the worktree {} of a create that never finished; \
+                 it is removed at the next start",
+                pending.path.display()
+            ));
         }
         let before = self.projects.len();
         self.projects.retain(|p| p.id != id);
@@ -817,21 +820,27 @@ impl Daemon {
                 "an agent named {name} already exists in this project"
             ));
         }
-        let reserved = self
+        let named = |reserved: ProjectId, reserved_name: &str| {
+            reserved == project && reserved_name.eq_ignore_ascii_case(name)
+        };
+        if self
             .creating
             .iter()
-            .map(|reserved| (reserved.project, reserved.name.as_str()))
-            .chain(
-                self.pending_worktrees
-                    .iter()
-                    .map(|pending| (pending.project, pending.name.as_str())),
-            )
-            .any(|(reserved, reserved_name)| {
-                reserved == project && reserved_name.eq_ignore_ascii_case(name)
-            });
-        if reserved {
+            .any(|reserved| named(reserved.project, &reserved.name))
+        {
             return Err(format!(
                 "an agent named {name} is being created in this project"
+            ));
+        }
+        if let Some(pending) = self
+            .pending_worktrees
+            .iter()
+            .find(|pending| named(pending.project, &pending.name))
+        {
+            return Err(format!(
+                "the name {name} is held by the worktree {} of a create that never finished; \
+                 it is removed at the next start",
+                pending.path.display()
             ));
         }
         Ok(())

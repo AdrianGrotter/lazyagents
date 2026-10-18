@@ -171,6 +171,8 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   the same name, or a rename to it, is refused with `an agent named <name> is being created
   in this project`, and the project cannot be removed meanwhile. The agent appears, and
   starts, only once its worktree is ready. A create without a worktree is answered at once.
+  A worktree git will not let go of at the next start keeps its name and its project: the
+  refusals then name its path and say it is removed at the next start.
   Agent names in a project compare without regard to case, here and for existing agents,
   because they name worktree directories and branches, which a case-insensitive file
   system (the macOS default) cannot tell apart.

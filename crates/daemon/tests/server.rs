@@ -3738,7 +3738,18 @@ async fn a_leftover_git_will_not_let_go_of_is_retried_at_the_next_start() {
     let err = create_in_worktree(&mut conn, &project, "ghost", &["sleep", "30"])
         .await
         .expect_err("the leftover keeps its name");
-    assert!(err.contains("ghost is being created"), "{err}");
+    let leftover_text = leftover.display().to_string();
+    assert!(err.contains(&leftover_text), "{err}");
+    assert!(err.contains("removed at the next start"), "{err}");
+    let err = conn
+        .request(Request::RemoveProject { id: project.id })
+        .await
+        .expect_err("the leftover keeps its project");
+    assert!(err.to_string().contains(&leftover_text), "{err}");
+    assert!(
+        err.to_string().contains("removed at the next start"),
+        "{err}"
+    );
     drop(conn);
     stop_daemon(&mut daemon).await;
     let state = StatePaths::new(daemon.path()).state_file();
