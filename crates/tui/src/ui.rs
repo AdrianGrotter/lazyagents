@@ -40,7 +40,7 @@ const PICKER_ROWS: usize = 12;
 const NEW_AGENT_WIDTH: u16 = 56;
 const FORM_WIDTH: u16 = 60;
 
-const SIDEBAR_HELP: [(&[Action], &str); 19] = [
+const SIDEBAR_HELP: [(&[Action], &str); 20] = [
     (
         &[Action::Down, Action::Up],
         "move down / up in the focused box",
@@ -56,10 +56,8 @@ const SIDEBAR_HELP: [(&[Action], &str); 19] = [
     ),
     (&[Action::NewAgent], "new agent"),
     (&[Action::Stop, Action::Restart], "stop / restart agent"),
-    (
-        &[Action::Remove, Action::Rename],
-        "remove / rename agent (in Projects: the project)",
-    ),
+    (&[Action::Remove], "remove agent (in Projects: the project)"),
+    (&[Action::Rename], "rename agent"),
     (&[Action::ScreenMode], "wider pane / full screen / normal"),
     (&[Action::AddProject], "add project"),
     (&[Action::ToggleAllAgents], "all agents / this project"),
@@ -707,10 +705,11 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     if let Some(error) = &agent.last_error
         && !agent.status.is_running()
     {
-        let retry = app.keymap.first_key(Action::Restart);
+        let open = app.keymap.first_key(Action::Open);
+        let verb = start_verb(agent.status);
         let text = vec![
             Line::from(format!("failed to start: {error}")).fg(app.theme.error),
-            Line::from(format!("press {retry} to retry")).fg(app.theme.dim),
+            Line::from(format!("press {open} to {verb}")).fg(app.theme.dim),
         ];
         frame.render_widget(
             Paragraph::new(text).wrap(Wrap { trim: false }),
@@ -1558,6 +1557,11 @@ fn help_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         (
             keymap.describe(Action::PaneScroll),
             "scroll the agent's history".to_string(),
+            true,
+        ),
+        (
+            keymap.describe(Action::PaneScreenMode),
+            "wider pane / full screen / normal".to_string(),
             true,
         ),
         (
@@ -2998,7 +3002,8 @@ mod tests {
             ("n", "new agent"),
             ("x, r", "stop / restart agent"),
             ("c", "custom commands"),
-            ("d, R", "remove / rename agent"),
+            ("d", "remove agent (in Projects: the project)"),
+            ("R", "rename agent"),
             ("+", "wider pane / full screen / normal"),
             ("a", "add project"),
             ("A", "all agents / this project"),
@@ -3021,6 +3026,7 @@ mod tests {
             ("s", "scroll the agent's history"),
             ("ctrl-q s", "scroll the agent's history"),
             ("ctrl-q ctrl-q", "send ctrl-q to the agent"),
+            ("ctrl-q +", "wider pane / full screen / normal"),
         ] {
             let expected = help_row(key, action);
             assert!(text.contains(&expected), "missing {expected:?}\n{text}");
@@ -3452,7 +3458,7 @@ mod tests {
             text.contains("failed to start: No such file or directory (os error 2)"),
             "{text}"
         );
-        assert!(text.contains("press r to retry"), "{text}");
+        assert!(text.contains("press enter to restart"), "{text}");
 
         let (app, _) = loaded(
             vec![p.clone()],
@@ -3465,7 +3471,7 @@ mod tests {
         assert!(!text.contains("failed to start"), "{text}");
 
         let (app, _) = loaded_with(
-            configured("[keys.sidebar]\nrestart = \"F\"\n"),
+            configured("[keys.sidebar]\nopen = \"F\"\n"),
             vec![p.clone()],
             vec![AgentInfo {
                 last_error: Some("boom".into()),
@@ -3473,7 +3479,7 @@ mod tests {
             }],
         );
         let (text, _) = render(&app);
-        assert!(text.contains("press F to retry"), "{text}");
+        assert!(text.contains("press F to restart"), "{text}");
     }
 
     #[test]
@@ -3492,7 +3498,7 @@ mod tests {
         }
         let (text, _) = render_at(&app, 140, 30);
         assert!(text.contains("run: direnv allow /s/wt"), "{text}");
-        assert!(text.contains("press r to retry"), "{text}");
+        assert!(text.contains("press enter to restart"), "{text}");
     }
 
     fn open_diff(app: &mut App, text: &str) {

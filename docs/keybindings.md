@@ -43,7 +43,7 @@ Two input modes:
 
 Actions that cannot act on the selected agent are dimmed in the help popup, and pressing one
 says why in the status bar instead of doing nothing: `no agent selected`, `<agent> is not
-running` (stop, reply), `<agent> has no terminal yet — r starts it` (scroll mode and
+running` (stop, reply), `<agent> has no terminal yet — enter starts it` (scroll mode and
 `J`/`K` on a stopped agent), `<agent> is not waiting for an answer` (`y`, `N`).
 
 The status bar hints offer only what applies to the focus and the selection, most
@@ -208,7 +208,8 @@ After `ctrl-q`, one more key picks a pane action:
 
 While the prefix waits for its second key the status bar shows `ctrl-q …`. Any other key
 after `ctrl-q` cancels the prefix, reaches nobody, and the status bar lists the prefix
-keys. Switching onto an agent that is not running returns focus to the sidebar. A
+keys (`ctrl-q: j/k switch · q/esc sidebar · s scroll · + screen · ctrl-q send`). Switching
+onto an agent that is not running returns focus to the sidebar. A
 pending prefix is dropped whenever focus leaves the pane, and when a paste arrives; the
 paste still reaches the agent.
 
@@ -251,7 +252,7 @@ three lines at a time instead of reaching the agent.
 | click a Projects row | select that project and focus Projects |
 | click an Agents row | select that agent and focus Agents (never the pane) |
 | click elsewhere in the Projects or Agents box | focus that box |
-| click in the pane | focus the pane if the agent is running; otherwise the status bar says `<name> is not running — r restarts` |
+| click in the pane | focus the pane if the agent is running; otherwise the status bar says `<name> is not running — enter starts it` (`enter restarts it` for an exited agent) |
 | release in the cell the click started in | send the click to a running agent that enabled mouse reporting, such as Claude Code's subagent list; outside scroll mode only |
 | drag in the pane | select text, shown reversed; the selection stays inside the pane |
 | release after a drag | copy the selected text and show `copied N characters` (in the `accent` colour) |

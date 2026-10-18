@@ -288,7 +288,7 @@ it leaves direnv untouched, logs any error, and still creates the agent, which t
 at once on the blocked `.envrc`. When a worktree agent exits and its screen shows direnv's
 `.envrc is blocked` error, the daemon sets `last_error` to `direnv blocked the worktree's
 .envrc; run: direnv allow <worktree path>`, and the TUI shows it in the pane as `failed to
-start: …`; after the allow, `r` restarts the agent.
+start: …` with `press enter to restart` under it; after the allow, `enter` restarts the agent.
 
 `GitStat` and `GitDiff` run on their own thread and answer when git finishes, so the event
 loop keeps serving. For a worktree agent they compare the working tree with `git

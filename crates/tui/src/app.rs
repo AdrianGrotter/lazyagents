@@ -1929,9 +1929,9 @@ impl App {
         if !areas.pane_inner.contains(at) || self.focus == Focus::Diff {
             return Vec::new();
         }
-        let Some((name, running)) = self
+        let Some((name, running, status)) = self
             .selected_agent()
-            .map(|a| (a.name.clone(), a.status.is_running()))
+            .map(|a| (a.name.clone(), a.status.is_running(), a.status))
         else {
             return Vec::new();
         };
@@ -1947,8 +1947,9 @@ impl App {
             self.focus = Focus::Pane;
         } else {
             let message = format!(
-                "{name} is not running — {} restarts",
-                self.keymap.first_key(Action::Restart)
+                "{name} is not running — {} {}s it",
+                self.keymap.first_key(Action::Open),
+                crate::ui::start_verb(status)
             );
             self.fail(message);
         }
@@ -3093,7 +3094,7 @@ impl App {
             return Some("no agent selected".to_string());
         };
         let name = crate::ui::label(agent);
-        let restart = self.keymap.first_key(Action::Restart);
+        let open = self.keymap.first_key(Action::Open);
         match action {
             Action::Stop | Action::Reply if !agent.status.is_running() => {
                 Some(format!("{name} is not running"))
@@ -3101,7 +3102,7 @@ impl App {
             Action::Scroll | Action::PeekDown | Action::PeekUp
                 if agent.status == Status::Stopped =>
             {
-                Some(format!("{name} has no terminal yet — {restart} starts it"))
+                Some(format!("{name} has no terminal yet — {open} starts it"))
             }
             Action::Approve | Action::Deny if agent.status != Status::NeedsInput => {
                 Some(format!("{name} is not waiting for an answer"))
@@ -3267,6 +3268,7 @@ fn prefix_help(keymap: &Keymap) -> String {
         (keys(&[Action::PaneNext, Action::PanePrevious]), "switch"),
         (keys(&[Action::PaneLeave]), "sidebar"),
         (keys(&[Action::PaneScroll]), "scroll"),
+        (keys(&[Action::PaneScreenMode]), "screen"),
         (keys(&[Action::PaneSendPrefix]), "send"),
     ]
     .into_iter()
@@ -3906,7 +3908,7 @@ pub(crate) mod tests {
         assert_eq!(app.focus, Focus::Pane);
         assert_eq!(
             app.message.as_ref().map(|(m, _)| m.as_str()),
-            Some("ctrl-q: j/k switch · q/esc sidebar · s scroll · ctrl-q send")
+            Some("ctrl-q: j/k switch · q/esc sidebar · s scroll · + screen · ctrl-q send")
         );
         assert_eq!(
             app.on_key(key('x')),
@@ -4612,7 +4614,7 @@ pub(crate) mod tests {
         assert!(app.on_key(key('z')).is_empty());
         assert_eq!(
             app.message.as_ref().map(|(m, _)| m.as_str()),
-            Some("ctrl-a: n/p switch · x sidebar · s scroll · ctrl-a send")
+            Some("ctrl-a: n/p switch · x sidebar · s scroll · + screen · ctrl-a send")
         );
     }
 
@@ -4640,7 +4642,7 @@ pub(crate) mod tests {
             app.message.as_ref().map(|(m, _)| m.as_str()),
             Some("add a project first (P)")
         );
-        let config = configured("[keys.sidebar]\nrestart = \"ctrl-r\"\n");
+        let config = configured("[keys.sidebar]\nopen = \"ctrl-o\"\n");
         let p = project("p");
         let (mut app, _) = loaded_with(
             config,
@@ -4651,7 +4653,7 @@ pub(crate) mod tests {
         let _ = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 1, 1)), &areas);
         assert_eq!(
             app.message.as_ref().map(|(m, _)| m.as_str()),
-            Some("a is not running — ctrl-r restarts")
+            Some("a is not running — ctrl-o starts it")
         );
     }
 
@@ -6085,7 +6087,7 @@ pub(crate) mod tests {
         assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
         assert_eq!(
             app.current_message(Instant::now()),
-            Some("stopped has no terminal yet — r starts it")
+            Some("stopped has no terminal yet — enter starts it")
         );
     }
 
@@ -6359,7 +6361,7 @@ pub(crate) mod tests {
         assert_eq!(app.focus, Focus::Agents);
         assert_eq!(
             app.current_message(Instant::now()),
-            Some("alpha is not running — r restarts")
+            Some("alpha is not running — enter starts it")
         );
         let effects = app.on_mouse(mouse(MouseKind::Up, in_pane(&areas, 1, 1)), &areas);
         assert!(effects.is_empty(), "{effects:?}");
@@ -7209,8 +7211,8 @@ mod help_tests {
     fn an_action_that_does_not_apply_says_why() {
         for (pressed, why) in [
             ('x', "api is not running"),
-            ('s', "api has no terminal yet — r starts it"),
-            ('J', "api has no terminal yet — r starts it"),
+            ('s', "api has no terminal yet — enter starts it"),
+            ('J', "api has no terminal yet — enter starts it"),
             ('y', "api is not waiting for an answer"),
             ('i', "api is not running"),
         ] {
