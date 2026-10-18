@@ -422,7 +422,7 @@ mod tests {
         code.is_some()
     }
 
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const TIMEOUT: Duration = Duration::from_secs(30);
 
     #[test]
     fn session_title_drops_claudes_status_glyph() {
@@ -578,7 +578,7 @@ mod tests {
         };
         assert!(!pid.is_empty(), "child never wrote its pid");
         drop(t);
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + TIMEOUT;
         let mut gone = false;
         while Instant::now() < deadline {
             let alive = std::process::Command::new("kill")

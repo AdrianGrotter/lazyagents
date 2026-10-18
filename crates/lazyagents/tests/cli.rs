@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_lazyagents");
 
+/// How long anything a test waits for may take. With the suite running in parallel each
+/// spawned process can take seconds, and polling returns as soon as the condition holds.
+const WAIT: Duration = Duration::from_secs(30);
+
 struct TestEnv {
     state: tempfile::TempDir,
     project: tempfile::TempDir,
@@ -80,7 +84,7 @@ struct Leaves(Vec<u32>);
 impl Leaves {
     fn read(path: &Path, count: usize) -> Self {
         let mut pids = Vec::new();
-        let listed = wait_until(Duration::from_secs(10), || {
+        let listed = wait_until(WAIT, || {
             pids = std::fs::read_to_string(path)
                 .unwrap_or_default()
                 .lines()
@@ -159,7 +163,7 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
 fn wait_for_file(path: &Path) -> String {
     let mut text = String::new();
     assert!(
-        wait_until(Duration::from_secs(10), || {
+        wait_until(WAIT, || {
             text = std::fs::read_to_string(path).unwrap_or_default();
             !text.is_empty()
         }),
@@ -187,7 +191,7 @@ fn new_types_the_prompt_into_a_generic_agent() {
     let env = TestEnv::new();
     let typed = env.project.path().join("typed");
     let script = format!(
-        "printf 'ready> '; read line; echo \"$line\" > '{}'; sleep 30",
+        "printf 'ready> '; read line; echo \"$line\" > '{0}.tmp'; mv '{0}.tmp' '{0}'; sleep 30",
         typed.display()
     );
     env.ok(&[
@@ -200,15 +204,7 @@ fn new_types_the_prompt_into_a_generic_agent() {
         "-c",
         &script,
     ]);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !typed.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert_eq!(
-        std::fs::read_to_string(&typed).expect("typed").trim(),
-        "hello there"
-    );
+    assert_eq!(wait_for_file(&typed).trim(), "hello there");
     env.ok(&["shutdown"]);
 }
 
@@ -261,9 +257,7 @@ fn the_status_line_shows_the_users_and_reports_to_the_daemon() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "mine:{\"model\":{\"");
     assert_eq!(out.status.code(), Some(3));
     assert!(
-        wait_until(Duration::from_secs(5), || env
-            .ok(&["ls"])
-            .contains("(Opus · $0.42)")),
+        wait_until(WAIT, || env.ok(&["ls"]).contains("(Opus · $0.42)")),
         "{}",
         env.ok(&["ls"])
     );
@@ -274,7 +268,7 @@ fn send_types_a_line_into_an_agent() {
     let env = TestEnv::new();
     let typed = env.project.path().join("typed");
     let script = format!(
-        "read line; echo \"$line\" > '{}'; sleep 30",
+        "read line; echo \"$line\" > '{0}.tmp'; mv '{0}.tmp' '{0}'; sleep 30",
         typed.display()
     );
     env.ok(&["new", "listener", "--", "sh", "-c", &script]);
@@ -282,15 +276,7 @@ fn send_types_a_line_into_an_agent() {
         env.ok(&["send", "listener", "use pnpm"])
             .contains("sent to listener")
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !typed.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert_eq!(
-        std::fs::read_to_string(&typed).expect("typed").trim(),
-        "use pnpm"
-    );
+    assert_eq!(wait_for_file(&typed).trim(), "use pnpm");
     env.ok(&["shutdown"]);
 }
 
@@ -434,13 +420,9 @@ fn claude_agent_hooks_drive_status_and_restart_resumes() {
     let hook = |event: &str, payload: &str| claude.hook(&env, event, payload);
     let payload = format!("{{\"session_id\":\"{session}\"}}");
     hook("UserPromptSubmit", &payload);
-    assert!(wait_until(Duration::from_secs(5), || env
-        .ok(&["ls"])
-        .contains("working")));
+    assert!(wait_until(WAIT, || env.ok(&["ls"]).contains("working")));
     hook("Notification", &payload);
-    assert!(wait_until(Duration::from_secs(5), || env
-        .ok(&["ls"])
-        .contains("needs input")));
+    assert!(wait_until(WAIT, || env.ok(&["ls"]).contains("needs input")));
 
     std::fs::remove_file(args_file).expect("reset");
     env.ok(&["restart", "c"]);
@@ -474,9 +456,7 @@ fn idle_notification_marks_a_claude_agent_idle() {
         "UserPromptSubmit",
         &format!("{{\"session_id\":\"{session}\"}}"),
     );
-    assert!(wait_until(Duration::from_secs(5), || env
-        .ok(&["ls"])
-        .contains("working")));
+    assert!(wait_until(WAIT, || env.ok(&["ls"]).contains("working")));
     claude.hook(
         &env,
         "Notification",
@@ -484,9 +464,7 @@ fn idle_notification_marks_a_claude_agent_idle() {
             "{{\"session_id\":\"{session}\",\"notification_type\":\"idle_prompt\",\"message\":\"Claude is waiting for your input\"}}"
         ),
     );
-    assert!(wait_until(Duration::from_secs(5), || env
-        .ok(&["ls"])
-        .contains("idle")));
+    assert!(wait_until(WAIT, || env.ok(&["ls"]).contains("idle")));
     assert!(!env.ok(&["ls"]).contains("needs input"));
 }
 
@@ -589,7 +567,7 @@ fn daemon_startup_errors_are_logged() {
         .spawn()
         .expect("daemon");
     let mut status = None;
-    let exited = wait_until(Duration::from_secs(10), || {
+    let exited = wait_until(WAIT, || {
         status = child.try_wait().expect("try_wait");
         status.is_some()
     });
@@ -621,7 +599,7 @@ fn hook_does_not_wait_on_an_open_stdin() {
         .expect("hook");
     let _stdin = child.stdin.take();
     let mut status = None;
-    let exited = wait_until(Duration::from_secs(10), || {
+    let exited = wait_until(WAIT, || {
         status = child.try_wait().expect("try_wait");
         status.is_some()
     });
@@ -639,7 +617,7 @@ fn idle_exit_is_configured_from_the_environment() {
     let out = env.run_with_env(&["ls"], &[("LAZYAGENTS_IDLE_EXIT_SECS", "1")]);
     assert!(out.status.success(), "{out:?}");
     assert!(
-        wait_until(Duration::from_secs(4), || !env.socket().exists()),
+        wait_until(WAIT, || !env.socket().exists()),
         "idle daemon kept running"
     );
 }
@@ -673,7 +651,7 @@ fn sigterm_stops_the_daemon_and_its_agents() {
     let daemon = rustix::process::Pid::from_raw(env.daemon_pid()).expect("pid");
     rustix::process::kill_process(daemon, rustix::process::Signal::TERM).expect("SIGTERM");
     assert!(
-        wait_until(Duration::from_secs(5), || !env.socket().exists()),
+        wait_until(WAIT, || !env.socket().exists()),
         "socket survived SIGTERM"
     );
     assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived SIGTERM");
@@ -802,17 +780,14 @@ fn stop_daemon_stops_a_running_daemon() {
             .expect("start daemon"),
     );
     assert!(
-        wait_until(Duration::from_secs(30), || env.socket().exists()),
+        wait_until(WAIT, || env.socket().exists()),
         "daemon never listened"
     );
     let paths = protocol::StatePaths::new(env.state.path());
     client::stop_daemon(&paths, Duration::from_secs(5)).expect("stop");
     assert!(!env.socket().exists(), "socket survived stop_daemon");
     assert!(
-        wait_until(Duration::from_secs(5), || matches!(
-            daemon.0.try_wait(),
-            Ok(Some(_))
-        )),
+        wait_until(WAIT, || matches!(daemon.0.try_wait(), Ok(Some(_)))),
         "daemon still running"
     );
 }
@@ -833,16 +808,13 @@ fn a_daemon_started_in_another_locale_and_time_zone_can_be_stopped() {
             .expect("start daemon"),
     );
     assert!(
-        wait_until(Duration::from_secs(20), || env.socket().exists()),
+        wait_until(WAIT, || env.socket().exists()),
         "daemon never listened"
     );
     let paths = protocol::StatePaths::new(env.state.path());
     client::stop_daemon(&paths, Duration::from_secs(20)).expect("stop");
     assert!(
-        wait_until(Duration::from_secs(5), || matches!(
-            daemon.0.try_wait(),
-            Ok(Some(_))
-        )),
+        wait_until(WAIT, || matches!(daemon.0.try_wait(), Ok(Some(_)))),
         "daemon still running"
     );
 }
@@ -902,16 +874,19 @@ fn daemon_does_not_inherit_claude_code_variables() {
 #[test]
 fn no_subcommand_without_a_terminal_fails_cleanly() {
     let env = TestEnv::new();
-    warm_up();
     let started = Instant::now();
     let out = env.run(&[]);
-    assert!(started.elapsed() < Duration::from_secs(5), "{out:?}");
+    assert!(started.elapsed() < WAIT, "{out:?}");
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("needs an interactive terminal"),
         "{out:?}"
     );
-    assert!(!env.socket().exists());
+    assert!(!env.socket().exists(), "a daemon started");
+    assert!(
+        !env.state.path().join("daemon.lock").exists(),
+        "a daemon started"
+    );
 }
 
 /// direnv's home, data, config and cache dirs inside `root`, so the user's allow list and

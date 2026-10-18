@@ -1554,6 +1554,13 @@ fn wait_for_release(release: &Path) -> String {
 /// readings after the call, so at least one of them started after the agent's
 /// descendants existed and links them, however slow `ps` is.
 async fn release(release: &Path) {
+    two_more_readings().await;
+    std::fs::write(release, "").expect("release");
+}
+
+/// Waits until the daemon has finished two process-table readings after the call, so at
+/// least one of them started after whatever the test did before it.
+async fn two_more_readings() {
     let from = daemon::reap::readings();
     let deadline = tokio::time::Instant::now() + WAIT;
     while daemon::reap::readings() < from + 2 {
@@ -1563,7 +1570,6 @@ async fn release(release: &Path) {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    std::fs::write(release, "").expect("release");
 }
 
 async fn gone_within(leaves: &Leaves, limit: Duration) -> Vec<u32> {
@@ -1752,15 +1758,18 @@ async fn kill_stops_a_detached_descendant_whose_parent_exited() {
     let (project, dir) = add_project(&mut conn).await;
     let pidfile = dir.path().join("pids");
     let released = dir.path().join("release");
+    let parent_gone = dir.path().join("parent-gone");
     let script = format!(
-        "(perl -e 'use POSIX; setsid(); exec q(sleep), 312' & echo $! > '{}'; {}); exec sleep 313",
+        "(perl -e 'use POSIX; setsid(); exec q(sleep), 312' & echo $! > '{}'; {}); echo gone > '{}'; exec sleep 313",
         pidfile.display(),
-        wait_for_release(&released)
+        wait_for_release(&released),
+        parent_gone.display()
     );
     let agent = create_owned(&mut conn, &project, "reparent", &sh(&script)).await;
     let leaves = Leaves::read(&pidfile, 1).await;
     release(&released).await;
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    wait_for_file(&parent_gone).await;
+    two_more_readings().await;
     assert_eq!(leaves.alive(), leaves.0, "descendant never ran");
     conn.request(Request::KillAgent { id: agent.id })
         .await
@@ -2887,7 +2896,7 @@ async fn a_setup_script_runs_once_in_the_new_worktree_before_the_agent() {
         command: vec![
             "sh".into(),
             "-c".into(),
-            "echo agent-sees:$(cat ready.txt); exec sleep 30".into(),
+            "echo agent-sees:$(cat ready.txt 2>/dev/null || echo nothing); exec sleep 30".into(),
         ],
         cols: 120,
         rows: 24,
@@ -2911,8 +2920,7 @@ async fn a_setup_script_runs_once_in_the_new_worktree_before_the_agent() {
     })
     .await
     .expect("restart");
-    conn.wait_text(agent.id, "agent-sees:").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    conn.wait_text(agent.id, "agent-sees:nothing").await;
     assert!(!worktree.join("ready.txt").exists(), "setup ran again");
     conn.request(Request::KillAgent { id: agent.id })
         .await
