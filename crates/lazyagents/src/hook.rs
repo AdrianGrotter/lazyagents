@@ -20,6 +20,12 @@ fn forward(event: &str) {
     let Some(kind) = HookKind::from_name(event) else {
         return;
     };
+    block_on_agent(|agent, socket| deliver(kind, agent, socket, tokio::io::stdin()));
+}
+
+/// Runs `task` for the agent whose id and socket the environment names, on a runtime that
+/// is not waited for on exit. Does nothing outside an agent.
+pub(crate) fn block_on_agent<F: std::future::Future>(task: impl FnOnce(Uuid, PathBuf) -> F) {
     let agent = std::env::var("LAZYAGENTS_AGENT_ID")
         .ok()
         .and_then(|s| s.parse::<Uuid>().ok());
@@ -33,12 +39,7 @@ fn forward(event: &str) {
     else {
         return;
     };
-    runtime.block_on(deliver(
-        kind,
-        agent,
-        PathBuf::from(socket),
-        tokio::io::stdin(),
-    ));
+    runtime.block_on(task(agent, PathBuf::from(socket)));
     runtime.shutdown_background();
 }
 

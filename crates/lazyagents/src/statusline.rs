@@ -8,7 +8,6 @@ use std::process::{Command, ExitCode, Stdio};
 
 use protocol::{AgentId, Request, Usage};
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::hook;
 
@@ -86,27 +85,15 @@ pub fn usage(json: &Value) -> Usage {
 }
 
 fn forward(usage: Usage) {
-    let agent = std::env::var("LAZYAGENTS_AGENT_ID")
-        .ok()
-        .and_then(|s| s.parse::<Uuid>().ok());
-    let socket = std::env::var_os("LAZYAGENTS_SOCKET");
-    let (Some(agent), Some(socket)) = (agent, socket) else {
-        return;
-    };
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        return;
-    };
-    let request = Request::Usage {
-        id: AgentId(agent),
-        usage,
-    };
-    runtime.block_on(async {
-        let _ = tokio::time::timeout(hook::BUDGET, hook::send(socket.into(), request)).await;
+    hook::block_on_agent(|agent, socket| {
+        let request = Request::Usage {
+            id: AgentId(agent),
+            usage,
+        };
+        async move {
+            let _ = tokio::time::timeout(hook::BUDGET, hook::send(socket, request)).await;
+        }
     });
-    runtime.shutdown_background();
 }
 
 #[cfg(test)]
