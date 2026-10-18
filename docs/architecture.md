@@ -187,8 +187,8 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   git will not let go of (a locked worktree, or a branch checked out elsewhere) stays
   pending, with a warning in the log, and is tried again at the next start. One whose
   repository is definitely gone is dropped, with a line at info level, so the project can
-  be removed; its leftover directory is deleted too when it lies inside the state
-  directory's `worktrees` (no `..` components), and left alone otherwise.
+  be removed; its leftover directory is deleted too when it is exactly
+  `<state>/worktrees/<project>/<name>` (no `..` components), and left alone otherwise.
 - **Shutdown** first stops every agent, including the processes a kill, restart or
   removal in flight took from it, then waits for the requests in flight and finishes each
   without starting anything: a kill answers as usual, a restart leaves its agent

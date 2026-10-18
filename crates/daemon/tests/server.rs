@@ -3847,3 +3847,22 @@ async fn a_leftover_outside_the_worktrees_dir_survives_its_dropped_entry() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(precious.exists());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_worktrees_dir_survives_its_dropped_entry() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let sibling = worktree_path(&daemon, &project, "live");
+    std::fs::create_dir_all(&sibling).expect("sibling worktree");
+    let project_dir = sibling.parent().expect("project dir").to_path_buf();
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree(&daemon, &project, "ghost", &project_dir);
+    std::fs::remove_dir_all(repo.path()).expect("remove the repo");
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(sibling.exists());
+}

@@ -967,16 +967,16 @@ impl Daemon {
     }
 
     /// Git cannot remove a worktree of a repository that is gone, so the directory is
-    /// deleted directly, but only when it lies inside the state directory's `worktrees`.
+    /// deleted directly, but only when its path is `<state>/worktrees/<project>/<name>`.
     fn drop_pending_without_repo(&mut self, pending: &PendingWorktree) {
         tracing::info!(
             path = %pending.path.display(),
             "dropping a pending worktree whose repository no longer exists"
         );
-        if !inside_worktrees_dir(self.paths.dir(), &pending.path) {
+        if !is_daemon_worktree_path(self.paths.dir(), &pending.path) {
             tracing::info!(
                 path = %pending.path.display(),
-                "leaving the directory of a dropped pending worktree: it is not inside the worktrees directory"
+                "leaving the directory of a dropped pending worktree: it is not shaped like <state>/worktrees/<project>/<name>"
             );
             return;
         }
@@ -2193,9 +2193,10 @@ fn await_snapshot(snapshot: &Receiver<Vec<Tracked>>) -> Vec<Tracked> {
     }
 }
 
-/// Whether `path` lies strictly inside `<state>/worktrees`, with the state directory taken
-/// as given or resolved; a path with `..` components never does.
-fn inside_worktrees_dir(state: &Path, path: &Path) -> bool {
+/// Whether `path` has the shape of a worktree the daemon makes,
+/// `<state>/worktrees/<project>/<name>`, with the state directory taken as given or
+/// resolved; a path with `..` components never does.
+fn is_daemon_worktree_path(state: &Path, path: &Path) -> bool {
     use std::path::Component;
 
     if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
@@ -2206,7 +2207,10 @@ fn inside_worktrees_dir(state: &Path, path: &Path) -> bool {
         .into_iter()
         .flatten()
         .map(|root| root.join("worktrees"))
-        .any(|root| path != root && path.starts_with(&root))
+        .any(|root| {
+            path.strip_prefix(&root)
+                .is_ok_and(|rest| rest.components().count() == 2)
+        })
 }
 
 /// Where a new agent's worktree goes, its branch and its base; `fresh` unless the path or
