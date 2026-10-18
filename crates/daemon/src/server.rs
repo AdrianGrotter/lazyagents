@@ -976,19 +976,12 @@ impl Daemon {
     }
 
     /// Git cannot remove a worktree of a repository that is gone, so the directory is
-    /// deleted directly, but only when its path is `<state>/worktrees/<project>/<name>`.
+    /// deleted directly.
     fn drop_pending_without_repo(&mut self, pending: &PendingWorktree) {
         tracing::info!(
             path = %pending.path.display(),
             "dropping a pending worktree whose repository no longer exists"
         );
-        if !is_daemon_worktree_path(self.paths.dir(), &pending.path) {
-            tracing::info!(
-                path = %pending.path.display(),
-                "leaving the directory of a dropped pending worktree: it is not shaped like <state>/worktrees/<project>/<name>"
-            );
-            return;
-        }
         let path = pending.path.clone();
         self.off_loop(
             "worktree",
@@ -1005,12 +998,24 @@ impl Daemon {
 
     /// Removes, off the event loop, the worktree and branch a create may have left, then
     /// runs `then` with whether they are gone. Until they are, the worktree stays pending,
-    /// in `state.toml` and keeping its name, so the next start tries again.
+    /// in `state.toml` and keeping its name, so the next start tries again. An entry not
+    /// shaped like one `make_worktree` records is forgotten without touching anything.
     fn discard_pending(
         &mut self,
         pending: PendingWorktree,
         then: impl FnOnce(&mut Daemon, bool) + Send + 'static,
     ) {
+        if !is_daemon_worktree(self.paths.dir(), &pending) {
+            tracing::warn!(
+                path = %pending.path.display(),
+                branch = %pending.branch,
+                "forgetting a pending worktree that is not <state>/worktrees/<project>/<name> on lazyagents/<name>; leaving its directory and branch"
+            );
+            self.forget_pending(&pending);
+            self.persist();
+            then(self, true);
+            return;
+        }
         let repo = self
             .projects
             .iter()
@@ -2219,6 +2224,14 @@ fn is_daemon_worktree_path(state: &Path, path: &Path) -> bool {
             path.strip_prefix(&root)
                 .is_ok_and(|rest| rest.components().count() == 2)
         })
+}
+
+/// Whether `pending` names what `plan_worktree` makes for its name: the directory
+/// `<state>/worktrees/<project>/<name>` and the branch `lazyagents/<name>`.
+fn is_daemon_worktree(state: &Path, pending: &PendingWorktree) -> bool {
+    is_daemon_worktree_path(state, &pending.path)
+        && pending.path.file_name() == Some(std::ffi::OsStr::new(&pending.name))
+        && pending.branch == format!("lazyagents/{}", pending.name)
 }
 
 /// Where a new agent's worktree goes, its branch and its base; `fresh` unless the path or

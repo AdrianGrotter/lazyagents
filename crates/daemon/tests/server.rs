@@ -3735,10 +3735,20 @@ async fn a_client_that_stops_reading_while_events_pile_up_is_disconnected() {
 }
 
 fn record_pending_worktree(daemon: &TestDaemon, project: &Project, name: &str, path: &Path) {
+    record_pending_worktree_on(daemon, project, name, path, &format!("lazyagents/{name}"));
+}
+
+fn record_pending_worktree_on(
+    daemon: &TestDaemon,
+    project: &Project,
+    name: &str,
+    path: &Path,
+    branch: &str,
+) {
     let state = StatePaths::new(daemon.path()).state_file();
     let mut text = std::fs::read_to_string(&state).expect("state");
     text.push_str(&format!(
-        "\n[[pending_worktrees]]\nproject = \"{}\"\nname = \"{name}\"\npath = \"{}\"\nbranch = \"lazyagents/{name}\"\n",
+        "\n[[pending_worktrees]]\nproject = \"{}\"\nname = \"{name}\"\npath = \"{}\"\nbranch = \"{branch}\"\n",
         project.id,
         path.display()
     ));
@@ -3922,4 +3932,76 @@ async fn a_project_worktrees_dir_survives_its_dropped_entry() {
     wait_until_no_pending_worktree(&daemon).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(sibling.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leftover_outside_the_worktrees_dir_survives_while_its_repo_exists() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _repo) = add_repo_project(&mut conn).await;
+    let outside = tempfile::tempdir().expect("outside");
+    let precious = outside.path().join("precious");
+    std::fs::create_dir_all(&precious).expect("precious");
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree(&daemon, &project, "ghost", &precious);
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(precious.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_worktrees_dir_survives_while_its_repo_exists() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _repo) = add_repo_project(&mut conn).await;
+    let sibling = worktree_path(&daemon, &project, "live");
+    std::fs::create_dir_all(&sibling).expect("sibling worktree");
+    let project_dir = sibling.parent().expect("project dir").to_path_buf();
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree(&daemon, &project, "ghost", &project_dir);
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(sibling.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_agents_worktree_survives_an_entry_naming_its_path() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _repo) = add_repo_project(&mut conn).await;
+    let live = worktree_path(&daemon, &project, "live");
+    std::fs::create_dir_all(&live).expect("live worktree");
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree(&daemon, &project, "ghost", &live);
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(live.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_outside_lazyagents_survives_an_entry_naming_it() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    common::git(repo.path(), &["checkout", "-q", "--detach"]);
+    let leftover = worktree_path(&daemon, &project, "ghost");
+    std::fs::create_dir_all(&leftover).expect("leftover directory");
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree_on(&daemon, &project, "ghost", &leftover, "main");
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_ne!(common::git(repo.path(), &["branch", "--list", "main"]), "");
+    assert!(leftover.exists());
 }
