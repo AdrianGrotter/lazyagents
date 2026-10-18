@@ -2244,7 +2244,7 @@ fn plan_worktree(
         .filter(|b| !b.trim().is_empty())
         .map(|b| b.trim().to_string());
     let failure = |e| worktree_failure(e, project, &path, &branch, requested_base.as_deref());
-    git::check_branch(&branch).map_err(failure)?;
+    git::check_branch(&branch).map_err(|e| format!("{e:#}"))?;
     let base = match requested_base.clone() {
         Some(base) => base,
         None => match git::current_branch(&project.path).map_err(failure)? {
