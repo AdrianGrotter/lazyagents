@@ -34,3 +34,5 @@ forms) keep their literal hints; they were not touched.
 Adding a fixed key means adding a table row and, if it deserves a hint, a hint row. The
 status bar can drop whole hints from the end when they do not fit, since each hint is a
 separate string. Scroll mode gained the arrow keys, which every other scrolling view had.
+A table key that types no character (arrows, page keys, `esc`) matches with any modifiers
+held, as the match arms did for the page keys; letters match exactly.

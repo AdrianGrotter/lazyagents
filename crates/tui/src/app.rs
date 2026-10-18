@@ -5800,6 +5800,49 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn modified_page_arrow_and_escape_keys_still_act_but_alt_letters_do_not() {
+        let with = |code: KeyCode, modifiers: KeyModifiers| KeyEvent::new(code, modifiers);
+        let (mut app, a, _) = two_agents();
+        let _ = app.set_pane_size(80, 10);
+        open_diff(&mut app, a.id);
+        let text: Vec<String> = (0..100).map(|i| format!(" line {i}")).collect();
+        app.apply_diff(a.id, Ok(text.join("\n")));
+        for (event, expected) in [
+            (with(KeyCode::PageDown, KeyModifiers::CONTROL), (10, 1)),
+            (with(KeyCode::PageUp, KeyModifiers::SHIFT), (0, 0)),
+            (with(KeyCode::Down, KeyModifiers::SHIFT), (1, 0)),
+            (with(KeyCode::Up, KeyModifiers::ALT), (0, 0)),
+            (with(KeyCode::Char('j'), KeyModifiers::ALT), (0, 0)),
+        ] {
+            let _ = app.on_key(event);
+            assert_eq!(diff_place(&app), expected, "{event:?}");
+        }
+        let _ = app.on_key(with(KeyCode::Esc, KeyModifiers::ALT));
+        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+
+        let (mut app, a, _) = running_pair();
+        let _ = app.on_key(key('s'));
+        assert_eq!(
+            app.on_key(with(KeyCode::PageDown, KeyModifiers::CONTROL)),
+            scroll_effects(a.id, -10)
+        );
+        assert!(
+            app.on_key(with(KeyCode::Char('j'), KeyModifiers::ALT))
+                .is_empty()
+        );
+        let _ = app.on_key(with(KeyCode::Esc, KeyModifiers::SHIFT));
+        assert_eq!(app.focus, Focus::Agents);
+
+        let (mut app, _, _) = two_agents();
+        app.set_screen_size(60, 20);
+        let _ = app.on_key(key('?'));
+        let _ = app.on_key(with(KeyCode::Down, KeyModifiers::SHIFT));
+        let _ = app.on_key(with(KeyCode::PageDown, KeyModifiers::CONTROL));
+        assert_eq!(app.popup, Some(Popup::Help));
+        assert!(app.help_scroll > 1, "{}", app.help_scroll);
+    }
+
+    #[test]
     fn diff_view_opens_scrolls_and_closes() {
         let (mut app, a, b) = two_agents();
         let _ = app.set_pane_size(80, 10);

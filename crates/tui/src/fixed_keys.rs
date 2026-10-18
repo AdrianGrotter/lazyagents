@@ -5,7 +5,31 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use crate::keymap::KeySpec;
 
-const fn plain(code: KeyCode) -> KeySpec {
+/// A fixed key. A key that types no character matches with any modifiers held; a character
+/// key matches exactly, so alt or ctrl with a letter does not trigger it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixedKey {
+    pub spec: KeySpec,
+    any_modifiers: bool,
+}
+
+impl FixedKey {
+    pub fn matches(&self, key: &KeyEvent) -> bool {
+        match self.any_modifiers {
+            true => key.code == self.spec.code,
+            false => self.spec.matches(key),
+        }
+    }
+}
+
+const fn exact(spec: KeySpec) -> FixedKey {
+    FixedKey {
+        spec,
+        any_modifiers: false,
+    }
+}
+
+const fn spec(code: KeyCode) -> KeySpec {
     KeySpec {
         code,
         ctrl: false,
@@ -14,15 +38,27 @@ const fn plain(code: KeyCode) -> KeySpec {
     }
 }
 
-const fn char(c: char) -> KeySpec {
+const fn plain(code: KeyCode) -> FixedKey {
+    exact(spec(code))
+}
+
+/// Matches with or without modifiers.
+const fn any(code: KeyCode) -> FixedKey {
+    FixedKey {
+        spec: spec(code),
+        any_modifiers: true,
+    }
+}
+
+const fn char(c: char) -> FixedKey {
     plain(KeyCode::Char(c))
 }
 
-const fn ctrl(c: char) -> KeySpec {
-    KeySpec {
+const fn ctrl(c: char) -> FixedKey {
+    exact(KeySpec {
         ctrl: true,
-        ..char(c)
-    }
+        ..spec(KeyCode::Char(c))
+    })
 }
 
 /// A move through a view that is taller than the screen.
@@ -57,15 +93,15 @@ impl Motion {
     }
 }
 
-pub const MOTIONS: [(KeySpec, Motion); 10] = [
+pub const MOTIONS: [(FixedKey, Motion); 10] = [
     (char('j'), Motion::Down),
-    (plain(KeyCode::Down), Motion::Down),
+    (any(KeyCode::Down), Motion::Down),
     (char('k'), Motion::Up),
-    (plain(KeyCode::Up), Motion::Up),
+    (any(KeyCode::Up), Motion::Up),
     (ctrl('d'), Motion::HalfPageDown),
     (ctrl('u'), Motion::HalfPageUp),
-    (plain(KeyCode::PageDown), Motion::PageDown),
-    (plain(KeyCode::PageUp), Motion::PageUp),
+    (any(KeyCode::PageDown), Motion::PageDown),
+    (any(KeyCode::PageUp), Motion::PageUp),
     (char('g'), Motion::Top),
     (char('G'), Motion::Bottom),
 ];
@@ -93,9 +129,9 @@ pub enum DiffKey {
     Move(Motion),
 }
 
-pub const DIFF_KEYS: [(KeySpec, DiffKey); 12] = [
+pub const DIFF_KEYS: [(FixedKey, DiffKey); 12] = [
     (char('q'), DiffKey::Close),
-    (plain(KeyCode::Esc), DiffKey::Close),
+    (any(KeyCode::Esc), DiffKey::Close),
     (char('D'), DiffKey::Close),
     (char('c'), DiffKey::Comment),
     (char('S'), DiffKey::SendComments),
@@ -133,9 +169,9 @@ pub enum ScrollKey {
     Move(Motion),
 }
 
-pub const SCROLL_KEYS: [(KeySpec, ScrollKey); 2] = [
+pub const SCROLL_KEYS: [(FixedKey, ScrollKey); 2] = [
     (char('q'), ScrollKey::Exit),
-    (plain(KeyCode::Esc), ScrollKey::Exit),
+    (any(KeyCode::Esc), ScrollKey::Exit),
 ];
 
 pub fn scroll_key(key: &KeyEvent) -> Option<ScrollKey> {
@@ -158,8 +194,8 @@ pub enum HelpKey {
     Move(Motion),
 }
 
-pub const HELP_KEYS: [(KeySpec, HelpKey); 5] = [
-    (plain(KeyCode::Esc), HelpKey::Close),
+pub const HELP_KEYS: [(FixedKey, HelpKey); 5] = [
+    (any(KeyCode::Esc), HelpKey::Close),
     (char('q'), HelpKey::Close),
     (plain(KeyCode::Enter), HelpKey::Close),
     (ctrl('c'), HelpKey::Close),
@@ -186,25 +222,25 @@ pub fn motion_hints() -> Vec<String> {
         .collect()
 }
 
-pub fn lookup<A: Copy>(table: &[(KeySpec, A)], key: &KeyEvent) -> Option<A> {
+pub fn lookup<A: Copy>(table: &[(FixedKey, A)], key: &KeyEvent) -> Option<A> {
     table
         .iter()
         .find(|(spec, _)| spec.matches(key))
         .map(|(_, action)| *action)
 }
 
-pub fn keys<A: PartialEq>(table: &[(KeySpec, A)], action: A) -> Vec<KeySpec> {
+pub fn keys<A: PartialEq>(table: &[(FixedKey, A)], action: A) -> Vec<KeySpec> {
     table
         .iter()
         .filter(|(_, a)| *a == action)
-        .map(|(spec, _)| *spec)
+        .map(|(key, _)| key.spec)
         .collect()
 }
 
 /// `keys label`: every key of a lone action, or the first key of each of several, joined
 /// with `/`. `None` when no action has a key.
 pub fn hint<A: PartialEq + Copy>(
-    table: &[(KeySpec, A)],
+    table: &[(FixedKey, A)],
     actions: &[A],
     label: &str,
 ) -> Option<String> {
@@ -222,7 +258,7 @@ pub fn hint<A: PartialEq + Copy>(
 mod tests {
     use super::*;
 
-    fn distinct<A>(table: &[(KeySpec, A)]) -> bool {
+    fn distinct<A>(table: &[(FixedKey, A)]) -> bool {
         table
             .iter()
             .enumerate()
@@ -231,14 +267,14 @@ mod tests {
 
     #[test]
     fn no_key_is_in_a_mode_twice() {
-        let motions: Vec<KeySpec> = MOTIONS.iter().map(|(key, _)| *key).collect();
+        let motions: Vec<FixedKey> = MOTIONS.iter().map(|(key, _)| *key).collect();
         assert!(distinct(&MOTIONS));
         for table in [
             DIFF_KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
             SCROLL_KEYS.iter().map(|(k, _)| *k).collect(),
             HELP_KEYS.iter().map(|(k, _)| *k).collect(),
         ] {
-            let pairs: Vec<(KeySpec, ())> = table.iter().map(|k| (*k, ())).collect();
+            let pairs: Vec<(FixedKey, ())> = table.iter().map(|k| (*k, ())).collect();
             assert!(distinct(&pairs), "{table:?}");
             assert!(table.iter().all(|k| !motions.contains(k)), "{table:?}");
         }

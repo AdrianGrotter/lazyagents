@@ -8,7 +8,9 @@ the help popup, the status bar hints and the messages name the configured keys. 
 message shows for 5 s; an error stays after that until the next key or click. A message wider
 than the status bar is cut between its ` · `-separated parts, or with `…`. Popup keys
 and the keys inside the diff view and scroll mode are fixed; there only the configured quit
-keys and, in the diff view, the configured diff key follow the config. The format is in
+keys and, in the diff view, the configured diff key follow the config. Of these fixed keys,
+the arrows, `pagedown`/`pageup` and `esc` act whatever modifiers are held; letters match
+exactly, so `alt-j` is not `j`. The format is in
 [configuration.md](configuration.md).
 
 Two input modes:
