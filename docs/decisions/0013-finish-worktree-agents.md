@@ -1,7 +1,7 @@
 # 0013. Finish a worktree agent from one menu; delete its branch only once merged
 
 Date: 2026-10-17
-Status: Accepted
+Status: Accepted; amended by 0025
 
 ## Context
 

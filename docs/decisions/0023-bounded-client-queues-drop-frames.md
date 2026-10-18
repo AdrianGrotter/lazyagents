@@ -23,4 +23,4 @@ Each connection gets a bounded queue (`outbox.rs`). At most 4 frames may be queu
 
 ## Consequences
 
-A client that stops reading costs at most 4 frames and 16384 other messages of memory. One that resumes after a short stall sees the current screen in one full frame. One that stays stalled while agents keep reporting (16384 events is minutes of hooks from many busy agents) is disconnected; the TUI then exits with "the daemon stopped", although the daemon still runs.
+A client that stops reading costs at most 4 frames and 16384 other messages of memory. One that resumes after a short stall sees the current screen in one full frame. One that stays stalled while agents keep reporting (16384 events is minutes of hooks from many busy agents) is disconnected; the TUI then exits with "lost the connection to the daemon", although the daemon still runs.

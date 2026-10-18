@@ -117,15 +117,15 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   kill, remove or restart runs this pass, snapshot wait included, on a thread of its own
   and is answered only once it is done; a restart spawns the new process only afterwards.
   Shutdown runs it on the event loop, which ends with it.
-- **An agent that exits on its own.** When the agent's process exits, the daemon runs
-  the same pass over its process group and tracked descendants, so background jobs it
-  left behind go too. Descendants that a snapshot reports after its agent exited, was
-  stopped, restarted or removed are stopped as soon as it finishes. Both passes run on a separate thread, so
-  their grace period never blocks requests; if the thread cannot be spawned, the pass
-  runs inline, as does a snapshot whose thread cannot be spawned. Until such a pass
-  finishes, its processes stay listed with the agent, so a kill, remove, restart or
-  shutdown that arrives meanwhile stops them too before it answers or exits; shutdown
-  also covers passes whose agent was already removed.
+- **An agent that exits on its own.** When the agent's process exits, the daemon runs the
+  same pass over its process group and tracked descendants, so background jobs it left
+  behind go too. Descendants that a snapshot reports after its agent exited, was stopped,
+  restarted or removed are stopped as soon as it finishes. Both passes run on a separate
+  thread, so their grace period never blocks requests; if the thread cannot be spawned,
+  the pass runs inline, as does a snapshot whose thread cannot be spawned. Until such a
+  pass finishes, its processes stay listed with the agent, so a kill, remove, restart or
+  shutdown that arrives meanwhile stops them too before it answers or exits; shutdown also
+  covers passes whose agent was already removed.
 - **The remembered group.** If members of an agent's process group outlive a stop or
   the agent's own exit, the daemon remembers the group and signals it again on the
   next kill, remove, restart or shutdown; it forgets the group once it is empty.
@@ -162,12 +162,12 @@ whose queue overflows is closed, since its client stopped reading.
 While such work is in flight the daemon keeps its state consistent (ADR 0019):
 
 - **Kill, restart, remove and merge** mark the agent busy until they are answered. A kill,
-  restart, remove, merge or rename of it is refused meanwhile with `<name> is stopping; try
-  again once that is done` (`restarting`, `being removed` or `being merged` in place of
-  `stopping`), so a removal never takes the worktree or branch from under a merge.
+  restart, remove, merge or rename of it is refused meanwhile with `<name> is stopping;
+  try again once that is done` (`restarting`, `being removed` or `being merged` in place
+  of `stopping`), so a removal never takes the worktree or branch from under a merge.
   Everything else (input, resize, scroll, subscribe, hooks, usage, git queries) is served
-  against the agent as it is; a removal's checks (merged branch, uncommitted changes) run on its thread
-  before the stop, and a refusal leaves the agent as it was.
+  against the agent as it is; a removal's checks (merged branch, uncommitted changes) run
+  on its thread before the stop, and a refusal leaves the agent as it was.
 - **A worktree create** reserves its name in the project until it is answered: a create of
   the same name, or a rename to it, is refused with `an agent named <name> is being created
   in this project`, and the project cannot be removed meanwhile. The agent appears, and
@@ -181,18 +181,19 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   records its path and branch in `state.toml` as a pending worktree, unless the path or
   the branch exists already (git then refuses, and nothing needs undoing). The agent is
   recorded in the same save that drops the pending worktree; a failed add drops it once
-  git undid its work, and keeps it, as after a crash, when git could not. When a daemon starts and finds pending worktrees, a crash or a
-  shutdown cut a create short: it removes each one with its branch off the event loop
-  (keeping one an agent records) and keeps its name reserved until then (ADR 0021). A
-  locked worktree is removed too (`git worktree remove --force --force`): git locks one
-  while it checks it out, and an add killed then leaves the lock behind. One git will not
-  let go of (a file it may not delete, or a branch checked out elsewhere) stays pending,
-  with a warning in the log, and is tried again at the next start. One whose repository
-  is definitely gone, or no longer a git repository, is dropped, with a line at info
-  level, so the project can be removed, and its leftover directory is deleted. Cleanup touches only an entry whose
-  path is exactly `<state>/worktrees/<project>/<name>` (no `..` components) and whose
-  branch is `lazyagents/<name>`; any other entry is forgotten with a warning in the log,
-  its directory and branch left alone.
+  git undid its work, and keeps it, as after a crash, when git could not. When a daemon
+  starts and finds pending worktrees, a crash or a shutdown cut a create short: it removes
+  each one with its branch off the event loop (keeping one an agent records) and keeps its
+  name reserved until then (ADR 0021). A locked worktree is removed too (`git worktree
+  remove --force --force`): git locks one while it checks it out, and an add killed then
+  leaves the lock behind. One git will not let go of (a file it may not delete, or a
+  branch checked out elsewhere) stays pending, with a warning in the log, and is tried
+  again at the next start. One whose repository is definitely gone, or no longer a git
+  repository, is dropped, with a line at info level, so the project can be removed, and
+  its leftover directory is deleted. Cleanup touches only an entry whose path is exactly
+  `<state>/worktrees/<project>/<name>` (no `..` components) and whose branch is
+  `lazyagents/<name>`; any other entry is forgotten with a warning in the log, its
+  directory and branch left alone.
 - **Shutdown** first stops every agent, including the processes a kill, restart or
   removal in flight took from it, then waits for the requests in flight and finishes each
   without starting anything: a kill answers as usual, a restart leaves its agent
@@ -324,8 +325,10 @@ daemon last told it.
   daemon messages go in; `Effect`s come out: `Send(Request)`, `Copy`, `Notify`,
   `ApproveSetup` (remember an approved worktree setup script), `RunInTerminal` (a
   `terminal` command, with the TUI suspended), `RunCommand` (a background command),
-  `RememberProjects`, `ForgetProject`, `Quit` and `StopDaemonAndQuit`. It does no I/O, so
-  behaviour is tested without a terminal or a daemon. Selection follows an agent's id
+  `RememberProjects`, `ForgetProject`, `Quit` and `StopDaemonAndQuit`. Its only I/O is
+  checking a project for `.git` through `App::is_git_repo`, which tests replace, and
+  reading a project's `.lazyagents.toml` when a worktree agent is created, so behaviour is
+  tested without a terminal or a daemon. Selection follows an agent's id
   across list changes. The TUI is subscribed to at most one agent's screen, the selected
   one, and sizes a running agent's PTY to the pane.
   It asks for the selected agent's `GitStat` when the selection changes and then every
@@ -335,7 +338,7 @@ daemon last told it.
   `pane.rs` (pane keys and scroll mode), `popup.rs` (popup keys, help and confirmations),
   `forms.rs` (the new agent and project forms, the project picker and the setup
   approval), `diff.rs` (the diff view and review comments), `input.rs` (paste and mouse),
-  `commands.rs` (custom commands) and `finish.rs` (the finish menu). Test helpers more
+  `app/commands.rs` (custom commands) and `finish.rs` (the finish menu). Test helpers more
   than one area uses live in `app::tests`.
 - **Focus rule**: keys reach an agent only while the pane has focus, and focus moves into
   the pane only on an explicit user action: `enter` on a running agent, a click in the
@@ -362,16 +365,17 @@ daemon last told it.
   the diff view, the status line and popups from `App`; the pane copies the daemon's cell
   grid into the ratatui buffer, with the text selection drawn reversed on top. Colours
   come from the theme. The Info box lists one fact per row, a dim label with its value
-  aligned after it: what a waiting agent waits for, worktree branch, git stat, then the PR,
-  model, context (a bar where it fits), cost and plan limits its status line reported, and
-  cwd. Context and limits turn yellow from 60 % and red from 80 %; paths and branches too
-  long for the box are cut on the left. The box is sized to its rows: it grows as long as
-  the Agents box keeps 8 rows, and keeps 6 rows while the content fits. The status line shows a message, then `│`
-  and the key hints that fit, whole hints dropped from the end: a notice in the accent colour for 5 s, an error in
-  red for 5 s and after that until the next key or click. Below a 20×5 pane only "terminal too small", with the
-  current and the needed terminal size, is drawn, and keys do nothing except quitting from the sidebar and leaving the pane. Status
-  glyphs animate from a frame counter the runtime ticks every 100 ms while an agent is
-  starting or working.
+  aligned after it: what a waiting agent waits for, worktree branch, git stat, then the
+  PR, model, context (a bar where it fits), cost and plan limits its status line reported,
+  and cwd. Context and limits turn yellow from 60 % and red from 80 %; paths and branches
+  too long for the box are cut on the left. The box is sized to its rows: it grows as long
+  as the Agents box keeps 8 rows, and keeps 6 rows while the content fits. The status line
+  shows a message, then `│` and the key hints that fit, whole hints dropped from the
+  end: a notice in the accent colour for 5 s, an error in red for 5 s and after that until
+  the next key or click. Below a 20×5 pane only "terminal too small", with the current
+  and the needed terminal size, is drawn, and keys do nothing except quitting from the
+  sidebar and leaving the pane. Status glyphs animate from a frame counter the runtime
+  ticks every 100 ms while an agent is starting or working.
 - **Layout** (`layout.rs`, `help.rs`): what the model and the view share about the
   screen: the boxes of the main screen, the list row under a click, how text wraps, how
   the setup script and help popups fit a screen, and the help popup's rows. The model
@@ -431,22 +435,23 @@ daemon last told it.
   window title, saved on start and restored on exit.
 - **Clipboard** (`clipboard.rs`): the runtime handles `Copy` between draws, writing OSC 52
   to the terminal and flushing it, and piping the text to `pbcopy` or `wl-copy` when one
-  is on `PATH`, with `LC_CTYPE=UTF-8` and no `LC_ALL`, so pbcopy never reads the text
-  as MacRoman under a C locale. The copier runs on a short-lived thread that writes its stdin, closes it
-  and waits for it, so it never blocks the UI or lingers as a zombie.
+  is on `PATH`, with `LC_CTYPE=UTF-8` and no `LC_ALL`, so pbcopy never reads the text as
+  MacRoman under a C locale. The copier runs on a short-lived thread that writes its
+  stdin, closes it and waits for it, so it never blocks the UI or lingers as a zombie.
 
 ### Persistence and config
 
 - State dir: `$LAZYAGENTS_STATE_DIR` (a relative path is taken from the current
   directory), default `~/.local/state/lazyagents/`, created with mode 0700: `state.toml`
-  (projects, agents, session ids and titles, worktree info, worktrees being created), `daemon.sock`, `daemon.lock`,
-  `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`, and `known-projects.toml`, which
-  only the TUI writes: every project it has seen, kept after removal for the add picker
-  (`known.rs`, ADR 0009).
+  (projects, agents, session ids and titles, worktree info, worktrees being created),
+  `daemon.sock`, `daemon.lock`, `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`, and
+  `known-projects.toml`, which only the TUI writes: every project it has seen, kept after
+  removal for the add picker (`known.rs`, ADR 0009).
 - Config: `$LAZYAGENTS_CONFIG`, else `$XDG_CONFIG_HOME/lazyagents/config.toml`, else
   `~/.config/lazyagents/config.toml`: keybindings, agent presets, theme colours,
   notifications, custom commands. A missing file gives the built-in defaults; anything
-  unusable becomes a warning in the TUI status line ([configuration.md](configuration.md)).
+  unusable is listed in a warnings popup when the TUI starts
+  ([configuration.md](configuration.md)).
 - `state.toml` is written atomically and durably on every metadata change: a temp file is
   written and synced, renamed over it, and the directory synced.
 
@@ -455,22 +460,22 @@ daemon last told it.
 - Protocol version mismatch → the client fails with `VersionMismatch`, which suggests
   `lazyagents shutdown`. A mismatched daemon cannot be asked to stop over the socket, so
   `client::stop_daemon` sends SIGTERM to the pid in `daemon.lock` and waits up to
-  `protocol::SHUTDOWN_WAIT` (20 s) for the lock to be released. A daemon writes its pid just after taking the lock, so
-  an empty pid, or one whose recorded start time does not match, is read again for up
-  to 500 ms; the lock, the pid and its start time are checked once more right before
-  the signal. An entry that still fails the check is never signalled: `stop_daemon`
-  fails with `<lock> names pid <pid>, which is no longer the daemon; try again`. The
-  daemon's SIGTERM handler stops every agent first.
-  It never escalates to SIGKILL, which would orphan the agents' process trees; on
-  timeout it fails with `daemon <pid> did not stop within 20s`. A daemon that answers on
-  the socket while nothing holds the lock cannot be identified, so `stop_daemon` fails
-  and asks the user to stop it by hand, as it does when the lock stays without a pid.
-  `shutdown` uses it, adds which daemon answered (version and protocol) to an error,
-  and prints `daemon stopped` only on success. The TUI shows a full-screen popup naming
-  both protocol versions: `y` shows `stopping daemon <pid>…`, stops the daemon this way
-  and continues with a new one (an error there says `starting a new daemon`); `ctrl-c`,
-  SIGINT, SIGTERM, SIGHUP or a vanished terminal meanwhile abandon the wait and quit. `n`, `q` or `esc` exits with
-  the mismatch error.
+  `protocol::SHUTDOWN_WAIT` (20 s) for the lock to be released. A daemon writes its pid
+  just after taking the lock, so an empty pid, or one whose recorded start time does not
+  match, is read again for up to 500 ms; the lock, the pid and its start time are checked
+  once more right before the signal. An entry that still fails the check is never
+  signalled: `stop_daemon` fails with `<lock> names pid <pid>, which is no longer the
+  daemon; try again`. The daemon's SIGTERM handler stops every agent first. It never
+  escalates to SIGKILL, which would orphan the agents' process trees; on timeout it fails
+  with `daemon <pid> did not stop within 20s`. A daemon that answers on the socket while
+  nothing holds the lock cannot be identified, so `stop_daemon` fails and asks the user to
+  stop it by hand, as it does when the lock stays without a pid. `shutdown` uses it, adds
+  which daemon answered (version and protocol) to an error, and prints `daemon stopped`
+  only on success. The TUI shows a full-screen popup naming both protocol versions: `y`
+  shows `stopping daemon <pid>…`, stops the daemon this way and continues with a new one
+  (an error there says `starting a new daemon`); `ctrl-c`, SIGINT, SIGTERM, SIGHUP or a
+  vanished terminal meanwhile abandon the wait and quit. `n`, `q` or `esc` exits with the
+  mismatch error.
 - Socket exists but connect fails → spawn a daemon, which removes the stale socket once
   it holds the lock.
 - A daemon that exits while the client waits for it to start → the client fails at
