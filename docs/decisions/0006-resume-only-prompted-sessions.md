@@ -1,7 +1,7 @@
 # 0006. Restart resumes only sessions that received a prompt
 
 Date: 2026-10-15
-Status: Accepted
+Status: Accepted; amended below
 
 ## Context
 
@@ -19,3 +19,5 @@ The daemon marks an agent `resumable` when its `UserPromptSubmit` hook fires. Re
 ## Consequences
 
 Restarting an agent that never got a prompt gives a fresh session, which loses nothing. Status depends on hooks firing; agents whose Claude Code ignores `--settings` hooks stay in `starting`.
+
+Amended: an agent whose hooks never fire no longer stays in `starting`. A `Starting` Claude agent with no hook and no output for 30 s becomes `Idle`.
