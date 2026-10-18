@@ -129,8 +129,8 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   snapshot interval plus one `ps` run, since readings run one after another, and it
   grows when `ps` is slow under load.
 - **Shutdown.** A `Shutdown` request, SIGTERM and SIGINT all take the same path:
-  stop every agent as above, finish the requests still in flight (see below), then
-  remove the socket and release the lock.
+  stop every agent as above, finish the requests still in flight (see below) for up to
+  13 s after it began, then remove the socket and release the lock.
 - **Unreachable daemon.** About once a second the daemon checks that `daemon.sock` is
   still the socket it bound; if it was deleted or replaced, it shuts down.
 - **Idle exit.** With no client connected, no agent running and no request in flight for
@@ -170,11 +170,16 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   git undid its work. When a daemon starts and finds pending worktrees, a crash or a
   shutdown cut a create short: it removes each one with its branch off the event loop
   (keeping one an agent records) and keeps its name reserved until then (ADR 0020).
-- **Shutdown** first stops every agent, then waits for every request in flight and
-  finishes it without starting anything: a kill answers as usual, a restart leaves its
-  agent `Stopped` and answers `the daemon is shutting down`, a removal completes, and a
+- **Shutdown** first stops every agent, including the processes a kill, restart or
+  removal in flight took from it, then waits for the requests in flight and finishes each
+  without starting anything: a kill answers as usual, a restart leaves its agent
+  `Stopped` and answers `the daemon is shutting down`, a removal completes, and a
   worktree made for an agent that never started is removed with its branch, the create
-  answered `the daemon shut down before <name> started; its worktree was removed`.
+  answered `the daemon shut down before <name> started; its worktree was removed`. It
+  waits until 13 s after it began (ADR 0021), so a checkout hook that never ends cannot
+  hold it: a create still running then is answered `the daemon shut down before <name>
+  started; its worktree is removed at the next start`, and the next start removes what
+  it made (ADR 0020); other requests still running are logged and get no answer.
   Processes found meanwhile get a second pass.
 
 ### The daemon is the terminal
@@ -436,8 +441,10 @@ daemon last told it.
 - Fatal errors while the daemon starts are written to `daemon.log`.
 - `lazyagents shutdown` waits up to `protocol::SHUTDOWN_WAIT` (20 s) in all for the
   daemon's reply, which comes after every agent tree is gone, and for the socket to
-  disappear. It stays above the daemon's slowest clean shutdown: up to 10 s for a
-  running process snapshot, the 2 s grace period and the `ps` readings after it.
+  disappear. It stays above the daemon's slowest shutdown: the first pass (up to 10 s
+  for a running process snapshot, the 2 s grace period and the `ps` readings after it)
+  ends by the 13 s at which shutdown stops waiting for requests in flight, and the
+  second pass adds the grace period and its readings.
 - All daemon errors logged with `tracing` to `daemon.log`; TUI shows the last error in
   the status line.
 

@@ -1,7 +1,7 @@
 # 0019. Run slow daemon work off the event loop and refuse overlapping lifecycle requests
 
 Date: 2026-10-17
-Status: Accepted
+Status: Accepted; amended by 0021
 
 ## Context
 
@@ -29,3 +29,5 @@ The connection's own task sends `Welcome`. Kill, restart, remove and worktree cr
 ## Consequences
 
 Panes keep streaming and hooks are applied while agents are stopped, created or removed; the daemon only blocks while shutting down, when nothing is left to serve. Answers to these requests arrive up to one tick after their work finishes and may follow later requests' answers. A client that sends overlapping lifecycle requests for one agent gets an error to retry. Shutdown can take as long as the slowest create in flight, since a checkout hook cannot be cut short without leaving a half-made worktree. The TUI sends each request without waiting for earlier answers and passes the answers on in request order, so its own input, and the frames it receives, keep flowing during a long create; an answer that follows a slow one reaches the TUI only after it. Because the events for an agent can therefore be applied before the answer that announced them, the TUI ignores the agent in an answer unless the answer is to a pending create of an agent it does not know yet; the daemon announces every change to an agent before answering.
+
+Amended by [0021](0021-bound-shutdowns-wait-for-requests-in-flight.md): shutdown waits for the requests in flight only until 13 s after it began; a create still running then is answered, and ADR 0020 removes what it made at the next start. A merge now marks its agent busy (`being merged`) like a kill, restart or removal.

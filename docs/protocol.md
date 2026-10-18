@@ -133,8 +133,9 @@ merged` in place of `stopping`). While a worktree `CreateAgent` runs, its name i
 of the same name in the project, or a `RenameAgent` to it, is rejected with `an agent named
 <name> is being created in this project`, and `RemoveProject` of its project is rejected.
 A `Shutdown` that arrives meanwhile answers such a create with `the daemon shut down before
-<name> started; its worktree was removed`, and a restart with `the daemon is shutting
-down` (see [architecture.md](architecture.md#nothing-slow-runs-on-the-event-loop)).
+<name> started; its worktree was removed` (`its worktree is removed at the next start` when
+the create still runs 13 s after shutdown began), and a restart with `the daemon is
+shutting down` (see [architecture.md](architecture.md#nothing-slow-runs-on-the-event-loop)).
 `Input` is rejected with an error for agents that are not running. `Resize` and `Scroll`
 work for any agent that still has a terminal, including an exited one, and are rejected
 for a stopped agent, which has none. `Subscribe` succeeds for any known agent.

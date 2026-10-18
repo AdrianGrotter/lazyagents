@@ -91,6 +91,8 @@ const HOUSEKEEPING: Duration = Duration::from_secs(1);
 const SNAPSHOT: Duration = Duration::from_secs(1);
 const SNAPSHOT_WAIT: Duration = Duration::from_secs(2);
 const SHUTDOWN_SNAPSHOT_WAIT: Duration = Duration::from_secs(10);
+/// How long after it began shutdown waits for the requests in flight.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(13);
 const WHEEL_LINES: i32 = 3;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
@@ -432,10 +434,30 @@ struct Daemon {
     /// Requests whose slow part runs on its own thread; `tick` finishes them.
     jobs: Vec<JoinHandle<Option<Finish>>>,
     /// Names reserved by worktree agents being created.
-    creating: Vec<(ProjectId, String)>,
+    creating: Vec<Reservation>,
     /// Worktrees git may be making, kept in `state.toml` until their agents are recorded.
     pending_worktrees: Vec<PendingWorktree>,
+    /// The tracked processes that stops running off the event loop took from their agents,
+    /// so shutdown covers them too.
+    stopping: Vec<(AgentId, Arc<[Tracked]>)>,
     shutting_down: bool,
+    shutdown_began: Option<Instant>,
+}
+
+/// A worktree create's name, and the request that waits for it.
+#[derive(Clone, PartialEq, Eq)]
+struct Reservation {
+    project: ProjectId,
+    name: String,
+    client: ClientId,
+    request_id: u64,
+}
+
+impl Reservation {
+    fn answer(self, daemon: &mut Daemon, result: Result<Response, String>) {
+        daemon.creating.retain(|reserved| *reserved != self);
+        daemon.reply(self.client, self.request_id, result);
+    }
 }
 
 impl Drop for Daemon {
@@ -475,7 +497,9 @@ impl Daemon {
             jobs: Vec::new(),
             creating: Vec::new(),
             pending_worktrees: state.pending_worktrees,
+            stopping: Vec::new(),
             shutting_down: false,
+            shutdown_began: None,
         }
     }
 
@@ -727,7 +751,7 @@ impl Daemon {
 
     fn remove_project(&mut self, id: ProjectId) -> Result<(), String> {
         if self.agents.values().any(|a| a.record.project == id)
-            || self.creating.iter().any(|(project, _)| *project == id)
+            || self.creating.iter().any(|reserved| reserved.project == id)
             || self
                 .pending_worktrees
                 .iter()
@@ -777,7 +801,7 @@ impl Daemon {
         let reserved = self
             .creating
             .iter()
-            .map(|(project, name)| (*project, name.as_str()))
+            .map(|reserved| (reserved.project, reserved.name.as_str()))
             .chain(
                 self.pending_worktrees
                     .iter()
@@ -816,7 +840,12 @@ impl Daemon {
                 .finish_create(&project, create, None)
                 .map(Response::Agent));
         };
-        let reservation = (project.id, create.name.clone());
+        let reservation = Reservation {
+            project: project.id,
+            name: create.name.clone(),
+            client,
+            request_id,
+        };
         self.creating.push(reservation.clone());
         let state = self.paths.dir().to_path_buf();
         let (job_project, name) = (project.clone(), create.name.clone());
@@ -827,8 +856,6 @@ impl Daemon {
                 let message = match planned {
                     Some(Ok(plan)) if !daemon.shutting_down => {
                         let creation = Creation {
-                            client,
-                            request_id,
                             project,
                             create,
                             reservation,
@@ -840,8 +867,7 @@ impl Daemon {
                     Some(Err(e)) => e,
                     None => format!("creating the worktree for {} failed", create.name),
                 };
-                daemon.creating.retain(|reserved| *reserved != reservation);
-                daemon.reply(client, request_id, Err(message));
+                reservation.answer(daemon, Err(message));
             },
         );
         Reply::Deferred
@@ -868,35 +894,36 @@ impl Daemon {
             "worktree",
             move || add_worktree(&job_project, &job_worktree, direnv.as_deref()),
             move |daemon, made| {
-                let name = creation.create.name.clone();
+                let Creation {
+                    project,
+                    create,
+                    reservation,
+                } = creation;
+                let failed = format!("creating the worktree for {} failed", create.name);
                 match made {
                     Some(Ok(())) if !daemon.shutting_down => {
                         daemon.forget_pending(&pending);
-                        daemon.creating.retain(|reserved| *reserved != creation.reservation);
-                        let result = daemon.finish_create(
-                            &creation.project,
-                            creation.create,
-                            Some(worktree),
-                        );
-                        daemon.reply(creation.client, creation.request_id, result.map(Response::Agent));
+                        let result = daemon.finish_create(&project, create, Some(worktree));
+                        reservation.answer(daemon, result.map(Response::Agent));
                     }
-                    Some(Ok(())) => daemon.discard_pending(pending, move |daemon| {
-                        creation.answer(
-                            daemon,
-                            format!(
-                                "the daemon shut down before {name} started; its worktree was removed"
-                            ),
+                    Some(Ok(())) => {
+                        let message = format!(
+                            "the daemon shut down before {} started; its worktree was removed",
+                            create.name
                         );
-                    }),
+                        daemon.discard_pending(pending, |daemon| {
+                            reservation.answer(daemon, Err(message));
+                        });
+                    }
                     Some(Err(e)) => {
                         daemon.forget_pending(&pending);
                         daemon.persist();
-                        creation.answer(daemon, e);
+                        reservation.answer(daemon, Err(e));
                     }
-                    None if plan.fresh => daemon.discard_pending(pending, move |daemon| {
-                        creation.answer(daemon, format!("creating the worktree for {name} failed"));
+                    None if plan.fresh => daemon.discard_pending(pending, |daemon| {
+                        reservation.answer(daemon, Err(failed));
                     }),
-                    None => creation.answer(daemon, format!("creating the worktree for {name} failed")),
+                    None => reservation.answer(daemon, Err(failed)),
                 }
             },
         );
@@ -1122,20 +1149,46 @@ impl Daemon {
         }
     }
 
-    /// Waits for every job, including those a finishing job starts; true when there was any.
-    fn drain_jobs(&mut self) -> bool {
-        let mut drained = false;
-        while !self.jobs.is_empty() {
-            drained = true;
-            for job in std::mem::take(&mut self.jobs) {
-                self.finish_job(job);
+    /// Waits until `deadline` for every job, including those a finishing job starts; true
+    /// when there was any. Jobs still running then are left to the threads they run on,
+    /// which end with the daemon: creates are answered, and anything they made is removed
+    /// at the next start.
+    fn drain_jobs(&mut self, deadline: Instant) -> bool {
+        let drained = !self.jobs.is_empty();
+        loop {
+            self.finish_jobs();
+            if self.jobs.is_empty() {
+                break;
             }
+            if Instant::now() >= deadline {
+                self.abandon_jobs();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
         drained
     }
 
+    fn abandon_jobs(&mut self) {
+        let jobs: Vec<String> = std::mem::take(&mut self.jobs)
+            .iter()
+            .map(|job| job.thread().name().unwrap_or("job").to_string())
+            .collect();
+        tracing::error!(
+            ?jobs,
+            "shutting down without these requests; worktrees being created are removed at the next start"
+        );
+        for reservation in self.creating.clone() {
+            let message = format!(
+                "the daemon shut down before {} started; its worktree is removed at the next start",
+                reservation.name
+            );
+            reservation.answer(self, Err(message));
+        }
+    }
+
     /// The processes a stop of `ids` ends: their trees, process groups and tracked
-    /// descendants, with those of their running reapers and their leftovers.
+    /// descendants, with those of their running reapers, stops and leftovers.
     fn capture(&mut self, ids: &[AgentId]) -> (Vec<u32>, Vec<u32>, Vec<Tracked>) {
         let mut trees = Vec::new();
         let mut groups = Vec::new();
@@ -1154,6 +1207,13 @@ impl Daemon {
         for reaper in self.reapers.iter().filter(|r| ids.contains(&r.agent)) {
             groups.extend(reaper.groups.iter().copied());
             tracked.extend(reaper.tracked.iter().cloned());
+        }
+        for (_, handed) in self
+            .stopping
+            .iter()
+            .filter(|(agent, _)| ids.contains(agent))
+        {
+            tracked.extend(handed.iter().cloned());
         }
         tracked.extend(
             self.leftovers
@@ -1209,7 +1269,8 @@ impl Daemon {
         }
         let snapshot = self.snapshot_waiter(&[id]);
         let (trees, groups, mut tracked) = self.capture(&[id]);
-        let handed = tracked.clone();
+        let handed: Arc<[Tracked]> = tracked.clone().into();
+        self.stopping.push((id, Arc::clone(&handed)));
         self.off_loop(
             "stop",
             move || {
@@ -1227,9 +1288,12 @@ impl Daemon {
                             agent = %id,
                             "stopping the agent panicked; its tracked processes are kept to retry"
                         );
-                        (handed, None)
+                        (handed.to_vec(), None)
                     }
                 };
+                daemon
+                    .stopping
+                    .retain(|(_, taken)| !Arc::ptr_eq(taken, &handed));
                 daemon.stopped(&[id], unverified);
                 if let Some(agent) = daemon.agents.get_mut(&id) {
                     agent.busy = None;
@@ -1243,10 +1307,11 @@ impl Daemon {
     /// loop ends after it.
     fn stop_all(&mut self) {
         self.shutting_down = true;
+        let began = *self.shutdown_began.get_or_insert_with(Instant::now);
         self.finish_snapshot(None);
         let ids = self.stoppable();
         self.stop(&ids, SHUTDOWN_GRACE);
-        if self.drain_jobs() {
+        if self.drain_jobs(began + SHUTDOWN_DRAIN) {
             let ids = self.stoppable();
             self.stop(&ids, SHUTDOWN_GRACE);
         }
@@ -1970,20 +2035,9 @@ struct Removal {
 
 /// A worktree create between planning its worktree and answering it.
 struct Creation {
-    client: ClientId,
-    request_id: u64,
     project: Project,
     create: CreateAgent,
-    reservation: (ProjectId, String),
-}
-
-impl Creation {
-    fn answer(self, daemon: &mut Daemon, error: String) {
-        daemon
-            .creating
-            .retain(|reserved| *reserved != self.reservation);
-        daemon.reply(self.client, self.request_id, Err(error));
-    }
+    reservation: Reservation,
 }
 
 struct PlannedWorktree {
@@ -2184,12 +2238,79 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(10);
 
+    /// Shutdown stops every agent (a snapshot wait, the grace period and `ps` readings),
+    /// waits for the requests in flight until `SHUTDOWN_DRAIN` after it began, then stops
+    /// what turned up meanwhile (the grace period and readings again).
     #[test]
     fn shutdown_fits_in_the_clients_wait() {
+        let readings = Duration::from_secs(1);
+        assert!(SHUTDOWN_SNAPSHOT_WAIT + SHUTDOWN_GRACE + readings <= SHUTDOWN_DRAIN);
         assert!(
-            SHUTDOWN_SNAPSHOT_WAIT + SHUTDOWN_GRACE + Duration::from_secs(5)
-                <= protocol::SHUTDOWN_WAIT
+            SHUTDOWN_DRAIN + SHUTDOWN_GRACE + Duration::from_secs(5) <= protocol::SHUTDOWN_WAIT
         );
+    }
+
+    #[test]
+    fn shutdown_answers_a_create_it_stops_waiting_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut daemon = test_daemon(dir.path());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.add_client(7, tx);
+        daemon.creating.push(Reservation {
+            project: ProjectId::random(),
+            name: "hung".into(),
+            client: 7,
+            request_id: 3,
+        });
+        let (release, hung) = std::sync::mpsc::channel::<()>();
+        daemon.off_loop("worktree", move || hung.recv(), |_, _| {});
+        let started = Instant::now();
+        assert!(daemon.drain_jobs(started + Duration::from_millis(200)));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(daemon.jobs.is_empty());
+        assert!(daemon.creating.is_empty());
+        match rx.try_recv() {
+            Ok(ServerMessage::Response {
+                id: 3,
+                result: Err(e),
+            }) => assert!(e.contains("shut down before hung started"), "{e}"),
+            other => panic!("unexpected {other:?}"),
+        }
+        drop(release);
+    }
+
+    #[test]
+    fn shutdown_covers_what_a_stop_in_flight_took() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut daemon = test_daemon(dir.path());
+        let id = add_agent(&mut daemon, Status::Exited(0));
+        let tracked = Tracked {
+            pid: 4242,
+            start: "Thu Oct 15 10:00:00 2026".into(),
+        };
+        if let Some(agent) = daemon.agents.get_mut(&id) {
+            agent.tracked = vec![tracked.clone()];
+        }
+        let (_never, rx) = std::sync::mpsc::channel();
+        daemon.snapshot = Some(PendingSnapshot {
+            rx,
+            agents: vec![id],
+            waiters: Vec::new(),
+        });
+        daemon.begin_stop(id, "stopping", || (), |_, _: Option<()>| {});
+        let (_, _, covered) = daemon.capture(&[id]);
+        assert_eq!(covered, vec![tracked]);
+        let deadline = Instant::now() + WAIT;
+        while !daemon.jobs.is_empty() {
+            assert!(Instant::now() < deadline, "the stop never finished");
+            std::thread::sleep(Duration::from_millis(10));
+            daemon.finish_jobs();
+        }
+        assert!(daemon.stopping.is_empty());
     }
 
     fn claude_agent() -> Agent {

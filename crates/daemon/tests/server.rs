@@ -3472,3 +3472,54 @@ async fn the_leftovers_of_an_unfinished_create_are_removed_at_the_next_start() {
         .await
         .expect("kill");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_stops_waiting_for_a_hung_create_and_the_next_start_cleans_up() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let gate = Gate::post_checkout(repo.path());
+    let create = conn
+        .send(create_in_worktree_request(
+            &project,
+            "hung",
+            &["sleep", "30"],
+        ))
+        .await;
+    gate.entered().await;
+
+    let mut other = Conn::open(daemon.path()).await;
+    let shutdown = other.send(Request::Shutdown).await;
+    let answered = tokio::time::timeout(protocol::SHUTDOWN_WAIT, other.response(shutdown))
+        .await
+        .expect("shutdown waited for the hung create");
+    assert_eq!(answered, Ok(Response::Ok));
+    let err = conn.response(create).await.expect_err("never started");
+    assert!(err.contains("shut down before hung started"), "{err}");
+    daemon.exits_within(WAIT).await;
+
+    gate.open();
+    let left = gate.left.clone();
+    tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + WAIT;
+        while !left.exists() {
+            assert!(std::time::Instant::now() < deadline, "the hook never left");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    })
+    .await
+    .expect("join");
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    let leftover = worktree_path(&daemon, &project, "hung");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while leftover.exists()
+        || !common::git(repo.path(), &["branch", "--list", "lazyagents/*"]).is_empty()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the hung create's worktree was never removed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
