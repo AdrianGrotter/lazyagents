@@ -1720,7 +1720,11 @@ impl HelpView {
             ]));
             return (lines, Some(cursor));
         }
-        let hint = fitted(&fixed_keys::help_hints(), room);
+        let mut hints = fixed_keys::help_hints();
+        if !app.help_filter.is_empty() {
+            hints.insert(0, "esc clear filter".to_string());
+        }
+        let hint = fitted(&hints, room);
         lines.push(Line::from(hint).fg(theme.dim));
         (lines, None)
     }
@@ -2128,6 +2132,7 @@ mod tests {
         app.help_typing = false;
         let (text, _) = render(&app);
         assert!(text.contains(" Help · /DIFF "), "{text}");
+        assert!(text.contains("esc clear filter · j/k scroll"), "{text}");
         assert!(text.contains("diff / finish"), "{text}");
         assert!(!text.contains("  new agent"), "{text}");
         assert!(!text.contains("Agent pane"), "{text}");

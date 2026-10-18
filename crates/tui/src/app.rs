@@ -2430,7 +2430,8 @@ impl App {
     }
 
     /// After `/`, keys edit the filter until `enter` keeps it or `esc` clears it; otherwise
-    /// they scroll, and the help key closes the popup like the table's close keys.
+    /// they scroll, `esc` clears a kept filter, and the help key closes the popup like the
+    /// table's close keys.
     fn on_help_key(&mut self, key: &KeyEvent) {
         self.popup = Some(Popup::Help);
         if self.help_typing {
@@ -2446,6 +2447,11 @@ impl App {
             if self.help_filter != before {
                 self.help_scroll = 0;
             }
+            return;
+        }
+        if key.code == KeyCode::Esc && !self.help_filter.is_empty() {
+            self.help_filter.clear();
+            self.help_scroll = 0;
             return;
         }
         let action = fixed_keys::help_key(key);
@@ -7139,7 +7145,7 @@ mod help_tests {
     }
 
     #[test]
-    fn slash_filters_the_help_and_escape_closes_it() {
+    fn slash_filters_the_help_and_escape_clears_then_closes_it() {
         let mut app = stopped();
         let _ = app.on_key(key('?'));
         let _ = app.on_key(key('/'));
@@ -7170,6 +7176,12 @@ mod help_tests {
         let _ = app.on_key(key('/'));
         let _ = app.on_key(key('x'));
         let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.help_scroll = 2;
+        let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            (&app.popup, app.help_filter.as_str(), app.help_scroll),
+            (&Some(Popup::Help), "", 0)
+        );
         let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.popup, None);
         let _ = app.on_key(key('?'));

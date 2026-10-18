@@ -15,9 +15,10 @@ view uses (`j`/`k`, `g`/`G`) collides with typing those letters into the filter.
 The help popup scrolls with the shared motion keys (`j`/`k`, arrows, `ctrl-d`/`ctrl-u`,
 page keys, `g`/`G`), shows `↑ N more above` / `↓ N more below` when it does not fit, and
 wraps long descriptions. Filtering starts with `/`, as the Agents filter does: the filter
-is typed in the popup's bottom row, `enter` keeps it and `esc` clears it. Outside the
-filter, `esc`, `q`, `enter` and the help key close the popup; other keys do nothing,
-instead of closing it.
+is typed in the popup's bottom row, `enter` keeps it and `esc` clears it. A kept filter
+is cleared by the next `esc`, as the Agents filter is, and the `esc` after that closes the
+popup. Without a filter, `esc`, `q`, `enter` and the help key close the popup; other keys
+do nothing, instead of closing it.
 
 ## Alternatives
 
