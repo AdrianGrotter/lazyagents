@@ -9,6 +9,16 @@ const BIN: &str = env!("CARGO_BIN_EXE_lazyagents");
 /// spawned process can take seconds, and polling returns as soon as the condition holds.
 const WAIT: Duration = Duration::from_secs(30);
 
+/// A command without what a shell's direnv hook sets, so the direnv state of the shell
+/// running the tests never reaches it.
+fn without_direnv(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    for var in ["DIRENV_DIFF", "DIRENV_DIR", "DIRENV_FILE", "DIRENV_WATCHES"] {
+        command.env_remove(var);
+    }
+    command
+}
+
 struct TestEnv {
     state: tempfile::TempDir,
     project: tempfile::TempDir,
@@ -27,12 +37,8 @@ impl TestEnv {
     }
 
     fn run_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
-        Command::new(BIN)
+        without_direnv(BIN)
             .args(args)
-            .env_remove("DIRENV_DIFF")
-            .env_remove("DIRENV_DIR")
-            .env_remove("DIRENV_FILE")
-            .env_remove("DIRENV_WATCHES")
             .envs(env.iter().copied())
             .env("LAZYAGENTS_STATE_DIR", self.state.path())
             .current_dir(self.project.path())
@@ -910,12 +916,8 @@ fn isolated_direnv_home(root: &Path) -> Vec<(String, String)> {
 fn direnv_loaded_env(dir: &Path, base: &[(String, String)]) -> Vec<(String, String)> {
     let direnv = daemon::find_in_path("direnv").expect("direnv in the nix dev shell");
     let direnv_command = || {
-        let mut command = Command::new(&direnv);
+        let mut command = without_direnv(&direnv);
         command
-            .env_remove("DIRENV_DIFF")
-            .env_remove("DIRENV_DIR")
-            .env_remove("DIRENV_FILE")
-            .env_remove("DIRENV_WATCHES")
             .envs(base.iter().map(|(k, v)| (k, v)))
             .current_dir(dir)
             .stdin(Stdio::null());
