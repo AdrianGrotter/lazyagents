@@ -102,6 +102,13 @@ from Base; an empty Base means the project's current branch. `d` never deletes a
 fails with `branch lazyagents/<name> already exists; delete it or choose another
 agent name` until that branch is deleted (the finish menu does that for a merged one) or renamed.
 
+The new agent form, the new project form and rename stay open after `enter` until the
+daemon answers, showing `waiting for the daemon · esc close`; other keys do nothing
+meanwhile, and `esc` closes the form and leaves the answer to the status bar. When the daemon
+refuses, the form keeps what was typed and shows the refusal in red above its hint, until
+the next `enter`. A form that cannot be sent (a custom preset without a command, an unreadable
+`.lazyagents.toml`) says why the same way.
+
 Removing a worktree agent asks `Remove <name>? y: agent + worktree · k: keep worktree ·
 n: cancel`:
 

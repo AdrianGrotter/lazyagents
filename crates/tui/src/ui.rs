@@ -14,7 +14,7 @@ use ratatui::widgets::{
 
 use crate::app::{
     AgentView, App, CommandRun, DiffView, Field, Focus, MIN_PANE, MessageKind, NewAgentForm, Popup,
-    Preset, ProjectField, ProjectForm, ScreenMode, Selection,
+    Preset, ProjectField, ProjectForm, ScreenMode, Selection, Submission,
 };
 use crate::commands::Prompt;
 use crate::config::Theme;
@@ -28,6 +28,7 @@ const CONFIRM_HINT: &str = "y/enter confirm · n/esc cancel";
 const OUTPUT_HINT: &str = "j/k scroll · q close";
 const MENU_HINT: &str = "j/k move · enter run · esc cancel";
 const INPUT_HINT: &str = "enter ok · esc cancel";
+const SENDING_HINT: &str = "waiting for the daemon · esc close";
 const REPLY_HINT: &str = "enter send · esc cancel";
 const COMMENT_HINT: &str = "enter save (empty removes) · esc cancel";
 const SETUP_HINT: &str = "y run it and remember · s skip it this time · n cancel";
@@ -37,6 +38,7 @@ const CHOICE_HINT: &str = "j/k move · enter pick · esc cancel";
 const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
 const PROJECT_FORM_HINT: &str = "tab field · enter add · esc cancel";
 const PICKER_ROWS: usize = 12;
+const NEW_AGENT_WIDTH: u16 = 56;
 
 const SIDEBAR_HINT: [(Action, &str); 12] = [
     (Action::Help, "help"),
@@ -1109,6 +1111,24 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     rows
 }
 
+/// Splits `text` into rows of at most `width` cells, between words where a word fits.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let mut row = String::new();
+        for word in line.split(' ') {
+            if !row.is_empty() && text_width(&row) + 1 + text_width(word) > width {
+                rows.extend(wrap(&std::mem::take(&mut row), width));
+            } else if !row.is_empty() {
+                row.push(' ');
+            }
+            row.push_str(word);
+        }
+        rows.extend(wrap(&row, width));
+    }
+    rows
+}
+
 struct PopupContent {
     title: String,
     width: u16,
@@ -1238,13 +1258,16 @@ fn popup_content(popup: &Popup, app: &App, screen: (u16, u16)) -> PopupContent {
         }
         Popup::NewAgent(form) => {
             let (lines, cursor) = form_lines(form, app);
-            PopupContent::new(" New agent ", 56, lines).cursor_at(cursor)
+            PopupContent::new(" New agent ", NEW_AGENT_WIDTH, lines).cursor_at(cursor)
         }
-        Popup::Rename { input, .. } => {
-            let lines = vec![
+        Popup::Rename {
+            input, submission, ..
+        } => {
+            let mut lines = vec![
                 field_line("Name: ", input.clone(), true, theme),
                 Line::default(),
             ];
+            lines.extend(form_footer(submission, INPUT_HINT, 60, theme));
             PopupContent::new(" Rename ", 60, lines).cursor_at(Some(0))
         }
         Popup::ProjectPicker { index } => {
@@ -1279,6 +1302,26 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
             inner.x + col.min(inner.width - 1),
             inner.y + row,
         ));
+    }
+}
+
+/// The rows under a form's fields in a popup `width` cells wide: the daemon's refusal, if any,
+/// and the form's `hint`, or what the form waits for while it waits.
+fn form_footer(
+    submission: &Submission,
+    hint: &'static str,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let room = usize::from(width.saturating_sub(4)).max(1);
+    match submission {
+        Submission::Editing => vec![Line::from(hint).fg(theme.dim)],
+        Submission::Sending(_) => vec![Line::from(SENDING_HINT).fg(theme.dim)],
+        Submission::Failed(error) => wrap_words(error, room)
+            .into_iter()
+            .map(|row| Line::from(row).fg(theme.error))
+            .chain([Line::from(hint).fg(theme.dim)])
+            .collect(),
     }
 }
 
@@ -1493,7 +1536,7 @@ fn project_form_lines(form: &ProjectForm, theme: &Theme) -> (Vec<Line<'static>>,
     } else {
         form.name.as_str()
     };
-    let lines = vec![
+    let mut lines = vec![
         field_line(
             "Path: ",
             form.path.clone(),
@@ -1507,8 +1550,8 @@ fn project_form_lines(form: &ProjectForm, theme: &Theme) -> (Vec<Line<'static>>,
             theme,
         ),
         Line::default(),
-        Line::from(PROJECT_FORM_HINT).fg(theme.dim),
     ];
+    lines.extend(form_footer(&form.submission, PROJECT_FORM_HINT, 60, theme));
     let row = match form.field {
         ProjectField::Path => 0,
         ProjectField::Name => 1,
@@ -1557,7 +1600,12 @@ fn form_lines(form: &NewAgentForm, app: &App) -> (Vec<Line<'static>>, Option<usi
         .map(|(field, label, value)| field_line(label, value, field == form.field, &app.theme))
         .collect();
     lines.push(Line::default());
-    lines.push(Line::from(FORM_HINT).fg(app.theme.dim));
+    lines.extend(form_footer(
+        &form.submission,
+        FORM_HINT,
+        NEW_AGENT_WIDTH,
+        &app.theme,
+    ));
     (lines, cursor)
 }
 
@@ -1894,6 +1942,7 @@ mod tests {
     fn asking_to_run(script: &str, scroll: usize) -> App {
         let mut app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
         app.popup = Some(Popup::ApproveSetup {
+            form: Default::default(),
             create: Box::new(protocol::CreateAgent {
                 project: protocol::ProjectId::random(),
                 name: "a".into(),
@@ -2310,6 +2359,7 @@ mod tests {
             path: "/x/repo".into(),
             name: String::new(),
             field: ProjectField::Path,
+            submission: Default::default(),
         }));
         let (buffer, cursor) = cursor_of(&app);
         assert_nothing_reversed(&buffer);
@@ -2325,6 +2375,7 @@ mod tests {
             path: "/x/repo".into(),
             name: "web".into(),
             field: ProjectField::Name,
+            submission: Default::default(),
         }));
         let (buffer, cursor) = cursor_of(&app);
         let name = find_text(&buffer, buffer.area, "Name: web");
@@ -2335,6 +2386,7 @@ mod tests {
         app.popup = Some(Popup::Rename {
             agent: agent_id,
             input: "abc".into(),
+            submission: Default::default(),
         });
         let (buffer, cursor) = cursor_of(&app);
         let rename = find_text(&buffer, buffer.area, "Name: abc");
@@ -2355,6 +2407,7 @@ mod tests {
             base: String::new(),
             prompt: String::new(),
             field: Field::Name,
+            submission: Default::default(),
         };
         app.popup = Some(Popup::NewAgent(form.clone()));
         let (buffer, cursor) = cursor_of(&app);
@@ -2400,6 +2453,7 @@ mod tests {
             path: "/x/repo".into(),
             name: String::new(),
             field: ProjectField::Path,
+            submission: Default::default(),
         }));
         let (text, _) = render(&app);
         assert!(
@@ -2667,6 +2721,52 @@ mod tests {
     }
 
     #[test]
+    fn a_form_shows_its_error_in_words_and_says_while_it_waits() {
+        use crate::app::{NewAgentForm, Submission};
+        let (mut app, _) = loaded(vec![project("p")], Vec::new());
+        let error = "branch lazyagents/api already exists; delete it or choose another agent name";
+        app.popup = Some(Popup::NewAgent(NewAgentForm {
+            name: "api".into(),
+            submission: Submission::Failed(error.into()),
+            ..Default::default()
+        }));
+        let (text, buffer) = render(&app);
+        assert!(
+            text.contains("branch lazyagents/api already exists; delete it or"),
+            "{text}"
+        );
+        assert!(text.contains("│choose another agent name"), "{text}");
+        let at = find_text(&buffer, buffer.area, "branch lazyagents/api");
+        assert_eq!(buffer[at].fg, app.theme.error);
+        assert!(text.contains(FORM_HINT), "{text}");
+
+        app.popup = Some(Popup::NewAgent(NewAgentForm {
+            submission: Submission::Sending(Box::new(protocol::Request::ListAgents)),
+            ..Default::default()
+        }));
+        let (text, _) = render(&app);
+        assert!(text.contains(SENDING_HINT), "{text}");
+        assert!(!text.contains(FORM_HINT), "{text}");
+
+        app.popup = Some(Popup::Rename {
+            agent: protocol::AgentId::random(),
+            input: "api".into(),
+            submission: Submission::Failed("an agent named api already exists".into()),
+        });
+        let (text, _) = render(&app);
+        assert!(text.contains("an agent named api already exists"), "{text}");
+
+        app.popup = Some(Popup::AddProject(ProjectForm {
+            path: "/nowhere".into(),
+            name: String::new(),
+            field: ProjectField::Path,
+            submission: Submission::Failed("/nowhere: no such directory".into()),
+        }));
+        let (text, _) = render(&app);
+        assert!(text.contains("/nowhere: no such directory"), "{text}");
+    }
+
+    #[test]
     fn new_agent_form_shows_command_only_for_custom() {
         use crate::app::{Field, NewAgentForm, Preset};
         let p = project("p");
@@ -2679,6 +2779,7 @@ mod tests {
             base: String::new(),
             prompt: String::new(),
             field: Field::Name,
+            submission: Default::default(),
         };
         app.popup = Some(Popup::NewAgent(form(Preset::Claude)));
         let (text, _) = render(&app);

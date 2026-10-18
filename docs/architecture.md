@@ -372,7 +372,10 @@ daemon last told it.
   `Incoming::Diff`, errors included, so a git error never looks like the failure of
   another request. Every other request also goes out without waiting for earlier replies,
   so input and server events keep flowing while the daemon works on a slow create, kill or
-  removal; a relay task passes those replies and errors on in request order. When the daemon closes the connection
+  removal; a relay task passes those replies and errors on in request order as
+  `Incoming::Reply`, each with the request it answers, so a form can tell its own answer
+  from another's. A bare `Ok` is dropped except for a removal, whose success the TUI
+  reports. When the daemon closes the connection
   it reports `Closed`, and the TUI exits with "the daemon stopped".
 - **Runtime and terminal guard** (`run.rs`): refuses to start without an interactive
   terminal, connects (starting the daemon if needed; on a protocol mismatch it opens the

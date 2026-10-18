@@ -6,8 +6,11 @@ use tokio::task::JoinHandle;
 #[derive(Debug)]
 pub enum Incoming {
     Server(ServerMessage),
-    Response(Response),
-    Failed(String),
+    /// The daemon's answer to `request`, or why there is none.
+    Reply {
+        request: Request,
+        result: Result<Response, String>,
+    },
     GitStat {
         id: AgentId,
         result: Result<GitStat, String>,
@@ -22,19 +25,20 @@ pub enum Incoming {
 
 /// Every request goes out without waiting for the replies before it, so input and server
 /// events keep flowing while the daemon works on a slow one. Git replies come back tagged
-/// with the agent as they arrive; every other reply is passed on in request order.
+/// with the agent as they arrive; every other reply is passed on in request order, with its
+/// request. A plain `Ok` is passed on only for a removal, whose success the UI reports.
 pub fn spawn(mut client: Client) -> (UnboundedSender<Request>, UnboundedReceiver<Incoming>) {
     let (requests_tx, mut requests) = mpsc::unbounded_channel::<Request>();
     let (incoming_tx, incoming) = mpsc::unbounded_channel();
     let (ordered_tx, mut ordered) =
-        mpsc::unbounded_channel::<JoinHandle<anyhow::Result<Response>>>();
+        mpsc::unbounded_channel::<(Request, JoinHandle<anyhow::Result<Response>>)>();
     let relay_tx = incoming_tx.clone();
     tokio::spawn(async move {
-        while let Some(reply) = ordered.recv().await {
+        while let Some((request, reply)) = ordered.recv().await {
             let result = reply
                 .await
                 .unwrap_or_else(|e| Err(anyhow::anyhow!("waiting for a reply: {e}")));
-            if !pass_on(&relay_tx, result) {
+            if !pass_on(&relay_tx, request, result) {
                 break;
             }
         }
@@ -61,11 +65,12 @@ pub fn spawn(mut client: Client) -> (UnboundedSender<Request>, UnboundedReceiver
                         });
                         continue;
                     }
+                    let sent = request.clone();
                     let reply = match client.send(request).await {
                         Ok(reply) => tokio::spawn(reply.wait()),
                         Err(e) => tokio::spawn(async move { Err(e) }),
                     };
-                    if ordered_tx.send(reply).is_err() {
+                    if ordered_tx.send((sent, reply)).is_err() {
                         break;
                     }
                 }
@@ -87,14 +92,28 @@ pub fn spawn(mut client: Client) -> (UnboundedSender<Request>, UnboundedReceiver
 }
 
 /// Passes a reply on to the UI; false once the UI is gone or the daemon closed the connection.
-fn pass_on(incoming: &UnboundedSender<Incoming>, result: anyhow::Result<Response>) -> bool {
+fn pass_on(
+    incoming: &UnboundedSender<Incoming>,
+    request: Request,
+    result: anyhow::Result<Response>,
+) -> bool {
     match result {
-        Ok(Response::Ok) => true,
-        Ok(response) => incoming.send(Incoming::Response(response)).is_ok(),
+        Ok(Response::Ok) if !matches!(request, Request::RemoveAgent { .. }) => true,
+        Ok(response) => incoming
+            .send(Incoming::Reply {
+                request,
+                result: Ok(response),
+            })
+            .is_ok(),
         Err(e) => {
             let message = format!("{e:#}");
             let closed = message.contains("closed the connection");
-            let sent = incoming.send(Incoming::Failed(message)).is_ok();
+            let sent = incoming
+                .send(Incoming::Reply {
+                    request,
+                    result: Err(message),
+                })
+                .is_ok();
             if closed {
                 let _ = incoming.send(Incoming::Closed);
             }
@@ -201,12 +220,15 @@ mod tests {
                 Incoming::Diff { id, result, .. } => {
                     assert_eq!((id, result), (agent, Err("diff failed".into())));
                 }
-                Incoming::Failed(message) => assert_eq!(message, "list failed"),
+                Incoming::Reply {
+                    request: Request::ListAgents,
+                    result,
+                } => assert_eq!(result, Err("list failed".into())),
                 other => panic!("unexpected {other:?}"),
             }
         }
         assert_eq!(
-            seen.iter().filter(|m| m.starts_with("Failed")).count(),
+            seen.iter().filter(|m| m.starts_with("Reply")).count(),
             1,
             "{seen:?}"
         );
@@ -276,14 +298,78 @@ mod tests {
         requests.send(Request::ListAgents).expect("send");
         let first = next().await;
         assert!(
-            matches!(&first, Incoming::Failed(message) if message == "kill failed"),
+            matches!(
+                &first,
+                Incoming::Reply { request: Request::KillAgent { .. }, result: Err(message) }
+                    if message == "kill failed"
+            ),
             "{first:?}"
         );
         let second = next().await;
         assert!(
-            matches!(&second, Incoming::Response(Response::Agents(agents)) if agents.is_empty()),
+            matches!(
+                &second,
+                Incoming::Reply { request: Request::ListAgents, result: Ok(Response::Agents(agents)) }
+                    if agents.is_empty()
+            ),
             "{second:?}"
         );
+        drop(requests);
+        fake.await.expect("fake server");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_a_removal_is_reported_when_it_succeeds_without_a_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = StatePaths::new(dir.path());
+        let listener = UnixListener::bind(paths.socket()).expect("bind");
+        let fake = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            write_message(
+                &mut stream,
+                &ServerMessage::Welcome {
+                    protocol_version: PROTOCOL_VERSION,
+                    daemon_version: "test".into(),
+                },
+            )
+            .await
+            .expect("welcome");
+            let _: Option<ClientMessage> = read_message(&mut stream).await.expect("hello");
+            while let Ok(Some(ClientMessage::Request { id, .. })) = read_message(&mut stream).await
+            {
+                let reply = ServerMessage::Response {
+                    id,
+                    result: Ok(Response::Ok),
+                };
+                write_message(&mut stream, &reply).await.expect("reply");
+            }
+        });
+        let client = Client::connect(&paths).await.expect("connect");
+        let (requests, mut incoming) = spawn(client);
+        let agent = AgentId::random();
+        let removal = Request::RemoveAgent {
+            id: agent,
+            remove_worktree: true,
+            force: false,
+            delete_branch: true,
+        };
+        for request in [
+            Request::KillAgent { id: agent },
+            removal.clone(),
+            Request::Unsubscribe,
+        ] {
+            requests.send(request).expect("send");
+        }
+        let reply = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+            .await
+            .expect("reply in time")
+            .expect("open");
+        assert!(
+            matches!(&reply, Incoming::Reply { request, result: Ok(Response::Ok) } if *request == removal),
+            "{reply:?}"
+        );
+        let quiet = tokio::time::timeout(Duration::from_millis(300), incoming.recv()).await;
+        assert!(quiet.is_err(), "{quiet:?}");
         drop(requests);
         fake.await.expect("fake server");
     }

@@ -38,8 +38,9 @@ pub enum Focus {
 }
 
 /// `Configured(i)` is the i-th preset from the config file; they follow the built-ins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Preset {
+    #[default]
     Claude,
     Shell,
     Custom,
@@ -80,8 +81,9 @@ impl Preset {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Field {
+    #[default]
     Name,
     Preset,
     Command,
@@ -90,7 +92,17 @@ pub enum Field {
     Prompt,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where a form stands with the daemon: being filled in, waiting for the reply to the request
+/// it sent, or refused with the daemon's error, which it shows until it is sent again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Submission {
+    #[default]
+    Editing,
+    Sending(Box<Request>),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewAgentForm {
     pub name: String,
     pub preset: Preset,
@@ -99,6 +111,7 @@ pub struct NewAgentForm {
     pub base: String,
     pub prompt: String,
     pub field: Field,
+    pub submission: Submission,
 }
 
 /// A run of whitespace, with any dashes touching it, becomes one dash; dashes typed without
@@ -156,6 +169,7 @@ pub struct ProjectForm {
     pub path: String,
     pub name: String,
     pub field: ProjectField,
+    pub submission: Submission,
 }
 
 impl ProjectForm {
@@ -253,6 +267,7 @@ pub enum Popup {
     Rename {
         agent: AgentId,
         input: String,
+        submission: Submission,
     },
     /// Row 0 is "new project"; row `i` is `App::project_candidates()[i - 1]`.
     ProjectPicker {
@@ -270,8 +285,10 @@ pub enum Popup {
         index: usize,
     },
     CommandPrompt(CommandRun),
-    /// Asking to run `project`'s worktree setup `script` for the agent `create` describes.
+    /// Asking to run `project`'s worktree setup `script` for the agent `create` describes, as
+    /// filled in on `form`.
     ApproveSetup {
+        form: Box<NewAgentForm>,
         create: Box<CreateAgent>,
         project: PathBuf,
         script: String,
@@ -301,6 +318,30 @@ pub enum Popup {
         lines: Vec<String>,
         scroll: usize,
     },
+}
+
+impl Popup {
+    fn submission(&self) -> Option<&Submission> {
+        match self {
+            Popup::NewAgent(form) => Some(&form.submission),
+            Popup::AddProject(form) => Some(&form.submission),
+            Popup::Rename { submission, .. } => Some(submission),
+            _ => None,
+        }
+    }
+
+    fn submission_mut(&mut self) -> Option<&mut Submission> {
+        match self {
+            Popup::NewAgent(form) => Some(&mut form.submission),
+            Popup::AddProject(form) => Some(&mut form.submission),
+            Popup::Rename { submission, .. } => Some(submission),
+            _ => None,
+        }
+    }
+
+    pub fn is_sending(&self) -> bool {
+        matches!(self.submission(), Some(Submission::Sending(_)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -821,6 +862,38 @@ impl App {
         effects
     }
 
+    /// The answer to the request the open form waits for settles the form: success closes it
+    /// and a refusal stays in it. Any other answer updates the model or the status line.
+    pub fn apply_reply(
+        &mut self,
+        request: &Request,
+        result: Result<Response, String>,
+    ) -> Vec<Effect> {
+        let form = self
+            .popup
+            .as_mut()
+            .and_then(Popup::submission_mut)
+            .filter(|s| matches!(s, Submission::Sending(sent) if **sent == *request));
+        match (form, result) {
+            (Some(_), Ok(response)) => {
+                self.popup = None;
+                self.apply_response(response)
+            }
+            (Some(submission), Err(error)) => {
+                *submission = Submission::Failed(error);
+                if matches!(request, Request::CreateAgent(_)) {
+                    self.pending_select = None;
+                }
+                Vec::new()
+            }
+            (None, Ok(response)) => self.apply_response(response),
+            (None, Err(error)) => {
+                self.request_failed(error);
+                Vec::new()
+            }
+        }
+    }
+
     pub fn apply_response(&mut self, response: Response) -> Vec<Effect> {
         let before = self.selected_agent().map(|a| a.id);
         self.pending_remove = None;
@@ -1233,6 +1306,13 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return Vec::new();
         }
+        if !self.too_small && self.popup.as_ref().is_some_and(Popup::is_sending) {
+            if key.code == KeyCode::Esc {
+                self.interactions += 1;
+                self.popup = None;
+            }
+            return Vec::new();
+        }
         self.interactions += 1;
         if self.too_small {
             return self.on_too_small_key(key);
@@ -1613,7 +1693,7 @@ impl App {
     }
 
     pub fn on_paste(&mut self, text: String) -> Vec<Effect> {
-        if self.too_small {
+        if self.too_small || self.popup.as_ref().is_some_and(Popup::is_sending) {
             return Vec::new();
         }
         if self.popup.is_none() {
@@ -1993,6 +2073,7 @@ impl App {
                     self.popup = Some(Popup::Rename {
                         agent: agent.id,
                         input: agent.name.clone(),
+                        submission: Submission::Editing,
                     });
                 }
             }
@@ -2070,6 +2151,7 @@ impl App {
             path: self.cwd.display().to_string(),
             name: String::new(),
             field: ProjectField::Path,
+            submission: Submission::Editing,
         })
     }
 
@@ -2131,15 +2213,7 @@ impl App {
             self.fail(format!("add a project first ({add})"));
             return;
         }
-        self.popup = Some(Popup::NewAgent(NewAgentForm {
-            name: String::new(),
-            preset: Preset::Claude,
-            command: String::new(),
-            worktree: false,
-            base: String::new(),
-            prompt: String::new(),
-            field: Field::Name,
-        }));
+        self.popup = Some(Popup::NewAgent(NewAgentForm::default()));
     }
 
     fn next_attention(&mut self) {
@@ -2199,11 +2273,12 @@ impl App {
             Popup::Commands { index } => self.on_commands_key(index, key),
             Popup::Finish { agent, index } => self.on_finish_key(agent, index, key),
             Popup::ApproveSetup {
+                form,
                 create,
                 project,
                 script,
                 scroll,
-            } => self.on_approve_setup_key(create, project, script, scroll, key),
+            } => self.on_approve_setup_key(form, create, project, script, scroll, key),
             Popup::Comment {
                 agent,
                 location,
@@ -2265,14 +2340,30 @@ impl App {
                     Vec::new()
                 }
             },
-            Popup::Rename { agent, mut input } => match edit(&mut input, &key) {
-                Edit::Submit => vec![Effect::Send(Request::RenameAgent {
-                    id: agent,
-                    name: normalize_name(&input),
-                })],
+            Popup::Rename {
+                agent,
+                mut input,
+                submission,
+            } => match edit(&mut input, &key) {
+                Edit::Submit => {
+                    let request = Request::RenameAgent {
+                        id: agent,
+                        name: normalize_name(&input),
+                    };
+                    self.popup = Some(Popup::Rename {
+                        agent,
+                        input,
+                        submission: Submission::Sending(Box::new(request.clone())),
+                    });
+                    vec![Effect::Send(request)]
+                }
                 Edit::Cancel => Vec::new(),
                 Edit::Continue => {
-                    self.popup = Some(Popup::Rename { agent, input });
+                    self.popup = Some(Popup::Rename {
+                        agent,
+                        input,
+                        submission,
+                    });
                     Vec::new()
                 }
             },
@@ -2373,10 +2464,13 @@ impl App {
             _ => match edit(form.focused(), key) {
                 Edit::Submit => {
                     let name = form.name.trim();
-                    return vec![Effect::Send(Request::AddProject {
+                    let request = Request::AddProject {
                         path: self.project_path(form.path.trim()),
                         name: (!name.is_empty()).then(|| name.to_string()),
-                    })];
+                    };
+                    form.submission = Submission::Sending(Box::new(request.clone()));
+                    self.popup = Some(Popup::AddProject(form));
+                    return vec![Effect::Send(request)];
                 }
                 Edit::Cancel => return Vec::new(),
                 Edit::Continue => {}
@@ -2462,7 +2556,8 @@ impl App {
             Preset::Custom => {
                 let command = form.command.trim().to_string();
                 if command.is_empty() {
-                    self.fail("enter a command");
+                    let mut form = form;
+                    form.submission = Submission::Failed("enter a command".into());
                     self.popup = Some(Popup::NewAgent(form));
                     return Vec::new();
                 }
@@ -2501,7 +2596,8 @@ impl App {
         if let (Some(_), Some(path)) = (&create.worktree, project_path) {
             match project_config::worktree_setup(&path) {
                 Err(error) => {
-                    self.fail(error);
+                    let mut form = form;
+                    form.submission = Submission::Failed(error);
                     self.popup = Some(Popup::NewAgent(form));
                     return Vec::new();
                 }
@@ -2512,6 +2608,7 @@ impl App {
                 }
                 Ok(Some(script)) => {
                     self.popup = Some(Popup::ApproveSetup {
+                        form: Box::new(form),
                         create: Box::new(create),
                         project: path,
                         script,
@@ -2522,16 +2619,19 @@ impl App {
                 Ok(None) => {}
             }
         }
-        self.send_create(create)
+        self.send_create(form, create)
     }
 
-    fn send_create(&mut self, create: CreateAgent) -> Vec<Effect> {
+    fn send_create(&mut self, mut form: NewAgentForm, create: CreateAgent) -> Vec<Effect> {
         self.pending_select = Some(PendingCreate {
             project: create.project,
             name: create.name.clone(),
             interactions: self.interactions,
         });
-        vec![Effect::Send(Request::CreateAgent(create))]
+        let request = Request::CreateAgent(create);
+        form.submission = Submission::Sending(Box::new(request.clone()));
+        self.popup = Some(Popup::NewAgent(form));
+        vec![Effect::Send(request)]
     }
 
     /// `y` runs the script and remembers it for the project, `s` creates the agent without
@@ -2540,6 +2640,7 @@ impl App {
     /// other keys scroll.
     fn on_approve_setup_key(
         &mut self,
+        form: Box<NewAgentForm>,
         mut create: Box<CreateAgent>,
         project: PathBuf,
         script: String,
@@ -2552,12 +2653,12 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let scroll = match (key.code, ctrl) {
             (KeyCode::Char('n') | KeyCode::Esc, false) => return Vec::new(),
-            (KeyCode::Char('s'), false) => return self.send_create(*create),
+            (KeyCode::Char('s'), false) => return self.send_create(*form, *create),
             (KeyCode::Char('y'), false) if limits.is_some() && scroll >= last => {
                 approved::approve(&mut self.approved_setups, &project, &script);
                 create.setup = Some(script.clone());
                 let mut effects = vec![Effect::ApproveSetup { project, script }];
-                effects.extend(self.send_create(*create));
+                effects.extend(self.send_create(*form, *create));
                 return effects;
             }
             (KeyCode::Char('j') | KeyCode::Down, false) => scroll + 1,
@@ -2571,6 +2672,7 @@ impl App {
             _ => scroll,
         };
         self.popup = Some(Popup::ApproveSetup {
+            form,
             create,
             project,
             script,
@@ -4102,6 +4204,7 @@ pub(crate) mod tests {
                 path: "/work".into(),
                 name: String::new(),
                 field: ProjectField::Path,
+                submission: Submission::Editing,
             }))
         );
     }
@@ -4386,6 +4489,7 @@ pub(crate) mod tests {
         let (mut app, _) = loaded(vec![p, q], agents);
         let _ = app.on_key(key('n'));
         assert_eq!(created(app.on_key(code(KeyCode::Enter))).name, "claude-2");
+        let _ = app.on_key(code(KeyCode::Esc));
 
         let _ = app.on_key(key('n'));
         type_text(&mut app, "   ");
@@ -4405,14 +4509,14 @@ pub(crate) mod tests {
         );
     }
 
-    fn submit_shell_agent(app: &mut App, name: &str) -> AgentInfo {
+    fn submit_shell_agent(app: &mut App, name: &str) -> (AgentInfo, Request) {
         let project = app.selected_project().map(|p| p.id).expect("project");
         let _ = app.on_key(key('n'));
         type_text(app, name);
         let _ = app.on_key(code(KeyCode::Tab));
         let _ = app.on_key(code(KeyCode::Right));
-        let _ = created(app.on_key(code(KeyCode::Enter)));
-        AgentInfo {
+        let request = Request::CreateAgent(created(app.on_key(code(KeyCode::Enter))));
+        let info = AgentInfo {
             id: AgentId::random(),
             project,
             name: name.into(),
@@ -4425,17 +4529,19 @@ pub(crate) mod tests {
             title: None,
             waiting_for: None,
             usage: None,
-        }
+        };
+        (info, request)
     }
 
     #[test]
     fn created_agent_is_selected_and_focused_by_the_create_response() {
         let (mut app, a, _) = two_agents();
-        let info = submit_shell_agent(&mut app, "zed");
+        let (info, request) = submit_shell_agent(&mut app, "zed");
         let _ = app.apply_server(ServerMessage::AgentUpdated(info.clone()));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
         assert_eq!(app.focus, Focus::Agents);
-        let effects = app.apply_response(Response::Agent(info.clone()));
+        let effects = app.apply_reply(&request, Ok(Response::Agent(info.clone())));
+        assert_eq!(app.popup, None);
         assert_eq!(app.selected_agent().map(|x| x.id), Some(info.id));
         assert_eq!(app.focus, Focus::Pane);
         assert_eq!(
@@ -4448,8 +4554,9 @@ pub(crate) mod tests {
     fn failed_create_never_selects_a_same_named_agent_later() {
         let (mut app, a, b) = two_agents();
         let _ = app.on_key(key('j'));
-        let _ = submit_shell_agent(&mut app, "alpha");
-        app.request_failed("an agent named alpha already exists");
+        let (_, request) = submit_shell_agent(&mut app, "alpha");
+        let _ = app.apply_reply(&request, Err("an agent named alpha already exists".into()));
+        let _ = app.on_key(code(KeyCode::Esc));
         let waiting = AgentInfo {
             status: Status::NeedsInput,
             ..a.clone()
@@ -4458,21 +4565,144 @@ pub(crate) mod tests {
         let _ = app.apply_response(Response::Agent(waiting));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
         assert_eq!(app.focus, Focus::Agents);
-        assert_eq!(
-            app.message.as_ref().map(|(m, _)| m.as_str()),
-            Some("an agent named alpha already exists")
-        );
     }
 
     #[test]
     fn create_response_after_moving_does_not_steal_the_selection_or_focus() {
         let (mut app, _, b) = two_agents();
-        let info = submit_shell_agent(&mut app, "zed");
+        let (info, request) = submit_shell_agent(&mut app, "zed");
+        let _ = app.on_key(code(KeyCode::Esc));
         let _ = app.on_key(key('j'));
         let _ = app.apply_server(ServerMessage::AgentUpdated(info.clone()));
-        let _ = app.apply_response(Response::Agent(info));
+        let _ = app.apply_reply(&request, Ok(Response::Agent(info)));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
         assert_eq!(app.focus, Focus::Agents);
+    }
+
+    fn sent(effects: &[Effect]) -> Request {
+        match effects {
+            [Effect::Send(request)] => request.clone(),
+            other => panic!("expected one request: {other:?}"),
+        }
+    }
+
+    fn submission(app: &App) -> Submission {
+        match &app.popup {
+            Some(Popup::NewAgent(form)) => form.submission.clone(),
+            Some(Popup::AddProject(form)) => form.submission.clone(),
+            Some(Popup::Rename { submission, .. }) => submission.clone(),
+            other => panic!("no form: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_new_agent_keeps_the_form_with_the_input_and_the_error() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "dup");
+        let request = sent(&app.on_key(code(KeyCode::Enter)));
+        assert_eq!(
+            submission(&app),
+            Submission::Sending(Box::new(request.clone()))
+        );
+        type_text(&mut app, "x");
+        let _ = app.on_paste("pasted".into());
+        assert_eq!(form(&app).name, "dup");
+
+        let refusal = "an agent named dup already exists";
+        let _ = app.apply_reply(&request, Err(refusal.into()));
+        assert_eq!(form(&app).name, "dup");
+        assert_eq!(submission(&app), Submission::Failed(refusal.into()));
+        assert_eq!(app.message, None);
+
+        type_text(&mut app, "2");
+        let request = sent(&app.on_key(code(KeyCode::Enter)));
+        let Request::CreateAgent(create) = &request else {
+            panic!("{request:?}")
+        };
+        assert_eq!(create.name, "dup2");
+        let info = agent(&app.projects[0], "dup2", Status::Starting);
+        let _ = app.apply_reply(&request, Ok(Response::Agent(info.clone())));
+        assert_eq!(app.popup, None);
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(info.id));
+        assert_eq!(app.focus, Focus::Pane);
+    }
+
+    #[test]
+    fn escape_while_a_form_waits_leaves_its_reply_to_the_status_line() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        type_text(&mut app, "dup");
+        let request = sent(&app.on_key(code(KeyCode::Enter)));
+        let _ = app.on_key(code(KeyCode::Esc));
+        assert_eq!(app.popup, None);
+        let _ = app.on_key(key('n'));
+        let _ = app.apply_reply(&request, Err("refused".into()));
+        assert_eq!(submission(&app), Submission::Editing);
+        assert_eq!(
+            app.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("refused")
+        );
+    }
+
+    #[test]
+    fn a_refused_rename_keeps_the_popup_with_the_error() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(key('R'));
+        type_text(&mut app, "2");
+        let request = sent(&app.on_key(code(KeyCode::Enter)));
+        let refusal = "an agent named alpha2 already exists";
+        let _ = app.apply_reply(&request, Err(refusal.into()));
+        assert!(
+            matches!(&app.popup, Some(Popup::Rename { input, .. }) if input == "alpha2"),
+            "{:?}",
+            app.popup
+        );
+        assert_eq!(submission(&app), Submission::Failed(refusal.into()));
+        let request = sent(&app.on_key(code(KeyCode::Enter)));
+        let renamed = AgentInfo {
+            name: "alpha2".into(),
+            ..a
+        };
+        let _ = app.apply_reply(&request, Ok(Response::Agent(renamed)));
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn a_refused_project_keeps_the_form_with_the_error() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('a'));
+        let _ = app.on_key(ctrl('u'));
+        type_text(&mut app, "nowhere");
+        let request = sent(&app.on_key(code(KeyCode::Enter)));
+        let refusal = "/work/nowhere: No such file or directory";
+        let _ = app.apply_reply(&request, Err(refusal.into()));
+        assert!(
+            matches!(&app.popup, Some(Popup::AddProject(form)) if form.path == "nowhere"),
+            "{:?}",
+            app.popup
+        );
+        assert_eq!(submission(&app), Submission::Failed(refusal.into()));
+        let request = sent(&app.on_key(code(KeyCode::Enter)));
+        let added = project("nowhere");
+        let _ = app.apply_reply(&request, Ok(Response::Project(added.clone())));
+        assert_eq!(app.popup, None);
+        assert_eq!(app.selected_project().map(|p| p.id), Some(added.id));
+    }
+
+    #[test]
+    fn a_custom_preset_without_a_command_says_so_in_the_form() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('n'));
+        let _ = app.on_key(code(KeyCode::Tab));
+        let _ = app.on_key(code(KeyCode::Left));
+        assert_eq!(form(&app).preset, Preset::Custom);
+        assert!(app.on_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(
+            submission(&app),
+            Submission::Failed("enter a command".into())
+        );
+        assert_eq!(app.message, None);
     }
 
     #[test]
@@ -4503,11 +4733,12 @@ pub(crate) mod tests {
     #[test]
     fn create_reply_without_a_preceding_event_adds_and_selects_the_agent() {
         let (mut app, _, _) = two_agents();
-        let info = submit_shell_agent(&mut app, "zed");
-        let _ = app.apply_response(Response::Agent(AgentInfo {
+        let (info, request) = submit_shell_agent(&mut app, "zed");
+        let working = AgentInfo {
             status: Status::Working,
             ..info.clone()
-        }));
+        };
+        let _ = app.apply_reply(&request, Ok(Response::Agent(working)));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(info.id));
         assert_eq!(app.focus, Focus::Pane);
     }
@@ -4831,6 +5062,7 @@ pub(crate) mod tests {
         type_text(&mut app, "new");
         let c = created(app.on_key(code(KeyCode::Enter)));
         assert_eq!(c.project, q.id);
+        let _ = app.on_key(code(KeyCode::Esc));
         let _ = app.on_key(key('A'));
         assert_eq!(app.view, AgentView::Project);
     }
@@ -7034,6 +7266,7 @@ mod setup_tests {
             project: dir.path().to_path_buf(),
             script: "npm install".into(),
         }));
+        assert!(app.popup.as_ref().is_some_and(Popup::is_sending));
         assert_eq!(created_setup(&effects), Some(Some("npm install".into())));
     }
 
@@ -7045,8 +7278,9 @@ mod setup_tests {
             script: "npm install".into(),
         }];
         let effects = submit_worktree_agent(&mut app);
-        assert_eq!(app.popup, None);
+        assert!(app.popup.as_ref().is_some_and(Popup::is_sending));
         assert_eq!(created_setup(&effects), Some(Some("npm install".into())));
+        let _ = app.on_key(code(KeyCode::Esc));
 
         std::fs::write(
             dir.path().join(".lazyagents.toml"),

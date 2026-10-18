@@ -32,7 +32,7 @@ async fn requests_events_and_closure_flow_through_the_actor() {
 
     requests.send(Request::ListProjects).expect("send");
     assert!(
-        matches!(next(&mut incoming).await, Incoming::Response(Response::Projects(p)) if p.is_empty())
+        matches!(next(&mut incoming).await, Incoming::Reply { result: Ok(Response::Projects(p)), .. } if p.is_empty())
     );
 
     let project_dir = tempfile::tempdir().expect("project");
@@ -47,7 +47,10 @@ async fn requests_events_and_closure_flow_through_the_actor() {
     while !(saw_event && saw_response) {
         match next(&mut incoming).await {
             Incoming::Server(ServerMessage::ProjectsChanged(_)) => saw_event = true,
-            Incoming::Response(Response::Project(_)) => saw_response = true,
+            Incoming::Reply {
+                result: Ok(Response::Project(_)),
+                ..
+            } => saw_response = true,
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -58,7 +61,7 @@ async fn requests_events_and_closure_flow_through_the_actor() {
         })
         .expect("send");
     assert!(
-        matches!(next(&mut incoming).await, Incoming::Failed(e) if e.contains("unknown agent"))
+        matches!(next(&mut incoming).await, Incoming::Reply { result: Err(e), .. } if e.contains("unknown agent"))
     );
 
     requests.send(Request::Shutdown).expect("send");

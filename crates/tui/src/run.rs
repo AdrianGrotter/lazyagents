@@ -289,17 +289,13 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
             },
             message = incoming.recv() => match message {
                 Some(Incoming::Server(message)) => app.apply_server(message),
-                Some(Incoming::Response(response)) => app.apply_response(response),
+                Some(Incoming::Reply { request, result }) => app.apply_reply(&request, result),
                 Some(Incoming::GitStat { id, result }) => {
                     app.apply_git_stat(id, result);
                     Vec::new()
                 }
                 Some(Incoming::Diff { id, scope, result }) => {
                     app.apply_scoped_diff(id, scope, result);
-                    Vec::new()
-                }
-                Some(Incoming::Failed(error)) => {
-                    app.request_failed(error);
                     Vec::new()
                 }
                 Some(Incoming::Closed) | None => anyhow::bail!("the daemon stopped"),
