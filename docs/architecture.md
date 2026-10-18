@@ -50,13 +50,14 @@ Subcommands:
   in the TUI.
 - `lazyagents kill|restart|rm <agent>`, `lazyagents rename <agent> <name>`. An `<agent>` is
   its id, `<project>/<name>`, a name unique across projects, or an id prefix of at least
-  4 hex characters. `rm` keeps
-  a worktree agent's worktree and branch and says so: `removed <name>; kept worktree
-  <path> (branch <branch>)`.
+  4 hex characters. `rm` keeps a worktree agent's worktree and branch and says so:
+  `removed <name>; kept worktree <path> (branch <branch>)`.
 - `lazyagents shutdown` — stop the daemon and every agent.
 
 Commands that talk to the daemon start it if its socket is missing or dead, except
-`shutdown`, which only connects to a running one. A state directory whose `daemon.sock` path would exceed the platform's socket limit (104 bytes on macOS, 108 on Linux) is refused before anything starts (ADR 0023). The auto-started daemon runs in its own
+`shutdown`, which only connects to a running one. A state directory whose `daemon.sock`
+path would exceed the platform's socket limit (104 bytes on macOS, 108 on Linux) is
+refused before anything starts (ADR 0023). The auto-started daemon runs in its own
 session without a controlling terminal, from `/`, with null stdio and without the caller's
 terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
 

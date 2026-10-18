@@ -132,7 +132,9 @@ agent is rejected with
 merged` in place of `stopping`). While a worktree `CreateAgent` runs, its name is reserved: a create
 of the same name in the project, or a `RenameAgent` to it, is rejected with `an agent named
 <name> is being created in this project`, and `RemoveProject` of its project is rejected.
-A worktree left by an unfinished create that git would not remove keeps its name reserved the same way, but the refusals (of a create or rename to the name, and of `RemoveProject`) name the leftover worktree path and say it is removed at the next start.
+A worktree left by an unfinished create that git would not remove keeps its name
+reserved the same way, but the refusals (of a create or rename to the name, and of
+`RemoveProject`) name the leftover worktree path and say it is removed at the next start.
 A `Shutdown` that arrives meanwhile answers such a create with `the daemon shut down before
 <name> started; its worktree was removed` (`its worktree is removed at the next start` when
 the create still runs 13 s after shutdown began), and a restart with `the daemon is
