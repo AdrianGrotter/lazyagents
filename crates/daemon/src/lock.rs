@@ -3,6 +3,7 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use protocol::lockfile;
@@ -22,7 +23,7 @@ impl InstanceLock {
             .truncate(false)
             .open(path)
             .with_context(|| format!("opening {}", path.display()))?;
-        match file.try_lock() {
+        match try_lock_for(&file, PROBE_WAIT) {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
                 let mut holder = String::new();
@@ -47,8 +48,63 @@ impl InstanceLock {
     }
 }
 
+/// A client checking whether a daemon runs takes the lock for a moment; this long covers it.
+const PROBE_WAIT: Duration = Duration::from_millis(200);
+
+fn try_lock_for(file: &File, wait: Duration) -> Result<(), TryLockError> {
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
 impl Drop for InstanceLock {
     fn drop(&mut self) {
         let _ = self.file.set_len(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probe(path: &Path) -> File {
+        let file = File::open(path).expect("open");
+        file.try_lock().expect("probe lock");
+        file
+    }
+
+    #[test]
+    fn a_lock_probed_meanwhile_is_still_acquired() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("daemon.lock");
+        std::fs::write(&path, "").expect("create");
+        let probe = probe(&path);
+        let released = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(probe);
+        });
+        InstanceLock::acquire(&path).expect("acquired after the probe");
+        released.join().expect("join");
+    }
+
+    #[test]
+    fn a_lock_held_by_another_daemon_is_refused_soon() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("daemon.lock");
+        let _held = InstanceLock::acquire(&path).expect("first");
+        let started = Instant::now();
+        let err = InstanceLock::acquire(&path).err().expect("second refused");
+        assert!(format!("{err:#}").contains("already running"), "{err:#}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

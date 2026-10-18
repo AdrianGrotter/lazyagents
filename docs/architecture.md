@@ -64,8 +64,10 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   `ps -o lstart=` prints it (just the pid when `ps` cannot tell). A client trusts the
   pid only while the lock is held and, when a start time is recorded, `ps` still reports
   that start time for the pid, so an entry outliving its daemon never names a recycled
-  pid. A pid-only file, as older daemons write, is trusted on the lock alone. A second
-  daemon fails with "a daemon is already running (pid N)". A leftover socket nobody
+  pid. A pid-only file, as older daemons write, is trusted on the lock alone. A client
+  checking whether a daemon runs takes the lock for a moment, so a starting daemon tries
+  for up to 200 ms before it gives up; a second daemon then fails with "a daemon is
+  already running (pid N)". A leftover socket nobody
   answers on is removed only while the lock is held.
 - **Reading start times.** Every start time, in the lock file and in process tracking,
   comes from one `ps` command (`protocol::lockfile::ps`): `/bin/ps` when it exists, else
