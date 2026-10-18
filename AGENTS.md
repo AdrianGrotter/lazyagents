@@ -11,6 +11,7 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 ## Commands
 
 - `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, tmux harness self-test, TUI smoke run (`scripts/smoke-tui.sh`), TUI hangup test (`scripts/test-tui-hangup.sh`), worktree smoke run (`scripts/smoke-worktree.sh`). The done gate. It takes 3-6 minutes: run it with a 10-minute timeout or in the background.
+- `just deny`: `cargo deny check` for advisories, licenses and sources; needs the network, so it is not part of `just check`
 - `just fmt`, `just lint`, `just test`, `just test-hooks`, `just smoke-tui`, `just test-tui-hangup`, `just smoke-worktree`
 - `just dev [args]`: run the TUI (no args) or a CLI subcommand (`just dev ls`) from any directory. For experiments, point `LAZYAGENTS_STATE_DIR` at a temp dir so your real agents stay untouched.
 - `just install`: release build to `~/.local/bin/lazyagents`, the user's real binary. Its path is written into running Claude agents' hook settings, so it stays fixed; install only when the user asks.

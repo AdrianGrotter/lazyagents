@@ -14,6 +14,9 @@ lint:
 test:
     cargo nextest run --workspace --locked --no-tests=pass
 
+deny:
+    cargo deny check
+
 test-hooks:
     scripts/test-hooks.sh
 

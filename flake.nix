@@ -27,7 +27,6 @@
             toolchain
             pkgs.just
             pkgs.cargo-nextest
-            pkgs.cargo-insta
             pkgs.cargo-deny
             pkgs.jq
             pkgs.tmux
