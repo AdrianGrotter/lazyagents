@@ -130,6 +130,41 @@ fn registered(repo: &Path, path: &Path) -> Option<bool> {
     )
 }
 
+/// A short account of why creating the worktree at `path` on `branch` failed, for the
+/// usual causes; `None` when git's own words in `raw` are the best account. Matches
+/// git's English messages, so a localized git always gets `None`.
+pub fn worktree_failure(
+    raw: &str,
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    base: Option<&str>,
+) -> Option<String> {
+    if raw.contains("not a git repository") {
+        return Some(format!("{} is not a git repository", repo.display()));
+    }
+    if raw.contains(&format!("a branch named '{branch}' already exists")) {
+        return Some(format!(
+            "branch {branch} already exists; delete it or choose another agent name"
+        ));
+    }
+    if let Some(base) = base
+        && raw.contains(&format!("invalid reference: {base}"))
+    {
+        return Some(format!("base {base} not found"));
+    }
+    if raw.contains("ambiguous argument 'HEAD'") {
+        return Some(format!("{} has no commits to branch from", repo.display()));
+    }
+    if raw.contains(&format!("'{}' already exists", path.display())) {
+        return Some(format!(
+            "worktree directory {} already exists",
+            path.display()
+        ));
+    }
+    None
+}
+
 fn undo_add(repo: &Path, path: &Path, branch: &str, branch_existed: bool) {
     let registered = registered(repo, path).unwrap_or(false);
     let removed = registered && remove_worktree(repo, path, true).is_ok();

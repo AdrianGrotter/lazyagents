@@ -918,9 +918,17 @@ impl Daemon {
         }
         let direnv = self.direnv.clone();
         let (job_project, job_worktree) = (creation.project.clone(), worktree.clone());
+        let requested_base = plan.requested_base;
         self.off_loop(
             "worktree",
-            move || add_worktree(&job_project, &job_worktree, direnv.as_deref()),
+            move || {
+                add_worktree(
+                    &job_project,
+                    &job_worktree,
+                    requested_base.as_deref(),
+                    direnv.as_deref(),
+                )
+            },
             move |daemon, made| {
                 let Creation {
                     project,
@@ -2127,6 +2135,7 @@ struct Creation {
 
 struct PlannedWorktree {
     worktree: WorktreeInfo,
+    requested_base: Option<String>,
     fresh: bool,
 }
 
@@ -2221,17 +2230,6 @@ fn plan_worktree(
     name: &str,
     request: WorktreeRequest,
 ) -> Result<PlannedWorktree, String> {
-    let branch = format!("lazyagents/{name}");
-    git::check_branch(&branch).map_err(|e| format!("{e:#}"))?;
-    let base = match request.base.filter(|b| !b.trim().is_empty()) {
-        Some(base) => base.trim().to_string(),
-        None => match git::current_branch(&project.path).map_err(|e| format!("{e:#}"))? {
-            detached if detached == "HEAD" => {
-                git::head_commit(&project.path).map_err(|e| format!("{e:#}"))?
-            }
-            branch => branch,
-        },
-    };
     let state = state
         .canonicalize()
         .map_err(|e| format!("{}: {e}", state.display()))?;
@@ -2240,10 +2238,25 @@ fn plan_worktree(
         .join("worktrees")
         .join(format!("{}-{}", project.name.replace('/', "-"), &id[..8]))
         .join(name);
+    let branch = format!("lazyagents/{name}");
+    let requested_base = request
+        .base
+        .filter(|b| !b.trim().is_empty())
+        .map(|b| b.trim().to_string());
+    let failure = |e| worktree_failure(e, project, &path, &branch, requested_base.as_deref());
+    git::check_branch(&branch).map_err(failure)?;
+    let base = match requested_base.clone() {
+        Some(base) => base,
+        None => match git::current_branch(&project.path).map_err(failure)? {
+            detached if detached == "HEAD" => git::head_commit(&project.path).map_err(failure)?,
+            branch => branch,
+        },
+    };
     let fresh = path.symlink_metadata().is_err()
-        && !git::branch_exists(&project.path, &branch).map_err(|e| format!("{e:#}"))?;
+        && !git::branch_exists(&project.path, &branch).map_err(failure)?;
     Ok(PlannedWorktree {
         worktree: WorktreeInfo { path, branch, base },
+        requested_base,
         fresh,
     })
 }
@@ -2253,6 +2266,7 @@ fn plan_worktree(
 fn add_worktree(
     project: &Project,
     worktree: &WorktreeInfo,
+    requested_base: Option<&str>,
     direnv: Option<&Path>,
 ) -> Result<(), String> {
     git::add_worktree(
@@ -2261,7 +2275,7 @@ fn add_worktree(
         &worktree.branch,
         &worktree.base,
     )
-    .map_err(|e| format!("{e:#}"))?;
+    .map_err(|e| worktree_failure(e, project, &worktree.path, &worktree.branch, requested_base))?;
     match git::copy_worktree_includes(&project.path, &worktree.path) {
         Ok(copied) if !copied.is_empty() => {
             tracing::info!(files = ?copied, "copied .worktreeinclude files")
@@ -2281,6 +2295,20 @@ fn add_worktree(
         }
     }
     Ok(())
+}
+
+/// Logs git's own text and answers a short sentence for the usual causes, or git's text
+/// for any other.
+fn worktree_failure(
+    e: anyhow::Error,
+    project: &Project,
+    path: &Path,
+    branch: &str,
+    requested_base: Option<&str>,
+) -> String {
+    let raw = format!("{e:#}");
+    tracing::warn!(error = %raw, "creating a worktree failed");
+    git::worktree_failure(&raw, &project.path, path, branch, requested_base).unwrap_or(raw)
 }
 
 fn inherits_direnv_env(direnv: &Path) -> bool {

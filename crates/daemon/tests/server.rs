@@ -2436,7 +2436,10 @@ async fn worktree_in_non_git_project_is_an_error() {
     let err = create_in_worktree(&mut conn, &project, "nogit", &["sleep", "30"])
         .await
         .expect_err("not a repo");
-    assert!(err.contains("not a git repository"), "{err}");
+    assert_eq!(
+        err,
+        format!("{} is not a git repository", project.path.display())
+    );
     assert!(list_agents(&mut conn).await.is_empty());
     assert!(!daemon.path().join("worktrees").exists());
 }
@@ -2747,7 +2750,10 @@ async fn a_branch_that_existed_before_survives_a_failed_add() {
     let err = create_in_worktree(&mut conn, &project, "x", &["sleep", "30"])
         .await
         .expect_err("the branch exists");
-    assert!(err.contains("lazyagents/x"), "{err}");
+    assert_eq!(
+        err,
+        "branch lazyagents/x already exists; delete it or choose another agent name"
+    );
     assert!(list_agents(&mut conn).await.is_empty());
     assert_eq!(
         common::git(repo.path(), &["rev-parse", "lazyagents/x"]),
@@ -2768,7 +2774,10 @@ async fn an_existing_worktree_path_is_left_alone() {
     let err = create_in_worktree(&mut conn, &project, "taken", &["sleep", "30"])
         .await
         .expect_err("path exists");
-    assert!(err.contains("already exists"), "{err}");
+    assert_eq!(
+        err,
+        format!("worktree directory {} already exists", path.display())
+    );
     assert!(list_agents(&mut conn).await.is_empty());
     assert_eq!(
         common::git(repo.path(), &["branch", "--list", "lazyagents/*"]),
@@ -2777,6 +2786,37 @@ async fn an_existing_worktree_path_is_left_alone() {
     assert_eq!(
         std::fs::read_to_string(path.join("mine.txt")).expect("untouched"),
         "keep me\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_base_is_named() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, _repo) = add_repo_project(&mut conn).await;
+    let mut request = create_in_worktree_request(&project, "based", &["sleep", "30"]);
+    if let Request::CreateAgent(create) = &mut request {
+        create.worktree = Some(WorktreeRequest {
+            base: Some("nosuch".into()),
+        });
+    }
+    let err = conn.request(request).await.expect_err("no such base");
+    assert_eq!(err, "base nosuch not found");
+    assert!(list_agents(&mut conn).await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_without_commits_says_so() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, dir) = add_project(&mut conn).await;
+    common::git(dir.path(), &["init", "-q", "-b", "main"]);
+    let err = create_in_worktree(&mut conn, &project, "empty", &["sleep", "30"])
+        .await
+        .expect_err("nothing to branch from");
+    assert_eq!(
+        err,
+        format!("{} has no commits to branch from", project.path.display())
     );
 }
 

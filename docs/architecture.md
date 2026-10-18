@@ -253,7 +253,11 @@ starting with `-` is rejected. The branch name is checked with `git check-ref-fo
 A failure before or during the add (project not a git repo, invalid branch name, branch
 exists, base missing, a failing checkout hook) answers `Err` and leaves no agent, no new
 branch and no directory: an add that fails after git created the branch or the checkout
-has both removed again, while a branch that existed before is kept. The cleanup runs
+has both removed again, while a branch that existed before is kept. The usual causes are
+answered in a short sentence (`<project> is not a git repository`, `<project> has no
+commits to branch from`, `branch <branch> already exists; ...`, `base <base> not found`,
+`worktree directory <path> already exists`), with git's own text in the daemon log; any
+other failure answers git's text. The cleanup runs
 `git worktree prune` only when git had registered the failed path and `git worktree
 remove` could not remove it, so other worktrees whose directories are missing stay
 registered. A spawn failure after

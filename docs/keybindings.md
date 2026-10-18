@@ -99,8 +99,8 @@ show a Claude agent by its session title once Claude has set one, and by its nam
 then; the name stays the agent's identity for the CLI and its worktree branch.
 With Worktree on, the agent runs in a new git worktree on branch `lazyagents/<name>`, made
 from Base; an empty Base means the project's current branch. `d` never deletes an agent's branch, so a new worktree agent with a removed agent's name
-fails with git's `a branch named 'lazyagents/<name>' already exists` until that branch is
-deleted (the finish menu does that for a merged one) or renamed.
+fails with `branch lazyagents/<name> already exists; delete it or choose another
+agent name` until that branch is deleted (the finish menu does that for a merged one) or renamed.
 
 Removing a worktree agent asks `Remove <name>? y: agent + worktree · k: keep worktree ·
 n: cancel`:
