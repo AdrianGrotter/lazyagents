@@ -9,7 +9,6 @@
       "Bash(cargo test:*)",
       "Bash(cargo nextest:*)",
       "Bash(cargo run:*)",
-      "Bash(cargo insta:*)",
       "Bash(cargo tree:*)",
       "Bash(just:*)",
       "Bash(nix develop -c just:*)",

@@ -32,4 +32,4 @@ description: "Conventional Commits rules for this repo: types, scopes, subject f
 
 5. Done when `git log -1` shows the commit. When a git hook rejects it, fix what it reports and commit again; every commit passes through the hooks.
 
-Examples: `feat(tui): add attention sorting`, `fix(daemon): clamp pane size to 2x2`, `test(protocol): round-trip every request`, `docs: document scroll mode`, `build(nix): add cargo-insta`.
+Examples: `feat(tui): add attention sorting`, `fix(daemon): clamp pane size to 2x2`, `test(protocol): round-trip every request`, `docs: document scroll mode`, `build(nix): add cargo-deny`.
