@@ -3562,6 +3562,52 @@ pub(crate) mod tests {
         assert_eq!(app.selected_row(), Some(1));
     }
 
+    fn three_idle() -> (App, AgentInfo, AgentInfo, AgentInfo) {
+        let p = project("p");
+        let a = agent(&p, "a1", Status::Idle);
+        let b = agent(&p, "a2", Status::Idle);
+        let c = agent(&p, "b1", Status::Idle);
+        let (app, _) = loaded(vec![p], vec![a.clone(), b.clone(), c.clone()]);
+        (app, a, b, c)
+    }
+
+    #[test]
+    fn removing_the_selected_agent_from_a_middle_row_selects_the_one_moving_into_it() {
+        let (mut app, _, b, c) = three_idle();
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        let _ = app.apply_server(ServerMessage::AgentRemoved(b.id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(c.id));
+        assert_eq!(app.selected_row(), Some(1));
+    }
+
+    #[test]
+    fn removing_the_selected_agent_from_the_last_row_selects_the_new_last_row() {
+        let (mut app, _, b, c) = three_idle();
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(c.id));
+        let _ = app.apply_server(ServerMessage::AgentRemoved(c.id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.selected_row(), Some(1));
+    }
+
+    #[test]
+    fn a_filter_hiding_the_selected_agent_selects_row_0_which_clearing_keeps() {
+        let (mut app, a, _, c) = three_idle();
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(c.id));
+        let _ = app.on_key(key('/'));
+        type_text(&mut app, "a");
+        assert_eq!(names(&app), ["a1", "a2"]);
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        let _ = app.on_key(code(KeyCode::Esc));
+        assert_eq!(app.filter(), "");
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        assert_eq!(app.selected_row(), Some(0));
+    }
+
     #[test]
     fn all_view_lists_every_project_needing_input_first() {
         let p = project("p");
