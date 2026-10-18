@@ -55,14 +55,13 @@ pub fn spawn_spec(record: &AgentRecord, launch: Launch, ctx: &SpawnContext<'_>) 
         }
     }
     if let Some(setup) = ctx.setup {
-        let script = format!(
-            "{setup}\nstatus=$?\n[ \"$status\" -eq 0 ] || printf '\\nlazyagents: setup exited with %s\\n\\n' \"$status\"\nexec \"$@\""
-        );
+        let script = "sh -c \"$1\"\nstatus=$?\n[ \"$status\" -eq 0 ] || printf '\\nlazyagents: setup exited with %s\\n\\n' \"$status\"\nshift\nexec \"$@\"";
         let mut wrapped = vec![
             "sh".to_string(),
             "-c".to_string(),
-            script,
+            script.to_string(),
             "lazyagents-setup".to_string(),
+            setup.to_string(),
         ];
         wrapped.append(&mut argv);
         argv = wrapped;
@@ -240,14 +239,43 @@ mod tests {
         let spec = spawn_spec(&rec, Launch::Fresh, &ctx);
         assert_eq!(spec.program, "sh");
         assert_eq!(spec.args[0], "-c");
-        assert!(
-            spec.args[1].starts_with("npm install\n"),
-            "{}",
-            spec.args[1]
-        );
         assert!(spec.args[1].ends_with("exec \"$@\""), "{}", spec.args[1]);
-        assert_eq!(spec.args[2..], ["lazyagents-setup", "codex", "--full-auto"]);
+        assert_eq!(
+            spec.args[2..],
+            ["lazyagents-setup", "npm install", "codex", "--full-auto"]
+        );
         assert_eq!(spec.env["LAZYAGENTS_PROJECT_PATH"], "/p");
+    }
+
+    fn run_spec(spec: &SpawnSpec) -> String {
+        let output = std::process::Command::new(&spec.program)
+            .args(&spec.args)
+            .output()
+            .expect("run the wrapper");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[test]
+    fn the_agent_starts_whatever_the_setup_script_does() {
+        let paths = StatePaths::new("/s");
+        let rec = record(AgentKind::Generic, &["echo", "agent-ran"], Path::new("/p"));
+        for (setup, status) in [
+            ("set -e; false; echo unreachable", "1"),
+            ("exit 3", "3"),
+            ("if then", "2"),
+        ] {
+            let ctx = SpawnContext {
+                setup: Some(setup),
+                ..ctx(&paths, Path::new("/p"), None)
+            };
+            let out = run_spec(&spawn_spec(&rec, Launch::Fresh, &ctx));
+            assert!(out.contains("agent-ran"), "{setup:?}: {out}");
+            assert!(
+                out.contains(&format!("setup exited with {status}")),
+                "{setup:?}: {out}"
+            );
+            assert!(!out.contains("unreachable"), "{setup:?}: {out}");
+        }
     }
 
     #[test]

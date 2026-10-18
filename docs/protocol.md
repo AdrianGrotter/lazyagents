@@ -60,9 +60,10 @@ does not compile in the test until its sample is added.
   the agent first. A non-blank `prompt` goes to the agent on its first start only: a
   Claude agent gets `-- <prompt>` after its options, a generic agent has `<prompt>\r`
   written to its terminal once it first prints. A non-blank `setup` is a shell script
-  run on the first start only, in the agent's terminal before its command, as `sh -c
-  '<setup>; … exec "$@"' lazyagents-setup <command>`, inside direnv when the worktree has
-  an `.envrc`
+  run on the first start only, in the agent's terminal before its command, in a shell of
+  its own: `sh -c 'sh -c "$1"; … shift; exec "$@"' lazyagents-setup <setup> <command>`,
+  inside direnv when the worktree has an `.envrc`, so the command starts whatever the
+  script does
 - `KillAgent { id }`
 - `RestartAgent { id, cols, rows }`
 - `RemoveAgent { id, remove_worktree, force, delete_branch }`: `remove_worktree` also

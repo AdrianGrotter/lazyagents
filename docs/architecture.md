@@ -235,7 +235,8 @@ walking it; such a directory is searched only when an include pattern names it o
 it (ADR 0018). Within those paths, the files `ls-files` lists with the include patterns and
 with `--exclude-standard` are copied; a failure is logged and the agent
 starts anyway. A `CreateAgent.setup` the user approved in the TUI (ADR 0014) wraps the
-agent's first start in `sh -c` so the script runs in its terminal first.
+agent's first start in `sh -c`, which runs the script in a shell of its own in the agent's
+terminal and then starts the agent whatever the script did.
 
 direnv allows an `.envrc` by its path and content, so a new worktree's checked-out
 `.envrc` starts out blocked, and `direnv exec` refuses it until it is allowed. Right after

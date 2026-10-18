@@ -292,7 +292,9 @@ setup = "npm install"
 
 `setup` runs in each new worktree agent's terminal, in the worktree and inside its direnv
 environment, before the agent starts, on its first start only. A failing setup prints
-`lazyagents: setup exited with <code>` and the agent starts anyway. Because the script comes
+`lazyagents: setup exited with <code>` and the agent starts anyway, also after `set -e` or
+`exit`. The script runs in a shell of its own, so a `cd` or `export` in it does not reach the
+agent. Because the script comes
 from the repository, creating a worktree agent shows it and asks first: `y` runs it and
 remembers the approval for that project, `s` creates the agent without it this time, `n` or
 `esc` creates nothing. An approval holds for that exact text, so an edited script asks
