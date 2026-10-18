@@ -268,7 +268,7 @@ fn block(title: impl Into<Line<'static>>, focused: bool, theme: &Theme) -> Block
 
 pub fn draw(frame: &mut Frame, app: &App, areas: &Areas, now: Instant, tick: u64) {
     if areas.pane_inner.width < MIN_PANE.0 || areas.pane_inner.height < MIN_PANE.1 {
-        draw_too_small(frame);
+        draw_too_small(frame, app.screen_mode);
         return;
     }
     draw_projects(frame, app, areas.projects);
@@ -1081,17 +1081,31 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
-fn draw_too_small(frame: &mut Frame) {
-    let screen = frame.area();
-    let rows = if usize::from(screen.width) >= TOO_SMALL.len() {
-        1
-    } else {
-        2
+/// The smallest screen whose pane is at least `MIN_PANE` in `mode`.
+pub fn min_screen(mode: ScreenMode) -> (u16, u16) {
+    let fits = |width: u16, height: u16| {
+        let inner = areas_in(Rect::new(0, 0, width, height), 1, 0, mode).pane_inner;
+        inner.width >= MIN_PANE.0 && inner.height >= MIN_PANE.1
     };
+    let width = (1..u16::MAX)
+        .find(|w| fits(*w, u16::MAX / 2))
+        .unwrap_or(u16::MAX);
+    let height = (1..u16::MAX).find(|h| fits(width, *h)).unwrap_or(u16::MAX);
+    (width, height)
+}
+
+fn draw_too_small(frame: &mut Frame, mode: ScreenMode) {
+    let screen = frame.area();
+    let (width, height) = min_screen(mode);
+    let text = format!(
+        "{TOO_SMALL} ({}×{})\nneeds at least {width}×{height}",
+        screen.width, screen.height
+    );
+    let rows = wrap_words(&text, usize::from(screen.width).max(1));
+    let lines: Vec<Line> = rows.into_iter().map(Line::from).collect();
+    let rows = lines.len() as u16;
     frame.render_widget(
-        Paragraph::new(TOO_SMALL)
-            .centered()
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(lines).centered(),
         centered(screen, screen.width, rows),
     );
 }
@@ -3280,7 +3294,13 @@ mod tests {
         let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
         app.popup = Some(Popup::Help);
         let (text, _) = render_at(&app, 40, 6);
-        assert!(text.contains("terminal too small"), "{text}");
+        assert!(text.contains("terminal too small (40×6)"), "{text}");
+        assert!(text.contains("needs at least 46×8"), "{text}");
+        app.screen_mode = ScreenMode::Wide;
+        assert!(render_at(&app, 30, 6).0.contains("needs at least 40×8"));
+        app.screen_mode = ScreenMode::Full;
+        assert!(render_at(&app, 20, 6).0.contains("needs at least 22×8"));
+        app.screen_mode = ScreenMode::Normal;
         assert!(!text.contains(" Projects "), "{text}");
         let (text, _) = render_at(&app, 10, 3);
         assert!(

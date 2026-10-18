@@ -354,9 +354,9 @@ daemon last told it.
   cwd. Context and limits turn yellow from 60 % and red from 80 %; paths and branches too
   long for the box are cut on the left. The box is sized to its rows: it grows as long as
   the Agents box keeps 8 rows, and keeps 6 rows while the content fits. The status line shows a message, then `│`
-  and the key hint, cut off on the right: a notice in the accent colour for 5 s, an error in
-  red for 5 s and after that until the next key or click. Below a 20×5 pane only "terminal too small" is
-  drawn, and keys do nothing except quitting from the sidebar and leaving the pane. Status
+  and the key hints that fit, whole hints dropped from the end: a notice in the accent colour for 5 s, an error in
+  red for 5 s and after that until the next key or click. Below a 20×5 pane only "terminal too small", with the
+  current and the needed terminal size, is drawn, and keys do nothing except quitting from the sidebar and leaving the pane. Status
   glyphs animate from a frame counter the runtime ticks every 100 ms while an agent is
   starting or working.
 - **Mouse** (`app.rs`): the TUI captures the mouse. A click selects a row or focuses a box

@@ -284,7 +284,9 @@ the wheel too; over a stopped agent, which has no terminal, the wheel does nothi
 diff view it scrolls the diff, and in scroll mode the history.
 
 **Terminal too small**: while the pane would be smaller than 20×5 cells the TUI shows only
-"terminal too small", and keys and pastes do nothing except the quit keys (`q`/`ctrl-c`,
+"terminal too small (<width>×<height>)" and the size it needs in the current screen mode
+(`needs at least 46×8` beside the usual sidebar, 40×8 beside the narrow one, 22×8 in full
+screen), and keys and pastes do nothing except the quit keys (`q`/`ctrl-c`,
 from the sidebar) and the prefix then a leave key (`ctrl-q` then `q` or `esc`, leaving the
 pane). Nothing reaches an agent, and releasing the mouse drops a selection without copying.
 
