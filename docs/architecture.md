@@ -341,7 +341,8 @@ daemon last told it.
   the pane only on an explicit user action: `enter` on a running agent, a click in the
   pane on a running agent (a click on an Agents row only selects), or a successful create
   from the new agent form, provided no key was pressed and no popup opened between
-  submitting and the daemon's answer. `ctrl-q j`/`k` switch agents from inside the pane
+  submitting and the daemon's answer; a kept filter that hides the new agent is then
+  cleared. `ctrl-q j`/`k` switch agents from inside the pane
   and keep focus there only when the new agent is running. A failed request clears the
   pending create. Focus returns to the sidebar when the selected agent stops running or
   when the selection changes for any reason other than a key (the agent was removed by

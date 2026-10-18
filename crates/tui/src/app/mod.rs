@@ -713,7 +713,8 @@ impl App {
 
     /// Focus enters the pane only through an explicit user action, so a selection
     /// change caused by the daemon returns focus to the sidebar. `created` is the agent
-    /// the user just created and has not navigated away from since.
+    /// the user just created and has not navigated away from since; a kept filter that
+    /// hides it is cleared.
     fn sync_after_server(
         &mut self,
         before: Option<AgentId>,
@@ -732,8 +733,18 @@ impl App {
         }
         let mut effects = self.close_lost_scroll(selected);
         if let Some(id) = created {
+            if self
+                .agents
+                .iter()
+                .find(|a| a.id == id)
+                .is_some_and(|a| !self.matches_filter(a))
+            {
+                self.filter.clear();
+            }
             self.select_agent(id);
-            self.focus = Focus::Pane;
+            if self.selected == Some(id) {
+                self.focus = Focus::Pane;
+            }
         }
         effects.extend(self.sync());
         effects
@@ -1781,6 +1792,25 @@ pub(crate) mod tests {
         assert_eq!(app.focus, Focus::Agents);
         let effects = app.apply_reply(&request, Ok(Response::Agent(info.clone())));
         assert_eq!(app.popup, None);
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(info.id));
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(
+            effects,
+            vec![Effect::Send(Request::Subscribe { id: info.id })]
+        );
+    }
+
+    #[test]
+    fn a_create_the_kept_filter_hides_clears_it_and_lands_in_the_new_agent() {
+        let (mut app, a, _) = two_agents();
+        let _ = app.on_key(key('/'));
+        type_text(&mut app, "alpha");
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        let (info, request) = submit_shell_agent(&mut app, "zed");
+        let _ = app.apply_server(ServerMessage::AgentUpdated(info.clone()));
+        let effects = app.apply_reply(&request, Ok(Response::Agent(info.clone())));
+        assert_eq!(app.filter(), "");
         assert_eq!(app.selected_agent().map(|x| x.id), Some(info.id));
         assert_eq!(app.focus, Focus::Pane);
         assert_eq!(
