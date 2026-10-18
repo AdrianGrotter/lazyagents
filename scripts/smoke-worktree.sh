@@ -52,7 +52,7 @@ own_git -C "$repo" commit -q --allow-empty -m init
 "$h" keys "$name" Enter
 
 "$h" keys "$name" C-q q
-"$h" wait-for "$name" 'n new · x stop' 5
+"$h" wait-for "$name" 'n new agent · x stop' 5
 "$h" wait-for "$name" 'branch  lazyagents/wt' 15
 "$h" wait-for "$name" '1 uncommitted' 15
 

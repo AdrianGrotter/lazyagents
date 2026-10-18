@@ -42,21 +42,6 @@ const PICKER_ROWS: usize = 12;
 const NEW_AGENT_WIDTH: u16 = 56;
 const FORM_WIDTH: u16 = 60;
 
-const SIDEBAR_HINT: [(Action, &str); 12] = [
-    (Action::Help, "help"),
-    (Action::Quit, "quit"),
-    (Action::Open, "open"),
-    (Action::NewAgent, "new"),
-    (Action::Stop, "stop"),
-    (Action::Restart, "restart"),
-    (Action::Remove, "remove"),
-    (Action::Rename, "rename"),
-    (Action::AddProject, "add project"),
-    (Action::ToggleAllAgents, "all"),
-    (Action::NextAttention, "next input"),
-    (Action::Diff, "diff"),
-];
-
 const SIDEBAR_HELP: [(&[Action], &str); 19] = [
     (
         &[Action::Down, Action::Up],
@@ -787,75 +772,206 @@ fn diff_text<'a>(view: &'a DiffView, app: &App, height: u16) -> Paragraph<'a> {
     Paragraph::new(rows)
 }
 
-/// The diff view's hints; the configured diff key closes it too.
-fn diff_hints(keymap: &Keymap) -> Vec<String> {
+/// The diff view's hints; the configured diff key closes it too, and the keys that send or
+/// visit comments show only while the diff has some.
+fn diff_hints(app: &App) -> Vec<String> {
     let mut close = fixed_keys::keys(&DIFF_KEYS, DiffKey::Close);
-    for key in keymap.keys(Action::Diff) {
+    for key in app.keymap.keys(Action::Diff) {
         if !close.contains(&key) {
             close.push(key);
         }
     }
+    let commented = app
+        .diff
+        .as_ref()
+        .is_some_and(|view| app.comments.contains_key(&view.agent));
+    let about_comments = |keys: &[DiffKey]| {
+        keys.iter().any(|key| {
+            matches!(
+                key,
+                DiffKey::SendComments | DiffKey::NextComment | DiffKey::PreviousComment
+            )
+        })
+    };
     let mut hints = vec![format!("{} close", crate::keymap::join(&close))];
     hints.extend(
         DIFF_HINTS
             .iter()
             .filter(|(keys, _)| *keys != [DiffKey::Close])
+            .filter(|(keys, _)| commented || !about_comments(keys))
             .filter_map(|(keys, label)| fixed_keys::hint(&DIFF_KEYS, keys, label)),
     );
     hints.extend(fixed_keys::motion_hints());
     hints
 }
 
-fn pane_hint(keymap: &Keymap) -> String {
-    format!(
-        "{} sidebar · {} next agent · {} previous agent",
-        keymap.describe(Action::PaneLeave),
-        keymap.describe(Action::PaneNext),
-        keymap.describe(Action::PanePrevious),
-    )
+/// `key label` for the first key bound to `action`; `None` while it has none.
+fn bound(keymap: &Keymap, action: Action, label: &str) -> Option<String> {
+    Some(format!("{} {label}", keymap.keys(action).first()?))
 }
 
-fn sidebar_hint(keymap: &Keymap) -> String {
-    SIDEBAR_HINT
-        .iter()
-        .filter_map(|(action, label)| {
-            let key = keymap.keys(*action).first()?.to_string();
-            Some(format!("{key} {label}"))
-        })
-        .collect::<Vec<_>>()
-        .join(" · ")
+/// What the screen mode key does next.
+fn screen_mode_label(mode: ScreenMode) -> &'static str {
+    match mode {
+        ScreenMode::Normal => "wider pane",
+        ScreenMode::Wide => "full screen",
+        ScreenMode::Full => "exit full screen",
+    }
 }
 
-/// What the selected agent's state calls for, shown before the usual hints: the answers to
-/// a waiting agent, starting a stopped one, reviewing comments not yet sent.
-fn state_hint(app: &App) -> Option<String> {
-    let agent = app.selected_agent()?;
-    let key = |action| app.keymap.first_key(action);
+/// The pane's hints, most useful first; in full screen, the way back comes first.
+fn pane_hints(app: &App) -> Vec<String> {
+    let keymap = &app.keymap;
+    let mode = app.screen_mode;
+    let pane = |action: Action, label: &str| {
+        (!keymap.keys(action).is_empty()).then(|| format!("{} {label}", keymap.describe(action)))
+    };
     let mut hints = Vec::new();
-    match agent.status {
-        Status::NeedsInput => hints.push(answer_hint(&app.keymap)),
-        Status::Stopped => hints.push(format!("{} start", key(Action::Open))),
-        Status::Exited(_) => hints.push(format!("{} restart", key(Action::Open))),
+    if mode == ScreenMode::Full {
+        hints.extend(pane(Action::PaneScreenMode, screen_mode_label(mode)));
+    }
+    hints.extend(pane(Action::PaneLeave, "sidebar"));
+    hints.extend(pane(Action::PaneNext, "next agent"));
+    hints.extend(pane(Action::PanePrevious, "previous agent"));
+    hints.extend(pane(Action::PaneScroll, "scroll"));
+    if mode != ScreenMode::Full {
+        hints.extend(pane(Action::PaneScreenMode, screen_mode_label(mode)));
+    }
+    hints.extend(pane(
+        Action::PaneSendPrefix,
+        &format!("send {}", keymap.prefix()),
+    ));
+    hints
+}
+
+/// The sidebar's hints, most useful first: only what the focus and the selection allow.
+/// What the selected agent's state calls for leads: the answers to a waiting agent,
+/// starting a stopped one, sending review comments.
+fn sidebar_hints(app: &App) -> Vec<String> {
+    let keymap = &app.keymap;
+    let key = |action, label: &str| bound(keymap, action, label);
+    let mut hints = Vec::new();
+    if app.screen_mode == ScreenMode::Full {
+        hints.extend(key(Action::ScreenMode, screen_mode_label(app.screen_mode)));
+    }
+    if app.projects.is_empty() {
+        hints.extend(key(Action::AddProject, "add a project"));
+        hints.extend(key(Action::Help, "help"));
+        hints.extend(key(Action::Quit, "quit"));
+        return hints;
+    }
+    let agent = app.selected_agent().filter(|_| app.focus == Focus::Agents);
+    if app.focus == Focus::Agents && !app.filter().is_empty() {
+        hints.push("esc clear filter".to_string());
+    }
+    if let Some(agent) = agent {
+        match agent.status {
+            Status::NeedsInput => hints.extend(
+                [
+                    (Action::Approve, "approve"),
+                    (Action::Deny, "deny"),
+                    (Action::Reply, "reply"),
+                ]
+                .into_iter()
+                .filter_map(|(action, label)| key(action, label)),
+            ),
+            Status::Stopped | Status::Exited(_) => {
+                hints.extend(key(Action::Open, start_verb(agent.status)))
+            }
+            _ => {}
+        }
+        if let Some(count) = app.comments.get(&agent.id).map(Vec::len) {
+            let s = if count == 1 { "" } else { "s" };
+            hints.extend(key(Action::Diff, &format!("{count} comment{s} to send")));
+        }
+    }
+    if app.focus == Focus::Agents && agent.is_none() {
+        hints.extend(key(Action::NewAgent, "new agent"));
+    }
+    hints.extend(key(Action::Help, "help"));
+    if app.others_need_attention() {
+        hints.extend(key(Action::NextAttention, "next input"));
+    }
+    match (app.focus, agent) {
+        (Focus::Agents, Some(agent)) => {
+            let running = agent.status.is_running();
+            if running {
+                hints.extend(key(Action::Open, "open"));
+            }
+            hints.extend(key(Action::NewAgent, "new agent"));
+            if running {
+                hints.extend(key(Action::Stop, "stop"));
+                hints.extend(key(Action::Restart, "restart"));
+            }
+            hints.extend(key(Action::Remove, "remove"));
+            hints.extend(key(Action::Rename, "rename"));
+            let has_changes = agent.worktree.is_some() || app.git_stats.contains_key(&agent.id);
+            if has_changes && !app.comments.contains_key(&agent.id) {
+                hints.extend(key(Action::Diff, "diff"));
+            }
+            if agent.worktree.is_some() {
+                hints.extend(key(Action::Finish, "finish"));
+            }
+            if agent.status != Status::Stopped {
+                hints.extend(key(Action::Scroll, "scroll"));
+            }
+        }
+        (Focus::Projects, _) => {
+            hints.extend(key(Action::NewAgent, "new agent"));
+            hints.extend(key(Action::AddProject, "add project"));
+            let empty = app
+                .selected_project()
+                .is_some_and(|p| !app.agents.iter().any(|a| a.project == p.id));
+            if empty {
+                hints.extend(key(Action::Remove, "remove project"));
+            }
+        }
         _ => {}
     }
-    if let Some(count) = app.comments.get(&agent.id).map(Vec::len) {
-        let s = if count == 1 { "" } else { "s" };
-        hints.push(format!("{} {count} comment{s} to send", key(Action::Diff)));
+    if !app.agents.is_empty() && app.filter().is_empty() {
+        hints.extend(key(Action::Filter, "filter"));
     }
-    (!hints.is_empty()).then(|| hints.join(" · "))
+    if app.projects.len() > 1 || app.view == AgentView::All {
+        let label = match app.view {
+            AgentView::Project => "all agents",
+            AgentView::All => "this project",
+        };
+        hints.extend(key(Action::ToggleAllAgents, label));
+    }
+    if app.screen_mode != ScreenMode::Full {
+        hints.extend(key(Action::ScreenMode, screen_mode_label(app.screen_mode)));
+    }
+    if !app.commands.is_empty() {
+        hints.extend(key(Action::Commands, "commands"));
+    }
+    if app.focus == Focus::Agents {
+        hints.extend(key(Action::AddProject, "add project"));
+    }
+    hints.extend(key(Action::Quit, "quit"));
+    hints
 }
 
-/// The answers a waiting agent can be sent from the sidebar.
-fn answer_hint(keymap: &Keymap) -> String {
-    [
-        (Action::Approve, "approve"),
-        (Action::Deny, "deny"),
-        (Action::Reply, "reply"),
-    ]
-    .iter()
-    .filter_map(|(action, label)| Some(format!("{} {label}", keymap.keys(*action).first()?)))
-    .collect::<Vec<_>>()
-    .join(" · ")
+/// `start` for a stopped agent and `restart` for an exited one, as `enter` does them.
+pub(crate) fn start_verb(status: Status) -> &'static str {
+    match status {
+        Status::Stopped => "start",
+        _ => "restart",
+    }
+}
+
+/// The leading `hints` that fit in `room` cells, joined; a hint that does not fit is
+/// dropped whole, with every hint after it.
+fn fitted(hints: &[String], room: usize) -> String {
+    let mut line = String::new();
+    for hint in hints {
+        let separator = if line.is_empty() { "" } else { " · " };
+        if text_width(&line) + text_width(separator) + text_width(hint) > room {
+            break;
+        }
+        line.push_str(separator);
+        line.push_str(hint);
+    }
+    line
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
@@ -881,24 +997,25 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
         frame.set_cursor_position((area.x + width.min(area.width), area.y));
         return;
     }
-    spans.push(match app.focus {
+    let (hints, colour) = match app.focus {
         Focus::Pane if app.prefix_pending => {
-            Span::raw(format!("{} …", app.keymap.prefix())).fg(theme.working)
+            (vec![format!("{} …", app.keymap.prefix())], theme.working)
         }
-        Focus::Pane => Span::raw(pane_hint(&app.keymap)).fg(theme.dim),
-        Focus::Diff => Span::raw(diff_hints(&app.keymap).join(" · ")).fg(theme.dim),
+        Focus::Pane => (pane_hints(app), theme.dim),
+        Focus::Diff => (diff_hints(app), theme.dim),
         Focus::Scroll => {
             let hints = std::iter::once("SCROLL".to_string()).chain(fixed_keys::scroll_hints());
-            Span::raw(hints.collect::<Vec<_>>().join(" · ")).fg(theme.scroll)
+            (hints.collect(), theme.scroll)
         }
-        Focus::Projects | Focus::Agents => {
-            let hint = match state_hint(app) {
-                Some(state) => format!("{state} · {}", sidebar_hint(&app.keymap)),
-                None => sidebar_hint(&app.keymap),
-            };
-            Span::raw(hint).fg(theme.dim)
-        }
-    });
+        Focus::Projects | Focus::Agents => (sidebar_hints(app), theme.dim),
+    };
+    let used: usize = spans.iter().map(Span::width).sum();
+    let hints = fitted(&hints, usize::from(area.width).saturating_sub(used));
+    if hints.is_empty() {
+        spans.pop();
+    } else {
+        spans.push(Span::raw(hints).fg(colour));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -1759,7 +1876,7 @@ mod tests {
         let (text, _) = render(&app);
         assert!(text.contains(" Help · /DIFF "), "{text}");
         assert!(text.contains("diff / finish"), "{text}");
-        assert!(!text.contains("new agent"), "{text}");
+        assert!(!text.contains("  new agent"), "{text}");
         assert!(!text.contains("Agent pane"), "{text}");
         app.help_filter = "zzz".into();
         let (text, _) = render(&app);
@@ -2246,7 +2363,7 @@ mod tests {
         let (text, _) = render(&app);
         let status = text.lines().last().expect("status line");
         assert!(
-            status.starts_with("? help · q quit · enter open · n new · x stop"),
+            status.starts_with("? help · enter open · n new agent · x stop"),
             "{status}"
         );
         app.fail("boom happened");
@@ -2258,6 +2375,106 @@ mod tests {
         assert!(text.contains("ctrl-q q/esc sidebar"), "{text}");
     }
 
+    fn status_at(app: &App, width: u16) -> String {
+        let (text, _) = render_at(app, width, 30);
+        text.lines()
+            .last()
+            .expect("status line")
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn the_footer_offers_only_what_applies_to_the_focus_and_selection() {
+        let p = project("p");
+        let q = project("q");
+        let (mut app, _) = loaded(
+            vec![p.clone(), q.clone()],
+            vec![agent(&p, "a", Status::Idle)],
+        );
+        let status = status_at(&app, 300);
+        for hint in ["enter open", "x stop", "r restart", "R rename", "d remove"] {
+            assert!(status.contains(hint), "{hint}: {status}");
+        }
+        assert!(!status.contains("F finish"), "{status}");
+        app.focus = Focus::Projects;
+        let status = status_at(&app, 300);
+        for hint in ["x stop", "r restart", "R rename", "enter open", "d remove"] {
+            assert!(!status.contains(hint), "{hint}: {status}");
+        }
+        assert!(status.contains("n new agent"), "{status}");
+        let _ = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let status = status_at(&app, 300);
+        assert!(status.contains("d remove project"), "{status}");
+        app.focus = Focus::Agents;
+        let status = status_at(&app, 300);
+        for hint in ["x stop", "r restart", "R rename", "enter open", "s scroll"] {
+            assert!(!status.contains(hint), "{hint}: {status}");
+        }
+        assert!(status.starts_with("n new agent"), "{status}");
+
+        let (app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Stopped)]);
+        let status = status_at(&app, 300);
+        assert!(status.starts_with("enter start · ? help"), "{status}");
+        for hint in ["enter open", "x stop", "s scroll"] {
+            assert!(!status.contains(hint), "{hint}: {status}");
+        }
+    }
+
+    #[test]
+    fn footer_hints_that_do_not_fit_are_dropped_whole() {
+        let p = project("p");
+        let waiting = agent(&p, "api", Status::NeedsInput);
+        let (mut app, _) = loaded(vec![p.clone()], vec![waiting]);
+        for focus in [Focus::Agents, Focus::Pane] {
+            app.focus = focus;
+            let full = status_at(&app, 400);
+            for width in [50, 60, 80, 120] {
+                let status = status_at(&app, width);
+                assert!(full.starts_with(&status), "{width}: {status}\n{full}");
+                let rest = &full[status.len()..];
+                assert!(
+                    rest.is_empty() || rest.starts_with(" · "),
+                    "{width}: {status}"
+                );
+            }
+        }
+        app.focus = Focus::Agents;
+        assert!(status_at(&app, 60).starts_with("y approve · N deny · i reply"));
+        app.fail("a long error message about something");
+        let status = status_at(&app, 60);
+        assert!(status.starts_with("a long error message about something │ y approve"));
+        assert!(!status.ends_with('·') && !status.ends_with('│'), "{status}");
+    }
+
+    #[test]
+    fn full_screen_says_how_to_get_back() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.screen_mode = ScreenMode::Full;
+        assert!(status_at(&app, 100).starts_with("+ exit full screen · ? help"));
+        app.focus = Focus::Pane;
+        let status = status_at(&app, 100);
+        assert!(status.starts_with("ctrl-q + exit full screen · ctrl-q q/esc sidebar"));
+        app.screen_mode = ScreenMode::Normal;
+        let status = status_at(&app, 200);
+        assert!(status.contains("ctrl-q + wider pane"), "{status}");
+    }
+
+    #[test]
+    fn the_diff_footer_offers_the_comment_keys_only_with_comments() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        open_diff(&mut app, SAMPLE_DIFF);
+        let status = status_at(&app, 400);
+        assert!(
+            status.starts_with("q/esc/D close · c comment · s scope"),
+            "{status}"
+        );
+        assert!(!status.contains("send comments"), "{status}");
+        assert!(status.ends_with("pagedown/pageup page"), "{status}");
+    }
+
     #[test]
     fn status_bar_keeps_the_hint_after_a_red_message() {
         let p = project("p");
@@ -2266,7 +2483,7 @@ mod tests {
         let (text, buffer) = render(&app);
         let status = text.lines().last().expect("status line");
         assert!(
-            status.starts_with("boom happened │ ? help · q quit · enter open"),
+            status.starts_with("boom happened │ ? help · enter open"),
             "{status}"
         );
         assert!(!status.contains("g next input"), "{status}");
@@ -2629,13 +2846,13 @@ mod tests {
         assert!(!text.contains("ctrl-q"), "{text}");
 
         app.popup = None;
-        let (text, _) = render(&app);
-        let status = text.lines().last().expect("status line");
+        let status = status_at(&app, 300);
         assert!(
-            status.starts_with("? help · ctrl-x quit · enter open · M new · x stop"),
+            status.starts_with("? help · enter open · M new agent · x stop"),
             "{status}"
         );
         assert!(status.contains("P add project"), "{status}");
+        assert!(status.ends_with("ctrl-x quit"), "{status}");
         app.focus = Focus::Pane;
         let (text, _) = render(&app);
         let status = text.lines().last().expect("status line");

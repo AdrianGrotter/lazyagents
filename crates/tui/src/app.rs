@@ -2263,6 +2263,16 @@ impl App {
         }));
     }
 
+    /// Whether the next-attention key has an agent to go to besides the selected one.
+    pub fn others_need_attention(&self) -> bool {
+        let current = self.selected_agent().map(|a| a.id);
+        self.agents.iter().any(|a| {
+            Some(a.id) != current
+                && self.matches_filter(a)
+                && (a.status == Status::NeedsInput || self.unseen.contains(&a.id))
+        })
+    }
+
     fn next_attention(&mut self) {
         let position = |id: ProjectId| self.projects.iter().position(|p| p.id == id);
         let mut ordered: Vec<&AgentInfo> = self

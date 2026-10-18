@@ -57,11 +57,11 @@ launch "$name"
 "$h" wait-for "$name" 'back-43' 10
 
 "$h" keys "$name" C-q q
-"$h" wait-for "$name" 'n new · x stop' 5
+"$h" wait-for "$name" 'n new agent · x stop' 5
 "$h" keys "$name" Enter
 "$h" wait-for "$name" ' demo · generic · ' 5
 "$h" keys "$name" C-]
-"$h" wait-for "$name" 'n new · x stop' 5
+"$h" wait-for "$name" 'n new agent · x stop' 5
 "$h" keys "$name" x
 "$h" wait-for "$name" 'Stop demo?' 5
 "$h" keys "$name" y

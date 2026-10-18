@@ -44,10 +44,22 @@ Two input modes:
 Actions that cannot act on the selected agent are dimmed in the help popup, and pressing one
 says why in the status bar instead of doing nothing: `no agent selected`, `<agent> is not
 running` (stop, reply), `<agent> has no terminal yet — r starts it` (scroll mode and
-`J`/`K` on a stopped agent), `<agent> is not waiting for an answer` (`y`, `N`). The status
-bar starts with what the selected agent's state calls for: the answers to a waiting agent,
-`enter start` for a stopped one, `enter restart` for an exited one, and `D <n> comments to send`
-while it has review comments.
+`J`/`K` on a stopped agent), `<agent> is not waiting for an answer` (`y`, `N`).
+
+The status bar hints offer only what applies to the focus and the selection, most
+important first, and a hint that does not fit is dropped whole, with every hint after it;
+the help popup stays the complete list. In the sidebar they start with what the selected
+agent's state calls for: the answers to a waiting agent (`y approve · N deny · i reply`),
+`enter start` for a stopped one, `enter restart` for an exited one, and `D <n> comments to
+send` while it has review comments. Then come `? help`, `g next input` while another agent
+needs input or is `done`, the agent's own actions (`enter open`, `x stop` and `r restart`
+only while it runs, `s scroll` only once it has a terminal, `D diff` for an agent with git
+changes, `F finish` for a worktree agent), and the general ones, ending with `q quit`. With
+Projects focused they offer the project actions (`n new agent`, `a add project`, `d remove
+project` once the project has no agents) instead of the agent's. With no project yet they
+are `a add a project · ? help · q quit`; while a filter is kept they start with `esc clear
+filter`. In full screen (`+` twice) the first hint is the way back: `+ exit full screen` in
+the sidebar, `ctrl-q + exit full screen` in the pane.
 
 The pane of a stopped or exited agent keeps its last screen, with a bar over the bottom row
 naming the state and the way back: `exited (<code>) · enter restart · d remove` (red for a
