@@ -158,7 +158,7 @@ removal, shows `<name>: worktree has uncommitted changes (<n> files)`.
 
 **Protocol mismatch**: when the running daemon speaks another protocol version, the TUI
 opens on a full-screen prompt instead of the sidebar. `y` stops that daemon and its agents
-(SIGTERM, up to 5 s; the prompt shows `stopping daemon <pid>…` meanwhile, and `ctrl-c`
+(SIGTERM, up to 20 s; the prompt shows `stopping daemon <pid>…` meanwhile, and `ctrl-c`
 abandons the wait and quits) and continues with a new daemon; `n`, `q`, `esc` and `ctrl-c`
 quit with the mismatch error.
 
