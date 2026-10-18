@@ -54,8 +54,8 @@ agent's state calls for: the answers to a waiting agent (`y approve · N deny ·
 `enter start` for a stopped one, `enter restart` for an exited one, and `D <n> comments to
 send` while it has review comments. Then come `? help`, `g next input` while another agent
 needs input or is `done`, the agent's own actions (`enter open`, `x stop` and `r restart`
-only while it runs, `s scroll` only once it has a terminal, `D diff` for an agent with git
-changes, `F finish` for a worktree agent), and the general ones, ending with `q quit`. With
+only while it runs, `s scroll` only once it has a terminal, `D diff` for an agent in a git
+repository, `F finish` for a worktree agent), and the general ones, ending with `q quit`. With
 Projects focused they offer the project actions (`n new agent`, `a add project`, `d remove
 project` once the project has no agents) instead of the agent's. With no project yet they
 are `a add a project · ? help · q quit`; while a filter is kept they start with `esc clear
