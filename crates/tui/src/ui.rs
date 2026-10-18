@@ -892,10 +892,7 @@ fn pane_hints(app: &App) -> Vec<String> {
     if mode != ScreenMode::Full {
         hints.extend(pane(Action::PaneScreenMode, screen_mode_label(mode)));
     }
-    hints.extend(pane(
-        Action::PaneSendPrefix,
-        &format!("send {}", keymap.prefix()),
-    ));
+    hints.extend(pane(Action::PaneSendPrefix, "send the prefix"));
     hints
 }
 
@@ -2743,6 +2740,18 @@ mod tests {
         let status = status_at(&app, 60);
         assert_eq!(status.chars().count(), 60, "{status}");
         assert!(status.ends_with('…'), "{status}");
+    }
+
+    #[test]
+    fn the_pane_hint_for_sending_the_prefix_names_it_once() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.focus = Focus::Pane;
+        assert!(status_at(&app, 400).ends_with("ctrl-q ctrl-q send the prefix"));
+        let config = configured("[keys.pane]\nprefix = \"ctrl-a\"\n");
+        let (mut app, _) = loaded_with(config, vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
+        app.focus = Focus::Pane;
+        assert!(status_at(&app, 400).ends_with("ctrl-a ctrl-a send the prefix"));
     }
 
     #[test]
