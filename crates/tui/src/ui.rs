@@ -39,6 +39,7 @@ const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
 const PROJECT_FORM_HINT: &str = "tab field · enter add · esc cancel";
 const PICKER_ROWS: usize = 12;
 const NEW_AGENT_WIDTH: u16 = 56;
+const FORM_WIDTH: u16 = 60;
 
 const SIDEBAR_HINT: [(Action, &str); 12] = [
     (Action::Help, "help"),
@@ -1277,15 +1278,15 @@ fn popup_content(popup: &Popup, app: &App, screen: (u16, u16)) -> PopupContent {
                 field_line("Name: ", input.clone(), true, theme),
                 Line::default(),
             ];
-            lines.extend(form_footer(submission, INPUT_HINT, 60, theme));
-            PopupContent::new(" Rename ", 60, lines).cursor_at(Some(0))
+            lines.extend(form_footer(submission, INPUT_HINT, FORM_WIDTH, theme));
+            PopupContent::new(" Rename ", FORM_WIDTH, lines).cursor_at(Some(0))
         }
         Popup::ProjectPicker { index } => {
             PopupContent::fitting(" Add project ", 60, picker_lines(app, *index))
         }
         Popup::AddProject(form) => {
             let (lines, cursor) = project_form_lines(form, theme);
-            PopupContent::new(" Add project ", 60, lines).cursor_at(Some(cursor))
+            PopupContent::new(" Add project ", FORM_WIDTH, lines).cursor_at(Some(cursor))
         }
         Popup::Confirm { prompt, action } => {
             let mut lines: Vec<Line> = prompt.lines().map(|l| Line::from(l.to_string())).collect();
@@ -1304,7 +1305,7 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, app: &App, screen: Rect) {
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(content.lines).block(block), area);
-    if let Some((col, row)) = content.cursor
+    if let Some((col, row)) = content.cursor.filter(|_| !popup.is_sending())
         && row < inner.height
         && inner.width > 0
     {
@@ -1561,7 +1562,12 @@ fn project_form_lines(form: &ProjectForm, theme: &Theme) -> (Vec<Line<'static>>,
         ),
         Line::default(),
     ];
-    lines.extend(form_footer(&form.submission, PROJECT_FORM_HINT, 60, theme));
+    lines.extend(form_footer(
+        &form.submission,
+        PROJECT_FORM_HINT,
+        FORM_WIDTH,
+        theme,
+    ));
     let row = match form.field {
         ProjectField::Path => 0,
         ProjectField::Name => 1,
@@ -2767,6 +2773,32 @@ mod tests {
         let _ = render_at(&app, 0, 0);
         let (text, _) = render_at(&app, 46, 8);
         assert!(text.contains(" Help "), "{text}");
+    }
+
+    #[test]
+    fn a_waiting_form_shows_no_text_cursor() {
+        use crate::app::{NewAgentForm, Submission};
+        let (mut app, _) = loaded(vec![project("p")], Vec::new());
+        let sending = || Submission::Sending(Box::new(protocol::Request::ListAgents));
+        app.popup = Some(Popup::NewAgent(NewAgentForm {
+            name: "api".into(),
+            submission: sending(),
+            ..Default::default()
+        }));
+        assert_eq!(cursor_of(&app).1, None);
+        app.popup = Some(Popup::Rename {
+            agent: protocol::AgentId::random(),
+            input: "api".into(),
+            submission: sending(),
+        });
+        assert_eq!(cursor_of(&app).1, None);
+        app.popup = Some(Popup::AddProject(ProjectForm {
+            path: "/x".into(),
+            name: String::new(),
+            field: ProjectField::Path,
+            submission: sending(),
+        }));
+        assert_eq!(cursor_of(&app).1, None);
     }
 
     #[test]
