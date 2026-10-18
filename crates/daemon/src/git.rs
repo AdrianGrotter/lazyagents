@@ -111,18 +111,27 @@ pub fn add_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> anyho
     Ok(())
 }
 
-/// Removes a worktree `add_worktree` made, with the branch it created.
-pub fn discard_worktree(repo: &Path, path: &Path, branch: &str) {
+/// Removes a worktree `add_worktree` made, with the branch it created; true once the
+/// directory, git's record of the worktree and the branch are all gone. git keeps a locked
+/// worktree, and a branch checked out in a worktree it keeps.
+pub fn discard_worktree(repo: &Path, path: &Path, branch: &str) -> bool {
     undo_add(repo, path, branch, false);
+    !path.exists()
+        && registered(repo, path) == Some(false)
+        && branch_exists(repo, branch).ok() == Some(false)
+}
+
+/// Whether git lists `path` as one of the repo's worktrees; `None` when it cannot tell.
+fn registered(repo: &Path, path: &Path) -> Option<bool> {
+    let list = git(Some(repo), ["worktree", "list", "--porcelain", "-z"]).ok()?;
+    Some(
+        list.split('\0')
+            .any(|entry| entry.strip_prefix("worktree ").map(Path::new) == Some(path)),
+    )
 }
 
 fn undo_add(repo: &Path, path: &Path, branch: &str, branch_existed: bool) {
-    let registered = git(Some(repo), ["worktree", "list", "--porcelain", "-z"])
-        .map(|list| {
-            list.split('\0')
-                .any(|entry| entry.strip_prefix("worktree ").map(Path::new) == Some(path))
-        })
-        .unwrap_or(false);
+    let registered = registered(repo, path).unwrap_or(false);
     let removed = registered && remove_worktree(repo, path, true).is_ok();
     if !removed && path.exists() {
         let _ = std::fs::remove_dir_all(path);
@@ -172,9 +181,9 @@ pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> anyhow::Result<
 /// names, as Claude Code does for its own worktrees; gitignore syntax, relative to the
 /// project. A directory git ignores as a whole is searched only when a pattern may reach
 /// into it (`may_reach_into`), so a large ignored tree such as `target/` is never walked
-/// for a pattern like `*.env`. A file the first listing names on its own is ignored already, so only
-/// the directories are listed again for what git ignores within them. Returns the copied
-/// paths, sorted.
+/// for a pattern like `*.env`. A file the first listing names on its own is ignored
+/// already, so only the directories are listed again for what git ignores within them.
+/// Returns the copied paths, sorted.
 pub fn copy_worktree_includes(project: &Path, worktree: &Path) -> anyhow::Result<Vec<String>> {
     let include = project.join(".worktreeinclude");
     if !include.is_file() {

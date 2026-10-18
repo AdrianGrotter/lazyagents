@@ -3676,3 +3676,115 @@ async fn a_client_that_stops_reading_while_events_pile_up_is_disconnected() {
         .await
         .expect("kill");
 }
+
+fn record_pending_worktree(daemon: &TestDaemon, project: &Project, name: &str, path: &Path) {
+    let state = StatePaths::new(daemon.path()).state_file();
+    let mut text = std::fs::read_to_string(&state).expect("state");
+    text.push_str(&format!(
+        "\n[[pending_worktrees]]\nproject = \"{}\"\nname = \"{name}\"\npath = \"{}\"\nbranch = \"lazyagents/{name}\"\n",
+        project.id,
+        path.display()
+    ));
+    std::fs::write(&state, text).expect("write state");
+}
+
+async fn stop_daemon(daemon: &mut TestDaemon) {
+    let mut conn = Conn::open(daemon.path()).await;
+    conn.request(Request::Shutdown).await.expect("shutdown");
+    daemon.exits_within(WAIT).await;
+}
+
+async fn wait_until_no_pending_worktree(daemon: &TestDaemon) {
+    let state = StatePaths::new(daemon.path()).state_file();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while std::fs::read_to_string(&state)
+        .expect("state")
+        .contains("pending_worktrees")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the pending worktree was never dropped"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leftover_git_will_not_let_go_of_is_retried_at_the_next_start() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let leftover = worktree_path(&daemon, &project, "ghost");
+    let leftover_arg = leftover.to_str().expect("utf8");
+    common::git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "lazyagents/ghost",
+            leftover_arg,
+            "main",
+        ],
+    );
+    common::git(repo.path(), &["worktree", "lock", leftover_arg]);
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree(&daemon, &project, "ghost", &leftover);
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    let mut conn = Conn::open(daemon.path()).await;
+    let err = create_in_worktree(&mut conn, &project, "ghost", &["sleep", "30"])
+        .await
+        .expect_err("the leftover keeps its name");
+    assert!(err.contains("ghost is being created"), "{err}");
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    let state = StatePaths::new(daemon.path()).state_file();
+    let kept = std::fs::read_to_string(&state).expect("state");
+    assert!(kept.contains("lazyagents/ghost"), "{kept}");
+    assert_ne!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/ghost"]),
+        ""
+    );
+
+    common::git(repo.path(), &["worktree", "unlock", leftover_arg]);
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/*"]),
+        ""
+    );
+    let mut conn = Conn::open(daemon.path()).await;
+    let agent = create_in_worktree(&mut conn, &project, "ghost", &["sleep", "30"])
+        .await
+        .expect("the name is free again");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pending_worktree_an_agent_records_is_kept_at_the_next_start() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let agent = create_in_worktree(&mut conn, &project, "kept", &["sleep", "30"])
+        .await
+        .expect("create");
+    let path = agent.worktree.as_ref().expect("worktree").path.clone();
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree(&daemon, &project, "kept", &path);
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    assert!(path.exists());
+    assert_ne!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/kept"]),
+        ""
+    );
+    let mut conn = Conn::open(daemon.path()).await;
+    assert_eq!(list_agents(&mut conn).await.len(), 1);
+}

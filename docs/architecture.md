@@ -176,7 +176,9 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   recorded in the same save that drops the pending worktree; a failed add drops it after
   git undid its work. When a daemon starts and finds pending worktrees, a crash or a
   shutdown cut a create short: it removes each one with its branch off the event loop
-  (keeping one an agent records) and keeps its name reserved until then (ADR 0020).
+  (keeping one an agent records) and keeps its name reserved until then (ADR 0020). One
+  git will not let go of (a locked worktree, or a branch checked out elsewhere) stays
+  pending, with a warning in the log, and is tried again at the next start.
 - **Shutdown** first stops every agent, including the processes a kill, restart or
   removal in flight took from it, then waits for the requests in flight and finishes each
   without starting anything: a kill answers as usual, a restart leaves its agent

@@ -925,21 +925,26 @@ impl Daemon {
                         let result = daemon.finish_create(&project, create, Some(worktree));
                         reservation.answer(daemon, result.map(Response::Agent));
                     }
-                    Some(Ok(())) => {
+                    Some(Ok(())) => daemon.discard_pending(pending, move |daemon, gone| {
+                        let what = if gone {
+                            "its worktree was removed"
+                        } else {
+                            "its worktree is removed at the next start"
+                        };
                         let message = format!(
-                            "the daemon shut down before {} started; its worktree was removed",
+                            "the daemon shut down before {} started; {what}",
                             create.name
                         );
-                        daemon.discard_pending(pending, |daemon| {
-                            reservation.answer(daemon, Err(message));
-                        });
-                    }
+                        reservation.answer(daemon, Err(message));
+                    }),
                     Some(Err(e)) => {
-                        daemon.forget_pending(&pending);
-                        daemon.persist();
+                        if plan.fresh {
+                            daemon.forget_pending(&pending);
+                            daemon.persist();
+                        }
                         reservation.answer(daemon, Err(e));
                     }
-                    None if plan.fresh => daemon.discard_pending(pending, |daemon| {
+                    None if plan.fresh => daemon.discard_pending(pending, |daemon, _| {
                         reservation.answer(daemon, Err(failed));
                     }),
                     None => reservation.answer(daemon, Err(failed)),
@@ -953,11 +958,12 @@ impl Daemon {
     }
 
     /// Removes, off the event loop, the worktree and branch a create may have left, then
-    /// forgets it and runs `then`. Its name stays taken until then.
+    /// runs `then` with whether they are gone. Until they are, the worktree stays pending,
+    /// in `state.toml` and keeping its name, so the next start tries again.
     fn discard_pending(
         &mut self,
         pending: PendingWorktree,
-        then: impl FnOnce(&mut Daemon) + Send + 'static,
+        then: impl FnOnce(&mut Daemon, bool) + Send + 'static,
     ) {
         let Some(repo) = self
             .projects
@@ -967,17 +973,29 @@ impl Daemon {
         else {
             self.forget_pending(&pending);
             self.persist();
-            then(self);
+            then(self, true);
             return;
         };
         let (path, branch) = (pending.path.clone(), pending.branch.clone());
         self.off_loop(
             "worktree",
             move || git::discard_worktree(&repo, &path, &branch),
-            move |daemon, _| {
-                daemon.forget_pending(&pending);
+            move |daemon, gone| {
+                let gone = gone == Some(true);
+                if gone {
+                    daemon.forget_pending(&pending);
+                } else {
+                    tracing::warn!(
+                        path = %pending.path.display(),
+                        branch = %pending.branch,
+                        "could not remove the worktree of a create that never finished; trying again at the next start"
+                    );
+                    if !daemon.pending_worktrees.contains(&pending) {
+                        daemon.pending_worktrees.push(pending);
+                    }
+                }
                 daemon.persist();
-                then(daemon);
+                then(daemon, gone);
             },
         );
     }
@@ -1002,7 +1020,7 @@ impl Daemon {
                 branch = %pending.branch,
                 "removing the worktree of a create that never finished"
             );
-            self.discard_pending(pending, |_| {});
+            self.discard_pending(pending, |_, _| {});
         }
     }
 
@@ -1198,10 +1216,13 @@ impl Daemon {
             "shutting down without these requests; worktrees being created are removed at the next start"
         );
         for reservation in self.creating.clone() {
-            let message = format!(
-                "the daemon shut down before {} started; its worktree is removed at the next start",
-                reservation.name
-            );
+            let recorded = self.pending_worktrees.iter().any(|pending| {
+                pending.project == reservation.project && pending.name == reservation.name
+            });
+            let mut message = format!("the daemon shut down before {} started", reservation.name);
+            if recorded {
+                message.push_str("; its worktree is removed at the next start");
+            }
             reservation.answer(self, Err(message));
         }
     }
@@ -2277,11 +2298,20 @@ mod tests {
         let mut daemon = test_daemon(dir.path());
         let (outbox, mut outgoing) = outbox::outbox();
         daemon.add_client(7, outbox, Vec::new());
-        daemon.creating.push(Reservation {
-            project: ProjectId::random(),
-            name: "hung".into(),
-            client: 7,
-            request_id: 3,
+        let project = ProjectId::random();
+        for (name, request_id) in [("planning", 3), ("adding", 4)] {
+            daemon.creating.push(Reservation {
+                project,
+                name: name.into(),
+                client: 7,
+                request_id,
+            });
+        }
+        daemon.pending_worktrees.push(PendingWorktree {
+            project,
+            name: "adding".into(),
+            path: dir.path().join("worktrees/p/adding"),
+            branch: "lazyagents/adding".into(),
         });
         let (release, hung) = std::sync::mpsc::channel::<()>();
         daemon.off_loop("worktree", move || hung.recv(), |_, _| {});
@@ -2294,13 +2324,22 @@ mod tests {
         );
         assert!(daemon.jobs.is_empty());
         assert!(daemon.creating.is_empty());
-        match outgoing.try_recv() {
-            Some(ServerMessage::Response {
-                id: 3,
-                result: Err(e),
-            }) => assert!(e.contains("shut down before hung started"), "{e}"),
-            other => panic!("unexpected {other:?}"),
+        let mut answers = HashMap::new();
+        while let Some(message) = outgoing.try_recv() {
+            if let ServerMessage::Response { id, result: Err(e) } = message {
+                answers.insert(id, e);
+            }
         }
+        assert_eq!(
+            answers.get(&3).map(String::as_str),
+            Some("the daemon shut down before planning started")
+        );
+        assert_eq!(
+            answers.get(&4).map(String::as_str),
+            Some(
+                "the daemon shut down before adding started; its worktree is removed at the next start"
+            )
+        );
         drop(release);
     }
 

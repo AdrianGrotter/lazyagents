@@ -5,7 +5,7 @@ use std::path::Path;
 use common::{git, repo};
 use daemon::git::{
     add_worktree, check_branch, copy_worktree_includes, current_branch, delete_merged_branch, diff,
-    dirty_files, merge, remove_worktree, stat,
+    dirty_files, discard_worktree, merge, remove_worktree, stat,
 };
 use protocol::{DiffScope, GitStat};
 
@@ -485,4 +485,24 @@ fn worktree_include_copies_many_ignored_files_beside_an_ignored_directory() {
     let copied = copy_worktree_includes(repo.path(), &wt).expect("copy");
     assert_eq!(copied, expected);
     assert!(!wt.join("cache/drop").exists());
+}
+
+#[test]
+fn discarding_a_worktree_git_keeps_reports_what_is_left() {
+    let repo = repo();
+    let root = tempfile::tempdir().expect("worktree root");
+    let wt = root.path().canonicalize().expect("canonical").join("wt");
+    add_worktree(repo.path(), &wt, "lazyagents/wt", "main").expect("add");
+    let wt_arg = wt.to_str().expect("utf8");
+    git(repo.path(), &["worktree", "lock", wt_arg]);
+
+    assert!(!discard_worktree(repo.path(), &wt, "lazyagents/wt"));
+    assert_ne!(git(repo.path(), &["branch", "--list", "lazyagents/wt"]), "");
+
+    git(repo.path(), &["worktree", "unlock", wt_arg]);
+    assert!(discard_worktree(repo.path(), &wt, "lazyagents/wt"));
+    assert_eq!(git(repo.path(), &["branch", "--list", "lazyagents/wt"]), "");
+    assert!(!wt.exists());
+    let worktrees = git(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert!(!worktrees.contains(wt_arg), "{worktrees}");
 }

@@ -11,7 +11,7 @@ Removing them later needs to know which worktree and branch the create made. A b
 
 ## Decision
 
-The create plans its worktree first, off the loop: branch, base, path, and whether the path or the branch exists already. Only when neither does, the loop records `{ project, name, path, branch }` under `pending_worktrees` in `state.toml` before git adds the worktree. The agent is recorded in the same save that drops the pending entry; a failed add drops it once git undid its work. A daemon that starts with pending worktrees removes each one, with its branch, off the loop, unless an agent records that path, and reserves its name until then. The field is optional and left out when empty, so files written before it load unchanged and an older daemon reading a newer file ignores it.
+The create plans its worktree first, off the loop: branch, base, path, and whether the path or the branch exists already. Only when neither does, the loop records `{ project, name, path, branch }` under `pending_worktrees` in `state.toml` before git adds the worktree. The agent is recorded in the same save that drops the pending entry; a failed add drops it once git undid its work. A daemon that starts with pending worktrees removes each one, with its branch, off the loop, unless an agent records that path, and reserves its name until then. A pending worktree is dropped only once its directory, git's record of it and its branch are all gone; one git keeps (a locked worktree) stays pending and is tried again at the next start. The field is optional and left out when empty, so files written before it load unchanged and an older daemon reading a newer file ignores it.
 
 ## Alternatives
 
