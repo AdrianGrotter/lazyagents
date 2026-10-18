@@ -1375,16 +1375,16 @@ impl Daemon {
         );
     }
 
-    /// Merges on its own thread, like a git query, since the user's merge hooks may take
-    /// their time.
-    fn merge_agent(&self, client: ClientId, request_id: u64, id: AgentId) -> Reply {
+    /// Merges on its own thread, since the user's merge hooks may take their time; the
+    /// agent is busy meanwhile, so its worktree and branch stay put.
+    fn merge_agent(&mut self, client: ClientId, request_id: u64, id: AgentId) -> Reply {
         let agent = match self.idle(id) {
             Ok(agent) => agent,
-            Err(e) => return Reply::Now(Box::new(Err(e))),
+            Err(e) => return now(Err(e)),
         };
         let Some(worktree) = agent.record.worktree.clone() else {
             let message = format!("{} has no worktree branch to merge", agent.record.name);
-            return Reply::Now(Box::new(Err(message)));
+            return now(Err(message));
         };
         let Some(project) = self
             .projects
@@ -1393,26 +1393,27 @@ impl Daemon {
             .map(|p| p.path.clone())
         else {
             let message = format!("unknown project {}", agent.record.project);
-            return Reply::Now(Box::new(Err(message)));
+            return now(Err(message));
         };
-        let Some(tx) = self.clients.get(&client).map(|c| c.tx.clone()) else {
-            return Reply::Deferred;
-        };
-        let spawned = std::thread::Builder::new()
-            .name("git-merge".into())
-            .spawn(move || {
-                let result = git::merge(&project, &worktree.path, &worktree.branch, &worktree.base)
-                    .map(Response::Done)
-                    .map_err(|e| format!("{e:#}"));
-                let _ = tx.send(ServerMessage::Response {
-                    id: request_id,
-                    result,
-                });
-            });
-        match spawned {
-            Ok(_) => Reply::Deferred,
-            Err(e) => Reply::Now(Box::new(Err(format!("spawning a git thread: {e}")))),
+        if let Some(agent) = self.agents.get_mut(&id) {
+            agent.busy = Some("being merged");
         }
+        self.off_loop(
+            "git-merge",
+            move || {
+                git::merge(&project, &worktree.path, &worktree.branch, &worktree.base)
+                    .map(Response::Done)
+                    .map_err(|e| format!("{e:#}"))
+            },
+            move |daemon, merged| {
+                if let Some(agent) = daemon.agents.get_mut(&id) {
+                    agent.busy = None;
+                }
+                let result = merged.unwrap_or_else(|| Err("merging failed".into()));
+                daemon.reply(client, request_id, result);
+            },
+        );
+        Reply::Deferred
     }
 
     /// Runs the query on its own thread and answers the client from there; an answer

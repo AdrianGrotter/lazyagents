@@ -149,9 +149,10 @@ which ends with it.
 
 While such work is in flight the daemon keeps its state consistent (ADR 0019):
 
-- **Kill, restart and remove** mark the agent busy until they are answered. A kill,
+- **Kill, restart, remove and merge** mark the agent busy until they are answered. A kill,
   restart, remove, merge or rename of it is refused meanwhile with `<name> is stopping; try
-  again once that is done` (`restarting` or `being removed` in place of `stopping`).
+  again once that is done` (`restarting`, `being removed` or `being merged` in place of
+  `stopping`), so a removal never takes the worktree or branch from under a merge.
   Everything else (input, resize, scroll, subscribe, hooks, usage, git queries) is served
   against the agent as it is; a removal's checks (merged branch, uncommitted changes) run on its thread
   before the stop, and a refusal leaves the agent as it was.

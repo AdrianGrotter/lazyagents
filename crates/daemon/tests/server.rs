@@ -3347,3 +3347,43 @@ async fn requests_are_answered_while_an_agent_is_killed() {
     ));
     assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived kill");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_being_merged_refuses_other_lifecycle_requests() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let agent = create_in_worktree(&mut conn, &project, "merging", &["sleep", "30"])
+        .await
+        .expect("create");
+    let path = agent.worktree.as_ref().expect("worktree").path.clone();
+    let gate = Gate::fsmonitor(repo.path());
+    gate.arm();
+    let merge = conn.send(Request::MergeAgent { id: agent.id }).await;
+    gate.entered().await;
+
+    let mut other = Conn::open(daemon.path()).await;
+    for request in [
+        Request::RemoveAgent {
+            id: agent.id,
+            remove_worktree: true,
+            force: true,
+            delete_branch: false,
+        },
+        Request::MergeAgent { id: agent.id },
+        Request::KillAgent { id: agent.id },
+    ] {
+        let err = other.request(request).await.expect_err("busy");
+        assert!(err.contains("merging is being merged"), "{err}");
+    }
+    assert!(path.exists());
+
+    gate.open();
+    assert!(
+        matches!(conn.response(merge).await, Ok(Response::Done(_))),
+        "the merge failed"
+    );
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill once merged");
+}
