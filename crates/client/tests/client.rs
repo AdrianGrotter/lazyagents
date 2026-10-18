@@ -454,3 +454,16 @@ async fn a_state_dir_too_long_for_a_socket_is_refused_before_spawning() {
     assert!(message.contains("LAZYAGENTS_STATE_DIR"), "{message}");
     assert!(!long.exists(), "the state dir was created anyway");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relative_state_dir_is_measured_as_the_daemon_will_bind_it() {
+    let relative = format!("{}s", "../".repeat(28));
+    let paths = StatePaths::new(&relative);
+    assert!(paths.socket().as_os_str().len() < 100, "short as written");
+    let Err(error) = Client::connect_or_spawn(&paths, std::path::Path::new("/usr/bin/false")).await
+    else {
+        panic!("connected through an unusable socket path");
+    };
+    let message = format!("{error:#}");
+    assert!(message.contains("too long for a unix socket"), "{message}");
+}

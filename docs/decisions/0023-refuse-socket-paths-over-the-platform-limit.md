@@ -9,7 +9,7 @@ The daemon listens on `<state dir>/daemon.sock`. A unix socket path must fit `su
 
 ## Decision
 
-`Client::connect_or_spawn` checks the socket path before connecting or spawning and fails with the path, its length, the limit and the advice to point `LAZYAGENTS_STATE_DIR` at a shorter path. The limit is the platform's own (104 off Linux and Android, 108 on them), so Linux users keep the extra four bytes.
+`Client::connect_or_spawn` checks the socket path before connecting or spawning, measuring it as the spawned daemon will bind it (the state directory made absolute) and failing with the path, its length, the limit and the advice to point `LAZYAGENTS_STATE_DIR` at a shorter path. The check lives only there: a directly run `lazyagents daemon` relies on the bind error. The limit is the platform's own (104 off Linux and Android, 108 on them), so Linux users keep the extra four bytes.
 
 ## Alternatives
 

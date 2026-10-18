@@ -202,7 +202,9 @@ const SOCKET_PATH_LIMIT: usize = 104;
 fn check_socket_path_length(paths: &StatePaths) -> anyhow::Result<()> {
     use std::os::unix::ffi::OsStrExt;
 
-    let socket = paths.socket();
+    let dir = std::path::absolute(paths.dir())
+        .with_context(|| format!("resolving {}", paths.dir().display()))?;
+    let socket = StatePaths::new(dir).socket();
     let length = socket.as_os_str().as_bytes().len();
     if length >= SOCKET_PATH_LIMIT {
         anyhow::bail!(
