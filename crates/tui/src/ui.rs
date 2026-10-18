@@ -740,11 +740,7 @@ fn draw_not_running(frame: &mut Frame, app: &App, agent: &AgentInfo, area: Rect)
         return;
     }
     let key = |action| app.keymap.first_key(action);
-    let verb = if agent.status == Status::Stopped {
-        "start"
-    } else {
-        "restart"
-    };
+    let verb = start_verb(agent.status);
     let text = format!(
         " {} · {} {verb} · {} remove",
         agent.status.label(),

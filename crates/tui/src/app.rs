@@ -2278,15 +2278,12 @@ impl App {
 
     /// Whether the next-attention key has an agent to go to besides the selected one.
     pub fn others_need_attention(&self) -> bool {
-        let current = self.selected_agent().map(|a| a.id);
-        self.agents.iter().any(|a| {
-            Some(a.id) != current
-                && self.matches_filter(a)
-                && (a.status == Status::NeedsInput || self.unseen.contains(&a.id))
-        })
+        self.next_attention_target().is_some()
     }
 
-    fn next_attention(&mut self) {
+    /// The agent the next-attention key goes to: after the selection in list order, the
+    /// first other agent that needs input, else the first other one that is done.
+    fn next_attention_target(&self) -> Option<AgentId> {
         let position = |id: ProjectId| self.projects.iter().position(|p| p.id == id);
         let mut ordered: Vec<&AgentInfo> = self
             .agents
@@ -2302,15 +2299,18 @@ impl App {
             .map(|offset| ordered[(start + offset) % ordered.len()])
             .filter(|a| Some(a.id) != current)
             .collect();
-        let next = others
+        others
             .iter()
             .find(|a| a.status == Status::NeedsInput)
             .or_else(|| others.iter().find(|a| self.unseen.contains(&a.id)))
-            .map(|a| a.id);
+            .map(|a| a.id)
+    }
+
+    fn next_attention(&mut self) {
         let current_needs_input = self
             .selected_agent()
             .is_some_and(|a| a.status == Status::NeedsInput);
-        match next {
+        match self.next_attention_target() {
             Some(id) => self.select_agent(id),
             None if current_needs_input => self.fail("no other agent needs attention"),
             None => self.fail("no agent needs attention"),
