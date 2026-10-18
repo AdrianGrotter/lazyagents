@@ -983,3 +983,127 @@ fn an_unreadable_direnv_diff_still_starts_agents() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(wait_for_file(&started).trim(), "started");
 }
+
+/// The TUI in a detached session of `scripts/tmux-harness.sh`, on a tmux server whose
+/// socket lives in a temp dir of its own; the session is stopped on drop.
+struct Tui {
+    sockets: tempfile::TempDir,
+}
+
+impl Tui {
+    const SESSION: &str = "tui";
+
+    fn start(env: &TestEnv, config: &str) -> Self {
+        let config_file = env.state.path().join("tui-config.toml");
+        std::fs::write(&config_file, config).expect("tui config");
+        let tui = Tui {
+            sockets: tempfile::tempdir().expect("tmux socket dir"),
+        };
+        let command = format!(
+            "cd '{}' && exec env LAZYAGENTS_STATE_DIR='{}' LAZYAGENTS_CONFIG='{}' SHELL=/bin/sh '{BIN}'",
+            env.project.path().display(),
+            env.state.path().display(),
+            config_file.display(),
+        );
+        tui.harness(&[
+            "start",
+            Self::SESSION,
+            "120",
+            "32",
+            "--",
+            "sh",
+            "-c",
+            &command,
+        ]);
+        tui
+    }
+
+    fn command(&self) -> Command {
+        let mut command = without_direnv(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/tmux-harness.sh"
+        ));
+        command
+            .env("TMUX_TMPDIR", self.sockets.path())
+            .env("LAZYAGENTS_HARNESS_SERVER", "lazyagents-cli-test")
+            .stdin(Stdio::null());
+        command
+    }
+
+    fn harness(&self, args: &[&str]) {
+        let out = self
+            .command()
+            .args(args)
+            .output()
+            .expect("run tmux-harness.sh");
+        assert!(
+            out.status.success(),
+            "tmux-harness.sh {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn keys(&self, keys: &[&str]) {
+        self.harness(&[&["keys", Self::SESSION], keys].concat());
+    }
+
+    fn type_text(&self, text: &str) {
+        self.harness(&["type", Self::SESSION, text]);
+    }
+
+    fn wait_for(&self, text: &str) {
+        self.harness(&["wait-for", Self::SESSION, text, &WAIT.as_secs().to_string()]);
+    }
+}
+
+impl Drop for Tui {
+    fn drop(&mut self) {
+        let _ = self.command().args(["stop", Self::SESSION]).output();
+    }
+}
+
+#[test]
+fn the_tui_restarts_a_daemon_of_another_protocol_when_asked() {
+    let env = TestEnv::new();
+    let fake = ForeignDaemon::start(&env);
+    let tui = Tui::start(&env, "");
+    tui.wait_for("Restart the daemon? This stops every running agent.");
+    tui.wait_for("y restart · n quit");
+    tui.keys(&["y"]);
+    tui.wait_for("press a to add a project");
+    assert!(exited(&fake.0), "the old daemon still runs");
+    env.daemon_pid();
+    assert!(env.ok(&["ls"]).contains("no projects yet"));
+}
+
+#[test]
+fn a_terminal_command_gets_the_keyboard_until_it_exits() {
+    let env = TestEnv::new();
+    let answer = env.project.path().join("answer");
+    let typed = env.project.path().join("typed");
+    let config = format!(
+        r#"[[commands]]
+key = "T"
+description = "ask"
+context = "project"
+command = '''printf 'answer? '; until [ -e '{typed}' ]; do sleep 0.05; done; sleep 0.5; read line; echo "got:$line" > '{answer}.tmp'; mv '{answer}.tmp' '{answer}'; exit 4'''
+"#,
+        typed = typed.display(),
+        answer = answer.display()
+    );
+    let tui = Tui::start(&env, &config);
+    tui.wait_for("press a to add a project");
+    tui.keys(&["a"]);
+    tui.wait_for(" Add project ");
+    tui.keys(&["Enter"]);
+    tui.wait_for("no agents — press n");
+    tui.keys(&["T"]);
+    tui.wait_for("answer?");
+    tui.type_text("hello");
+    tui.keys(&["Enter"]);
+    std::fs::write(&typed, "").expect("typed marker");
+    assert_eq!(wait_for_file(&answer).trim(), "got:hello");
+    tui.wait_for("ask exited with 4");
+    tui.keys(&["n"]);
+    tui.wait_for(" New agent ");
+}
