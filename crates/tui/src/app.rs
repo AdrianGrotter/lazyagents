@@ -492,6 +492,8 @@ pub struct App {
     pub screen_size: Option<(u16, u16)>,
     pub message: Option<(String, Instant)>,
     pub message_kind: MessageKind,
+    /// A key or click came after the message was posted.
+    message_seen: bool,
     pub git_stats: HashMap<AgentId, GitStat>,
     pub diff: Option<DiffView>,
     pub scroll: Option<ScrollMode>,
@@ -561,6 +563,7 @@ impl App {
             screen_size: None,
             message: None,
             message_kind: MessageKind::Error,
+            message_seen: false,
             git_stats: HashMap::new(),
             diff: None,
             scroll: None,
@@ -703,10 +706,13 @@ impl App {
             .count()
     }
 
+    /// A message shows for `MESSAGE_TTL`; an error also stays after that until the user
+    /// presses a key or clicks, so it is never gone before anyone was there to read it.
     pub fn current_message(&self, now: Instant) -> Option<&str> {
+        let unread = self.message_kind == MessageKind::Error && !self.message_seen;
         self.message
             .as_ref()
-            .filter(|(_, at)| now.saturating_duration_since(*at) < MESSAGE_TTL)
+            .filter(|(_, at)| unread || now.saturating_duration_since(*at) < MESSAGE_TTL)
             .map(|(message, _)| message.as_str())
     }
 
@@ -719,11 +725,13 @@ impl App {
     pub fn fail(&mut self, message: impl Into<String>) {
         self.message = Some((message.into(), Instant::now()));
         self.message_kind = MessageKind::Error;
+        self.message_seen = false;
     }
 
     pub fn inform(&mut self, message: impl Into<String>) {
         self.message = Some((message.into(), Instant::now()));
         self.message_kind = MessageKind::Info;
+        self.message_seen = false;
     }
 
     /// A dirty-worktree refusal opens the force prompt only while the user is still
@@ -1321,6 +1329,7 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return Vec::new();
         }
+        self.message_seen = true;
         if !self.too_small && self.popup.as_ref().is_some_and(Popup::is_sending) {
             if key.code == KeyCode::Esc {
                 self.interactions += 1;
@@ -1801,6 +1810,9 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, event: MouseInput, areas: &Areas) -> Vec<Effect> {
+        if event.kind == MouseKind::Down {
+            self.message_seen = true;
+        }
         if self.too_small {
             if event.kind == MouseKind::Up {
                 self.selection = None;
@@ -3470,20 +3482,41 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn messages_expire() {
+    fn info_messages_expire() {
         let mut app = App::new(
             "/work".into(),
             "/bin/sh".into(),
             Some("/home/u".into()),
             Config::default(),
         );
-        app.fail("boom");
+        app.inform("done");
         let now = Instant::now();
-        assert_eq!(app.current_message(now), Some("boom"));
+        assert_eq!(app.current_message(now), Some("done"));
         assert_eq!(
             app.current_message(now + MESSAGE_TTL + Duration::from_millis(1)),
             None
         );
+    }
+
+    #[test]
+    fn an_error_stays_past_its_time_until_a_key_or_click() {
+        let (mut app, _, _) = two_agents();
+        app.fail("boom");
+        let later = Instant::now() + MESSAGE_TTL + Duration::from_secs(60);
+        assert_eq!(app.current_message(later), Some("boom"));
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.current_message(Instant::now()), Some("boom"));
+        assert_eq!(app.current_message(later), None);
+
+        app.fail("again");
+        let areas = crate::ui::layout(ratatui::layout::Rect::new(0, 0, 100, 30), &app);
+        let at = MouseInput {
+            kind: MouseKind::Down,
+            col: 0,
+            row: 0,
+        };
+        let _ = app.on_mouse(at, &areas);
+        assert_eq!(app.current_message(later), None);
     }
 
     #[test]

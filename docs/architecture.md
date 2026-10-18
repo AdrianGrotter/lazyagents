@@ -342,8 +342,8 @@ daemon last told it.
   keys for the help popup and the hints. The pane prefix state lives in `App` and is
   cleared whenever focus leaves the pane. `config::load` reads the config file once at
   startup into a `Config` (keymap, presets, theme, notifications, custom commands,
-  warnings) that never fails: unusable entries keep their defaults and become warnings
-  shown in the status bar
+  warnings) that never fails: unusable entries keep their defaults and become warnings,
+  which the TUI lists in a popup when it starts
   ([configuration.md](configuration.md)).
 - **Rendering** (`ui.rs`): draws the sidebar (Projects, Agents, Info), the agent pane or
   the diff view, the status line and popups from `App`; the pane copies the daemon's cell
@@ -353,8 +353,9 @@ daemon last told it.
   model, context (a bar where it fits), cost and plan limits its status line reported, and
   cwd. Context and limits turn yellow from 60 % and red from 80 %; paths and branches too
   long for the box are cut on the left. The box is sized to its rows: it grows as long as
-  the Agents box keeps 8 rows, and keeps 6 rows while the content fits. The status line shows a transient message in red, then `│`
-  and the key hint, cut off on the right. Below a 20×5 pane only "terminal too small" is
+  the Agents box keeps 8 rows, and keeps 6 rows while the content fits. The status line shows a message, then `│`
+  and the key hint, cut off on the right: a notice in the accent colour for 5 s, an error in
+  red for 5 s and after that until the next key or click. Below a 20×5 pane only "terminal too small" is
   drawn, and keys do nothing except quitting from the sidebar and leaving the pane. Status
   glyphs animate from a frame counter the runtime ticks every 100 ms while an agent is
   starting or working.
@@ -463,8 +464,8 @@ daemon last told it.
   state.
 - Spawn failure (command not found, cwd missing) → agent `Exited`, error rendered in the
   pane and the status line.
-- Worktree errors (branch exists, base missing) → shown in the status bar; nothing is
-  created.
+- Worktree errors (branch exists, base missing) → shown in the new agent form, which keeps
+  its input; nothing is created.
 - `lazyagents hook` never blocks or fails Claude: it checks its environment, reads stdin and
   talks to the daemon within one 200 ms budget, prints nothing and always exits 0.
 - Fatal errors while the daemon starts are written to `daemon.log`.

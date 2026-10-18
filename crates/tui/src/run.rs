@@ -312,7 +312,8 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
             _ = tick.tick() => {
                 frame_counter = frame_counter.wrapping_add(1);
                 send_all(&requests, app.on_tick(Instant::now()));
-                redraw = app.animating() || message_shown;
+                let message_now = app.current_message(Instant::now()).is_some();
+                redraw = app.animating() || message_shown != message_now;
                 continue;
             }
         };
