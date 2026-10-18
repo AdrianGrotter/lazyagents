@@ -31,6 +31,18 @@ pub struct StoredState {
     pub projects: Vec<Project>,
     #[serde(default)]
     pub agents: Vec<AgentRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_worktrees: Vec<PendingWorktree>,
+}
+
+/// A worktree, with its branch, that git may be making for an agent not recorded yet; what
+/// a create left when the daemon stopped before it finished is removed at the next start.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingWorktree {
+    pub project: ProjectId,
+    pub name: String,
+    pub path: PathBuf,
+    pub branch: String,
 }
 
 pub fn load(path: &Path) -> anyhow::Result<StoredState> {
@@ -103,6 +115,7 @@ mod tests {
                 },
             ],
             projects: vec![project],
+            pending_worktrees: Vec::new(),
         }
     }
 
@@ -198,5 +211,61 @@ mod tests {
         let path = dir.path().join("state.toml");
         save(&path, &StoredState::default()).expect("save");
         assert_eq!(load(&path).expect("load"), StoredState::default());
+    }
+
+    #[test]
+    fn a_state_file_from_before_pending_worktrees_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.toml");
+        fs::write(
+            &path,
+            "[[projects]]\n\
+             id = \"7d0c1f5e-2b4a-4f7e-9c51-0a6f3d2e8b11\"\n\
+             name = \"lazyagents\"\n\
+             path = \"/Users/u/git/lazyagents\"\n\
+             \n\
+             [[agents]]\n\
+             id = \"0b6f4c2a-93d1-4e8f-a7b5-6c2d1e9f3a40\"\n\
+             project = \"7d0c1f5e-2b4a-4f7e-9c51-0a6f3d2e8b11\"\n\
+             name = \"api\"\n\
+             kind = \"Claude\"\n\
+             command = [\"claude\"]\n\
+             cwd = \"/Users/u/.local/state/lazyagents/worktrees/lazyagents-7d0c1f5e/api\"\n\
+             session_id = \"5f1e2d3c-4b5a-4968-8776-655443322110\"\n\
+             resumable = true\n\
+             title = \"Fix the parser\"\n\
+             \n\
+             [agents.worktree]\n\
+             path = \"/Users/u/.local/state/lazyagents/worktrees/lazyagents-7d0c1f5e/api\"\n\
+             branch = \"lazyagents/api\"\n\
+             base = \"main\"\n",
+        )
+        .expect("write");
+        let state = load(&path).expect("load");
+        assert_eq!(state.projects.len(), 1);
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(
+            state.agents[0].worktree.as_ref().map(|w| w.branch.as_str()),
+            Some("lazyagents/api")
+        );
+        assert!(state.pending_worktrees.is_empty());
+    }
+
+    #[test]
+    fn pending_worktrees_round_trip_and_stay_out_of_the_file_when_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.toml");
+        let mut state = sample();
+        save(&path, &state).expect("save");
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(!text.contains("pending"), "{text}");
+        state.pending_worktrees.push(PendingWorktree {
+            project: state.projects[0].id,
+            name: "web".into(),
+            path: "/Users/u/.local/state/lazyagents/worktrees/lazyagents-7d0c1f5e/web".into(),
+            branch: "lazyagents/web".into(),
+        });
+        save(&path, &state).expect("save");
+        assert_eq!(load(&path).expect("load"), state);
     }
 }

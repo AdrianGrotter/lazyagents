@@ -27,7 +27,7 @@ use crate::lock::InstanceLock;
 use crate::reap::{self, ProcessTable, Tracked};
 use crate::spawn::{Launch, SpawnContext, blocked_envrc_hint, hook_settings, spawn_spec};
 use crate::status::{awaits_trust, on_hook, settle, trust_keys};
-use crate::store::{self, AgentRecord, StoredState};
+use crate::store::{self, AgentRecord, PendingWorktree, StoredState};
 use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent, session_title};
 use crate::{direnv, git};
 
@@ -125,6 +125,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let mut daemon = Daemon::new(paths.clone(), config.exe, config.direnv, state, events_tx);
     daemon.claude_config = config.claude_config;
     daemon.revert_direnv = daemon.direnv.as_deref().is_some_and(inherits_direnv_env);
+    daemon.discard_leftovers();
     let mut next_client: ClientId = 1;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -432,6 +433,8 @@ struct Daemon {
     jobs: Vec<JoinHandle<Option<Finish>>>,
     /// Names reserved by worktree agents being created.
     creating: Vec<(ProjectId, String)>,
+    /// Worktrees git may be making, kept in `state.toml` until their agents are recorded.
+    pending_worktrees: Vec<PendingWorktree>,
     shutting_down: bool,
 }
 
@@ -471,6 +474,7 @@ impl Daemon {
             revert_direnv: false,
             jobs: Vec::new(),
             creating: Vec::new(),
+            pending_worktrees: state.pending_worktrees,
             shutting_down: false,
         }
     }
@@ -689,6 +693,7 @@ impl Daemon {
         let state = StoredState {
             projects: self.projects.clone(),
             agents,
+            pending_worktrees: self.pending_worktrees.clone(),
         };
         if let Err(e) = store::save(&self.paths.state_file(), &state) {
             tracing::error!(error = %format!("{e:#}"), "persisting state failed");
@@ -723,6 +728,10 @@ impl Daemon {
     fn remove_project(&mut self, id: ProjectId) -> Result<(), String> {
         if self.agents.values().any(|a| a.record.project == id)
             || self.creating.iter().any(|(project, _)| *project == id)
+            || self
+                .pending_worktrees
+                .iter()
+                .any(|pending| pending.project == id)
         {
             return Err("remove the project's agents first".into());
         }
@@ -765,9 +774,19 @@ impl Daemon {
                 "an agent named {name} already exists in this project"
             ));
         }
-        if self.creating.iter().any(|(reserved, reserved_name)| {
-            *reserved == project && reserved_name.eq_ignore_ascii_case(name)
-        }) {
+        let reserved = self
+            .creating
+            .iter()
+            .map(|(project, name)| (*project, name.as_str()))
+            .chain(
+                self.pending_worktrees
+                    .iter()
+                    .map(|pending| (pending.project, pending.name.as_str())),
+            )
+            .any(|(reserved, reserved_name)| {
+                reserved == project && reserved_name.eq_ignore_ascii_case(name)
+            });
+        if reserved {
             return Err(format!(
                 "an agent named {name} is being created in this project"
             ));
@@ -800,29 +819,145 @@ impl Daemon {
         let reservation = (project.id, create.name.clone());
         self.creating.push(reservation.clone());
         let state = self.paths.dir().to_path_buf();
-        let direnv = self.direnv.clone();
         let (job_project, name) = (project.clone(), create.name.clone());
         self.off_loop(
             "worktree",
-            move || prepare_worktree(&state, &job_project, &name, request, direnv.as_deref()),
-            move |daemon, prepared| {
-                daemon.creating.retain(|reserved| *reserved != reservation);
-                let result = match prepared {
-                    None => Err(format!("creating the worktree for {} failed", create.name)),
-                    Some(Err(e)) => Err(e),
-                    Some(Ok(worktree)) if daemon.shutting_down => {
-                        git::discard_worktree(&project.path, &worktree.path, &worktree.branch);
-                        Err(format!(
-                            "the daemon shut down before {} started; its worktree was removed",
-                            create.name
-                        ))
+            move || plan_worktree(&state, &job_project, &name, request),
+            move |daemon, planned| {
+                let message = match planned {
+                    Some(Ok(plan)) if !daemon.shutting_down => {
+                        let creation = Creation {
+                            client,
+                            request_id,
+                            project,
+                            create,
+                            reservation,
+                        };
+                        daemon.make_worktree(creation, plan);
+                        return;
                     }
-                    Some(Ok(worktree)) => daemon.finish_create(&project, create, Some(worktree)),
+                    Some(Ok(_)) => format!("the daemon shut down before {} started", create.name),
+                    Some(Err(e)) => e,
+                    None => format!("creating the worktree for {} failed", create.name),
                 };
-                daemon.reply(client, request_id, result.map(Response::Agent));
+                daemon.creating.retain(|reserved| *reserved != reservation);
+                daemon.reply(client, request_id, Err(message));
             },
         );
         Reply::Deferred
+    }
+
+    /// Records the worktree as pending, unless its path or branch was there before, then
+    /// has git make it off the event loop; the agent is recorded in the same save that
+    /// drops the pending worktree.
+    fn make_worktree(&mut self, creation: Creation, plan: PlannedWorktree) {
+        let worktree = plan.worktree;
+        let pending = PendingWorktree {
+            project: creation.project.id,
+            name: creation.create.name.clone(),
+            path: worktree.path.clone(),
+            branch: worktree.branch.clone(),
+        };
+        if plan.fresh {
+            self.pending_worktrees.push(pending.clone());
+            self.persist();
+        }
+        let direnv = self.direnv.clone();
+        let (job_project, job_worktree) = (creation.project.clone(), worktree.clone());
+        self.off_loop(
+            "worktree",
+            move || add_worktree(&job_project, &job_worktree, direnv.as_deref()),
+            move |daemon, made| {
+                let name = creation.create.name.clone();
+                match made {
+                    Some(Ok(())) if !daemon.shutting_down => {
+                        daemon.forget_pending(&pending);
+                        daemon.creating.retain(|reserved| *reserved != creation.reservation);
+                        let result = daemon.finish_create(
+                            &creation.project,
+                            creation.create,
+                            Some(worktree),
+                        );
+                        daemon.reply(creation.client, creation.request_id, result.map(Response::Agent));
+                    }
+                    Some(Ok(())) => daemon.discard_pending(pending, move |daemon| {
+                        creation.answer(
+                            daemon,
+                            format!(
+                                "the daemon shut down before {name} started; its worktree was removed"
+                            ),
+                        );
+                    }),
+                    Some(Err(e)) => {
+                        daemon.forget_pending(&pending);
+                        daemon.persist();
+                        creation.answer(daemon, e);
+                    }
+                    None if plan.fresh => daemon.discard_pending(pending, move |daemon| {
+                        creation.answer(daemon, format!("creating the worktree for {name} failed"));
+                    }),
+                    None => creation.answer(daemon, format!("creating the worktree for {name} failed")),
+                }
+            },
+        );
+    }
+
+    fn forget_pending(&mut self, pending: &PendingWorktree) {
+        self.pending_worktrees.retain(|p| p != pending);
+    }
+
+    /// Removes, off the event loop, the worktree and branch a create may have left, then
+    /// forgets it and runs `then`. Its name stays taken until then.
+    fn discard_pending(
+        &mut self,
+        pending: PendingWorktree,
+        then: impl FnOnce(&mut Daemon) + Send + 'static,
+    ) {
+        let Some(repo) = self
+            .projects
+            .iter()
+            .find(|p| p.id == pending.project)
+            .map(|p| p.path.clone())
+        else {
+            self.forget_pending(&pending);
+            self.persist();
+            then(self);
+            return;
+        };
+        let (path, branch) = (pending.path.clone(), pending.branch.clone());
+        self.off_loop(
+            "worktree",
+            move || git::discard_worktree(&repo, &path, &branch),
+            move |daemon, _| {
+                daemon.forget_pending(&pending);
+                daemon.persist();
+                then(daemon);
+            },
+        );
+    }
+
+    /// Removes what creates left unfinished when the daemon last stopped.
+    fn discard_leftovers(&mut self) {
+        for pending in self.pending_worktrees.clone() {
+            let recorded = self.agents.values().any(|agent| {
+                agent
+                    .record
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|w| w.path == pending.path)
+            });
+            if recorded {
+                self.forget_pending(&pending);
+                self.persist();
+                continue;
+            }
+            tracing::info!(
+                path = %pending.path.display(),
+                branch = %pending.branch,
+                "removing the worktree of a create that never finished"
+            );
+            self.discard_pending(pending, |_| {});
+        }
     }
 
     fn finish_create(
@@ -1833,6 +1968,29 @@ struct Removal {
     delete_branch: bool,
 }
 
+/// A worktree create between planning its worktree and answering it.
+struct Creation {
+    client: ClientId,
+    request_id: u64,
+    project: Project,
+    create: CreateAgent,
+    reservation: (ProjectId, String),
+}
+
+impl Creation {
+    fn answer(self, daemon: &mut Daemon, error: String) {
+        daemon
+            .creating
+            .retain(|reserved| *reserved != self.reservation);
+        daemon.reply(self.client, self.request_id, Err(error));
+    }
+}
+
+struct PlannedWorktree {
+    worktree: WorktreeInfo,
+    fresh: bool,
+}
+
 /// Refuses a removal that would lose work: a branch its base does not contain, or, unless
 /// `force`, a worktree with changes.
 fn removable(
@@ -1896,43 +2054,14 @@ fn await_snapshot(snapshot: &Receiver<Vec<Tracked>>) -> Vec<Tracked> {
     }
 }
 
-/// Makes a new agent's worktree, copies the `.worktreeinclude` files into it and allows its
-/// `.envrc` when direnv allows the project's identical one.
-fn prepare_worktree(
+/// Where a new agent's worktree goes, its branch and its base; `fresh` unless the path or
+/// the branch exists already, when git refuses to make it and nothing needs undoing.
+fn plan_worktree(
     state: &Path,
     project: &Project,
     name: &str,
     request: WorktreeRequest,
-    direnv: Option<&Path>,
-) -> Result<WorktreeInfo, String> {
-    let worktree = add_worktree(state, project, name, request)?;
-    match git::copy_worktree_includes(&project.path, &worktree.path) {
-        Ok(copied) if !copied.is_empty() => {
-            tracing::info!(files = ?copied, "copied .worktreeinclude files")
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "copying .worktreeinclude files failed")
-        }
-    }
-    if let Some(direnv) = direnv {
-        match direnv::auto_allow(direnv, &project.path, &worktree.path, &[]) {
-            Ok(true) => {
-                tracing::info!(path = %worktree.path.display(), "allowed the worktree's .envrc")
-            }
-            Ok(false) => {}
-            Err(e) => tracing::warn!(error = %e, "checking the worktree's .envrc failed"),
-        }
-    }
-    Ok(worktree)
-}
-
-fn add_worktree(
-    state: &Path,
-    project: &Project,
-    name: &str,
-    request: WorktreeRequest,
-) -> Result<WorktreeInfo, String> {
+) -> Result<PlannedWorktree, String> {
     let branch = format!("lazyagents/{name}");
     git::check_branch(&branch).map_err(|e| format!("{e:#}"))?;
     let base = match request.base.filter(|b| !b.trim().is_empty()) {
@@ -1952,9 +2081,49 @@ fn add_worktree(
         .join("worktrees")
         .join(format!("{}-{}", project.name.replace('/', "-"), &id[..8]))
         .join(name);
-    git::add_worktree(&project.path, &path, &branch, &base).map_err(|e| format!("{e:#}"))?;
-    Ok(WorktreeInfo { path, branch, base })
+    let fresh = path.symlink_metadata().is_err()
+        && !git::branch_exists(&project.path, &branch).map_err(|e| format!("{e:#}"))?;
+    Ok(PlannedWorktree {
+        worktree: WorktreeInfo { path, branch, base },
+        fresh,
+    })
 }
+
+/// Makes a new agent's worktree, copies the `.worktreeinclude` files into it and allows its
+/// `.envrc` when direnv allows the project's identical one.
+fn add_worktree(
+    project: &Project,
+    worktree: &WorktreeInfo,
+    direnv: Option<&Path>,
+) -> Result<(), String> {
+    git::add_worktree(
+        &project.path,
+        &worktree.path,
+        &worktree.branch,
+        &worktree.base,
+    )
+    .map_err(|e| format!("{e:#}"))?;
+    match git::copy_worktree_includes(&project.path, &worktree.path) {
+        Ok(copied) if !copied.is_empty() => {
+            tracing::info!(files = ?copied, "copied .worktreeinclude files")
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "copying .worktreeinclude files failed")
+        }
+    }
+    if let Some(direnv) = direnv {
+        match direnv::auto_allow(direnv, &project.path, &worktree.path, &[]) {
+            Ok(true) => {
+                tracing::info!(path = %worktree.path.display(), "allowed the worktree's .envrc")
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "checking the worktree's .envrc failed"),
+        }
+    }
+    Ok(())
+}
+
 fn inherits_direnv_env(direnv: &Path) -> bool {
     match direnv::inherited_env(direnv) {
         Ok(inherited) => {

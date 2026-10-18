@@ -163,6 +163,13 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   Agent names in a project compare without regard to case, here and for existing agents,
   because they name worktree directories and branches, which a case-insensitive file
   system (the macOS default) cannot tell apart.
+- **A worktree in the making is recorded.** Before git adds the worktree, the create
+  records its path and branch in `state.toml` as a pending worktree, unless the path or
+  the branch exists already (git then refuses, and nothing needs undoing). The agent is
+  recorded in the same save that drops the pending worktree; a failed add drops it after
+  git undid its work. When a daemon starts and finds pending worktrees, a crash or a
+  shutdown cut a create short: it removes each one with its branch off the event loop
+  (keeping one an agent records) and keeps its name reserved until then (ADR 0020).
 - **Shutdown** first stops every agent, then waits for every request in flight and
   finishes it without starting anything: a kill answers as usual, a restart leaves its
   agent `Stopped` and answers `the daemon is shutting down`, a removal completes, and a
@@ -373,7 +380,7 @@ daemon last told it.
 
 - State dir: `$LAZYAGENTS_STATE_DIR` (a relative path is taken from the current
   directory), default `~/.local/state/lazyagents/`, created with mode 0700: `state.toml`
-  (projects, agents, session ids and titles, worktree info), `daemon.sock`, `daemon.lock`,
+  (projects, agents, session ids and titles, worktree info, worktrees being created), `daemon.sock`, `daemon.lock`,
   `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`, and `known-projects.toml`, which
   only the TUI writes: every project it has seen, kept after removal for the add picker
   (`known.rs`, ADR 0009).
@@ -414,6 +421,7 @@ daemon last told it.
 - Daemon crash (SIGKILL) → its PTYs close and agents receive SIGHUP; processes that
   ignore it or left the agent's session can outlive the daemon. On the next start agents
   load as `Stopped` and can be restarted.
+  A worktree it was creating, and its branch, are removed at the next start.
   Claude resumes only sessions that received a prompt
   (see [ADR 0006](decisions/0006-resume-only-prompted-sessions.md)).
 - A corrupt or empty `state.toml` → the daemon refuses to start and leaves the file

@@ -3387,3 +3387,88 @@ async fn an_agent_being_merged_refuses_other_lifecycle_requests() {
         .await
         .expect("kill once merged");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worktree_being_created_is_recorded_until_its_agent_is() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let state = StatePaths::new(daemon.path()).state_file();
+    let gate = Gate::post_checkout(repo.path());
+    let create = conn
+        .send(create_in_worktree_request(
+            &project,
+            "slow",
+            &["sleep", "30"],
+        ))
+        .await;
+    gate.entered().await;
+
+    let during = std::fs::read_to_string(&state).expect("state");
+    assert!(during.contains("[[pending_worktrees]]"), "{during}");
+    assert!(during.contains("lazyagents/slow"), "{during}");
+    gate.open();
+    let Ok(Response::Agent(agent)) = conn.response(create).await else {
+        panic!("create failed")
+    };
+    let after = std::fs::read_to_string(&state).expect("state");
+    assert!(!after.contains("pending_worktrees"), "{after}");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_leftovers_of_an_unfinished_create_are_removed_at_the_next_start() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let leftover = worktree_path(&daemon, &project, "ghost");
+    common::git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "lazyagents/ghost",
+            leftover.to_str().expect("utf8"),
+            "main",
+        ],
+    );
+    conn.request(Request::Shutdown).await.expect("shutdown");
+    daemon.exits_within(WAIT).await;
+    let state = StatePaths::new(daemon.path()).state_file();
+    let mut text = std::fs::read_to_string(&state).expect("state");
+    text.push_str(&format!(
+        "\n[[pending_worktrees]]\nproject = \"{}\"\nname = \"ghost\"\npath = \"{}\"\nbranch = \"lazyagents/ghost\"\n",
+        project.id,
+        leftover.display()
+    ));
+    std::fs::write(&state, text).expect("write state");
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while leftover.exists()
+        || std::fs::read_to_string(&state)
+            .expect("state")
+            .contains("ghost")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the leftover worktree was never removed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/*"]),
+        ""
+    );
+    let mut conn = Conn::open(daemon.path()).await;
+    let agent = create_in_worktree(&mut conn, &project, "ghost", &["sleep", "30"])
+        .await
+        .expect("the name is free again");
+    conn.request(Request::KillAgent { id: agent.id })
+        .await
+        .expect("kill");
+}

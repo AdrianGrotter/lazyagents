@@ -60,7 +60,7 @@ pub fn head_commit(repo: &Path) -> anyhow::Result<String> {
         .to_string())
 }
 
-fn branch_exists(repo: &Path, branch: &str) -> anyhow::Result<bool> {
+pub fn branch_exists(repo: &Path, branch: &str) -> anyhow::Result<bool> {
     let output = command(Some(repo))
         .args(["rev-parse", "--verify", "--quiet"])
         .arg(format!("refs/heads/{branch}"))
