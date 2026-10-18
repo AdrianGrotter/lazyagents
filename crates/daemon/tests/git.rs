@@ -494,12 +494,12 @@ fn discarding_a_worktree_git_keeps_reports_what_is_left() {
     let wt = root.path().canonicalize().expect("canonical").join("wt");
     add_worktree(repo.path(), &wt, "lazyagents/wt", "main").expect("add");
     let wt_arg = wt.to_str().expect("utf8");
-    let stuck = common::undeletable(&wt);
+    let stuck = common::Stuck::new(wt.join("stuck"));
 
     assert!(!discard_worktree(repo.path(), &wt, "lazyagents/wt"));
     assert!(wt.exists());
 
-    common::deletable(&stuck);
+    drop(stuck);
     assert!(discard_worktree(repo.path(), &wt, "lazyagents/wt"));
     assert_eq!(git(repo.path(), &["branch", "--list", "lazyagents/wt"]), "");
     assert!(!wt.exists());

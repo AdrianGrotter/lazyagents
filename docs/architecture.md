@@ -180,8 +180,8 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
 - **A worktree in the making is recorded.** Before git adds the worktree, the create
   records its path and branch in `state.toml` as a pending worktree, unless the path or
   the branch exists already (git then refuses, and nothing needs undoing). The agent is
-  recorded in the same save that drops the pending worktree; a failed add drops it after
-  git undid its work. When a daemon starts and finds pending worktrees, a crash or a
+  recorded in the same save that drops the pending worktree; a failed add drops it once
+  git undid its work, and keeps it, as after a crash, when git could not. When a daemon starts and finds pending worktrees, a crash or a
   shutdown cut a create short: it removes each one with its branch off the event loop
   (keeping one an agent records) and keeps its name reserved until then (ADR 0021). A
   locked worktree is removed too (`git worktree remove --force --force`): git locks one

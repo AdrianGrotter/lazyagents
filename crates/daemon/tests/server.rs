@@ -3795,7 +3795,7 @@ async fn a_leftover_git_will_not_let_go_of_is_retried_at_the_next_start() {
             "main",
         ],
     );
-    let stuck = common::undeletable(&leftover);
+    let stuck = common::Stuck::new(leftover.join("stuck"));
     drop(conn);
     stop_daemon(&mut daemon).await;
     record_pending_worktree(&daemon, &project, "ghost", &leftover);
@@ -3824,7 +3824,7 @@ async fn a_leftover_git_will_not_let_go_of_is_retried_at_the_next_start() {
     assert!(kept.contains("lazyagents/ghost"), "{kept}");
     assert!(leftover.exists());
 
-    common::deletable(&stuck);
+    drop(stuck);
     daemon.task = Some(spawn_daemon(daemon.path()).await);
     wait_until_no_pending_worktree(&daemon).await;
     assert_eq!(
@@ -4060,4 +4060,49 @@ async fn a_pending_worktree_of_a_project_no_longer_a_repo_is_dropped_at_the_next
     conn.request(Request::RemoveProject { id: project.id })
         .await
         .expect("the project can be removed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_add_git_could_not_undo_stays_pending_until_the_next_start() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let hooks = tempfile::tempdir().expect("hooks dir");
+    let hook = hooks.path().join("post-checkout");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nmkdir stuck && echo x > stuck/file && chmod 500 stuck\nexit 1\n",
+    )
+    .expect("hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    common::git(
+        repo.path(),
+        &[
+            "config",
+            "core.hooksPath",
+            hooks.path().to_str().expect("utf8"),
+        ],
+    );
+    let path = worktree_path(&daemon, &project, "hooked");
+    let stuck = common::Stuck(path.join("stuck"));
+
+    create_in_worktree(&mut conn, &project, "hooked", &["sleep", "30"])
+        .await
+        .expect_err("post-checkout fails");
+    assert!(path.join("stuck").exists());
+    let state = StatePaths::new(daemon.path()).state_file();
+    let kept = std::fs::read_to_string(&state).expect("state");
+    assert!(kept.contains("lazyagents/hooked"), "{kept}");
+    let err = create_in_worktree(&mut conn, &project, "hooked", &["sleep", "30"])
+        .await
+        .expect_err("the leftover keeps its name");
+    assert!(err.contains("removed at the next start"), "{err}");
+
+    drop(stuck);
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    assert!(!path.exists());
 }

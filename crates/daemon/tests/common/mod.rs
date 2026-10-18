@@ -36,18 +36,23 @@ pub fn repo() -> tempfile::TempDir {
     dir
 }
 
-/// Makes `dir/stuck/file` with `stuck` read-only, so neither git nor `remove_dir_all` can
-/// delete `dir` until `deletable` is called on the returned path.
-pub fn undeletable(dir: &Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let stuck = dir.join("stuck");
-    std::fs::create_dir_all(&stuck).expect("stuck dir");
-    std::fs::write(stuck.join("file"), "x").expect("stuck file");
-    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o500)).expect("chmod");
-    stuck
+/// A read-only `stuck` directory holding a file, so neither git nor `remove_dir_all` can
+/// delete the directory it is in; it is made writable again when dropped.
+pub struct Stuck(pub std::path::PathBuf);
+
+impl Stuck {
+    pub fn new(path: std::path::PathBuf) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(&path).expect("stuck dir");
+        std::fs::write(path.join("file"), "x").expect("stuck file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+        Stuck(path)
+    }
 }
 
-pub fn deletable(stuck: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(stuck, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+impl Drop for Stuck {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
 }
