@@ -662,7 +662,7 @@ fn fit_title(area: Rect, name: &str, format: impl Fn(&str) -> String) -> String 
 fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     let focused = app.focus == Focus::Pane;
     let agent = app.selected_agent();
-    if let (Some(view), Some(agent)) = (&app.diff, agent) {
+    if let (Some(view), Some(agent)) = (app.diff(), agent) {
         let files = match view.files() {
             1 => " · 1 file".to_string(),
             n if view.lines.is_some() => format!(" · {n} files"),
@@ -688,7 +688,7 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
         }
         None => " lazyagents ".to_string(),
     };
-    let pane_block = if app.focus == Focus::Scroll {
+    let pane_block = if matches!(app.focus, Focus::Scroll(_)) {
         rounded().title(title).border_style(app.theme.scroll)
     } else {
         block(title, focused, &app.theme)
@@ -730,7 +730,7 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     if let (true, Some(position)) = (focused, cursor) {
         frame.set_cursor_position(position);
     }
-    if !agent.status.is_running() && app.focus != Focus::Scroll {
+    if !agent.status.is_running() && !matches!(app.focus, Focus::Scroll(_)) {
         draw_not_running(frame, app, agent, areas.pane_inner);
     }
 }
@@ -808,7 +808,7 @@ fn diff_text<'a>(view: &'a DiffView, app: &App, height: u16) -> Paragraph<'a> {
         } else {
             Style::new()
         };
-        let style = if index == view.cursor && app.focus == Focus::Diff {
+        let style = if index == view.cursor {
             style.add_modifier(Modifier::REVERSED)
         } else {
             style
@@ -834,8 +834,7 @@ fn diff_hints(app: &App) -> Vec<String> {
         }
     }
     let commented = app
-        .diff
-        .as_ref()
+        .diff()
         .is_some_and(|view| app.comments.contains_key(&view.agent));
     let about_comments = |keys: &[DiffKey]| {
         keys.iter().any(|key| {
@@ -941,7 +940,7 @@ fn sidebar_hints(app: &App) -> Vec<String> {
     if app.others_need_attention() {
         hints.extend(key(Action::NextAttention, "next input"));
     }
-    match (app.focus, agent) {
+    match (&app.focus, agent) {
         (Focus::Agents, Some(agent)) => {
             let running = agent.status.is_running();
             if running {
@@ -1060,13 +1059,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
         frame.set_cursor_position((area.x + width.min(area.width), area.y));
         return;
     }
-    let (hints, colour) = match app.focus {
+    let (hints, colour) = match &app.focus {
         Focus::Pane if app.prefix_pending => {
             (vec![format!("{} …", app.keymap.prefix())], theme.working)
         }
         Focus::Pane => (pane_hints(app), theme.dim),
-        Focus::Diff => (diff_hints(app), theme.dim),
-        Focus::Scroll => {
+        Focus::Diff(_) => (diff_hints(app), theme.dim),
+        Focus::Scroll(_) => {
             let hints = std::iter::once("SCROLL".to_string()).chain(fixed_keys::scroll_hints());
             (hints.collect(), theme.scroll)
         }

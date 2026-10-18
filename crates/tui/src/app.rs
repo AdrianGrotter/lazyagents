@@ -29,13 +29,14 @@ pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DIRTY_WORKTREE: &str = "worktree has uncommitted changes";
 const DIRTY_FILES_SHOWN: usize = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The diff view and scroll mode exist only while they have the focus.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Focus {
     Projects,
     Agents,
     Pane,
-    Diff,
-    Scroll,
+    Diff(DiffView),
+    Scroll(ScrollMode),
 }
 
 /// `Configured(i)` is the i-th preset from the config file; they follow the built-ins.
@@ -502,8 +503,6 @@ pub struct App {
     /// A key or click came after the message was posted.
     message_seen: bool,
     pub git_stats: HashMap<AgentId, GitStat>,
-    pub diff: Option<DiffView>,
-    pub scroll: Option<ScrollMode>,
     pub selection: Option<Selection>,
     pub known: Vec<KnownProject>,
     /// Agents whose turn ended while they were out of view, until they are viewed.
@@ -579,8 +578,6 @@ impl App {
             message_kind: MessageKind::Error,
             message_seen: false,
             git_stats: HashMap::new(),
-            diff: None,
-            scroll: None,
             selection: None,
             known: Vec::new(),
             unseen: HashSet::new(),
@@ -848,7 +845,7 @@ impl App {
 
     /// Fills the open diff view with the diff of its own scope.
     pub fn apply_diff(&mut self, id: AgentId, result: Result<String, String>) {
-        let scope = self.diff.as_ref().map_or(DiffScope::All, |view| view.scope);
+        let scope = self.diff().map_or(DiffScope::All, |view| view.scope);
         self.apply_scoped_diff(id, scope, result);
     }
 
@@ -860,13 +857,12 @@ impl App {
         result: Result<String, String>,
     ) {
         self.diffs_in_flight.remove(&(id, scope));
-        let Some(view) = self
-            .diff
-            .as_mut()
-            .filter(|view| view.agent == id && view.scope == scope && view.lines.is_none())
-        else {
+        let Focus::Diff(view) = &mut self.focus else {
             return;
         };
+        if view.agent != id || view.scope != scope || view.lines.is_some() {
+            return;
+        }
         match result {
             Ok(text) => {
                 let lines = diff_lines(&text);
@@ -881,8 +877,23 @@ impl App {
     }
 
     fn close_diff(&mut self) {
-        self.diff = None;
         self.focus = Focus::Agents;
+    }
+
+    /// The diff view, while it has the focus.
+    pub fn diff(&self) -> Option<&DiffView> {
+        match &self.focus {
+            Focus::Diff(view) => Some(view),
+            _ => None,
+        }
+    }
+
+    /// Scroll mode, while it has the focus.
+    pub fn scroll_mode(&self) -> Option<ScrollMode> {
+        match self.focus {
+            Focus::Scroll(mode) => Some(mode),
+            _ => None,
+        }
     }
 
     fn forget_gone_agents(&mut self) {
@@ -1009,7 +1020,9 @@ impl App {
         if self.focus == Focus::Pane && selected != before {
             self.leave_pane();
         }
-        if self.focus == Focus::Diff && selected != self.diff.as_ref().map(|d| d.agent) {
+        if let Focus::Diff(view) = &self.focus
+            && selected != Some(view.agent)
+        {
             self.close_diff();
         }
         let mut effects = self.close_lost_scroll(selected);
@@ -1024,7 +1037,7 @@ impl App {
     /// Scroll mode ends when the selection moves to another agent, which scrolls the
     /// agent it leaves back to the bottom, or when its agent is removed or stopped.
     fn close_lost_scroll(&mut self, selected: Option<AgentId>) -> Vec<Effect> {
-        let Some(mode) = self.scroll.filter(|_| self.focus == Focus::Scroll) else {
+        let Some(mode) = self.scroll_mode() else {
             return Vec::new();
         };
         let status = self
@@ -1039,7 +1052,6 @@ impl App {
             }
             Some(_) => return Vec::new(),
         };
-        self.scroll = None;
         self.focus = Focus::Agents;
         effects
     }
@@ -1372,8 +1384,8 @@ impl App {
         }
         match self.focus {
             Focus::Pane => self.on_pane_key(key),
-            Focus::Diff => self.on_diff_key(key),
-            Focus::Scroll => self.on_scroll_key(key),
+            Focus::Diff(_) => self.on_diff_key(key),
+            Focus::Scroll(_) => self.on_scroll_key(key),
             Focus::Projects | Focus::Agents => self.on_sidebar_key(key),
         }
     }
@@ -1432,7 +1444,7 @@ impl App {
             }
             DiffKey::SendComments => return self.send_comments(),
             DiffKey::Scope => {
-                let Some(view) = &self.diff else {
+                let Some(view) = self.diff() else {
                     return Vec::new();
                 };
                 let (id, scope) = (view.agent, view.scope.next());
@@ -1448,7 +1460,7 @@ impl App {
     }
 
     fn move_diff_cursor(&mut self, step: i64) {
-        let Some(view) = self.diff.as_mut() else {
+        let Focus::Diff(view) = &mut self.focus else {
             return;
         };
         let last = view.lines.as_ref().map_or(0, |l| l.len().saturating_sub(1)) as i64;
@@ -1460,7 +1472,7 @@ impl App {
     /// under commented lines.
     fn keep_cursor_visible(&mut self) {
         let page = self.diff_page();
-        let Some(view) = self.diff.as_mut() else {
+        let Focus::Diff(view) = &mut self.focus else {
             return;
         };
         let commented = self
@@ -1482,7 +1494,7 @@ impl App {
 
     fn scroll_diff(&mut self, step: i64) {
         let page = self.diff_page();
-        let Some(view) = self.diff.as_mut() else {
+        let Focus::Diff(view) = &mut self.focus else {
             return;
         };
         let last = view
@@ -1498,7 +1510,7 @@ impl App {
     }
 
     fn open_comment(&mut self) {
-        let Some(view) = &self.diff else {
+        let Focus::Diff(view) = &self.focus else {
             return;
         };
         let (Some(Some(location)), Some(code)) = (
@@ -1541,7 +1553,7 @@ impl App {
     }
 
     fn jump_to_comment(&mut self, forward: bool) {
-        let Some(view) = self.diff.as_mut() else {
+        let Focus::Diff(view) = &mut self.focus else {
             return;
         };
         let commented = self
@@ -1567,7 +1579,7 @@ impl App {
     /// Opens the diff view on `scope` of `id`'s changes, asking the daemon unless that
     /// diff is already on its way.
     fn show_diff(&mut self, id: AgentId, scope: DiffScope) -> Vec<Effect> {
-        self.diff = Some(DiffView {
+        self.focus = Focus::Diff(DiffView {
             agent: id,
             scope,
             lines: None,
@@ -1585,7 +1597,7 @@ impl App {
     /// Moves the cursor to the next or previous line starting with `prefix`: a file
     /// header or a hunk header. It stays put when there is none that way.
     fn jump_diff(&mut self, prefix: &str, forward: bool) -> Vec<Effect> {
-        let Some(view) = self.diff.as_mut() else {
+        let Focus::Diff(view) = &mut self.focus else {
             return Vec::new();
         };
         let Some(lines) = &view.lines else {
@@ -1608,7 +1620,7 @@ impl App {
     /// Sends every comment on the agent's diff as one prompt, in diff order, and returns
     /// to the sidebar to watch it work.
     fn send_comments(&mut self) -> Vec<Effect> {
-        let Some(view) = &self.diff else {
+        let Focus::Diff(view) = &self.focus else {
             return Vec::new();
         };
         let id = view.agent;
@@ -1650,7 +1662,7 @@ impl App {
     /// Leaves scroll mode, returning to the pane only if it was entered from there and
     /// the agent still runs, and scrolls the agent back to the bottom.
     fn exit_scroll(&mut self) -> Vec<Effect> {
-        let Some(mode) = self.scroll.take() else {
+        let Some(mode) = self.scroll_mode() else {
             self.focus = Focus::Agents;
             return Vec::new();
         };
@@ -1670,11 +1682,10 @@ impl App {
     fn enter_scroll(&mut self, from_pane: bool) {
         match self.selected_agent() {
             Some(agent) if agent.status != Status::Stopped => {
-                self.scroll = Some(ScrollMode {
+                self.focus = Focus::Scroll(ScrollMode {
                     agent: agent.id,
                     from_pane,
                 });
-                self.focus = Focus::Scroll;
                 self.prefix_pending = false;
             }
             Some(_) => self.fail("nothing to scroll"),
@@ -1694,7 +1705,7 @@ impl App {
         if let Some(effects) = self.leave_scroll(&key) {
             return effects;
         }
-        let Some(mode) = self.scroll else {
+        let Some(mode) = self.scroll_mode() else {
             return Vec::new();
         };
         let page = self.diff_page() as i32;
@@ -1717,10 +1728,10 @@ impl App {
     /// Nothing is visible, so only the quit keys (from the sidebar) and the prefix
     /// followed by a leave key (leave the pane) act; no key reaches an agent.
     fn on_too_small_key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        if self.focus == Focus::Diff {
+        if matches!(self.focus, Focus::Diff(_)) {
             return self.leave_diff(&key).unwrap_or_default();
         }
-        if self.focus == Focus::Scroll {
+        if matches!(self.focus, Focus::Scroll(_)) {
             return self.leave_scroll(&key).unwrap_or_default();
         }
         if self.focus == Focus::Pane {
@@ -1745,7 +1756,7 @@ impl App {
         }
         if self.popup.is_none() {
             self.prefix_pending = false;
-            return match (self.focus, self.selected_agent()) {
+            return match (&self.focus, self.selected_agent()) {
                 (Focus::Pane, Some(agent)) => {
                     vec![Effect::Send(Request::Input {
                         id: agent.id,
@@ -1804,7 +1815,7 @@ impl App {
         if self.popup.is_some() {
             return Vec::new();
         }
-        if self.focus == Focus::Diff {
+        if matches!(self.focus, Focus::Diff(_)) {
             self.scroll_diff(if up {
                 -i64::from(WHEEL_LINES)
             } else {
@@ -1812,7 +1823,7 @@ impl App {
             });
             return Vec::new();
         }
-        if let (Focus::Scroll, Some(mode)) = (self.focus, self.scroll) {
+        if let Some(mode) = self.scroll_mode() {
             let lines = if up { WHEEL_LINES } else { -WHEEL_LINES };
             return vec![scroll_request(mode.agent, lines)];
         }
@@ -1935,7 +1946,7 @@ impl App {
             effects.extend(self.sync());
             return effects;
         }
-        if !areas.pane_inner.contains(at) || self.focus == Focus::Diff {
+        if !areas.pane_inner.contains(at) || matches!(self.focus, Focus::Diff(_)) {
             return Vec::new();
         }
         let Some((name, running, status)) = self
@@ -1949,7 +1960,7 @@ impl App {
             anchor: cell,
             end: cell,
         });
-        if self.focus == Focus::Scroll {
+        if matches!(self.focus, Focus::Scroll(_)) {
             return Vec::new();
         }
         if running {
@@ -1968,16 +1979,10 @@ impl App {
     /// Closes the diff view or scroll mode, scrolling the agent back to the bottom, and
     /// focuses a sidebar box.
     fn leave_for_sidebar(&mut self, focus: Focus) -> Vec<Effect> {
-        let mut effects = Vec::new();
-        match self.focus {
-            Focus::Diff => self.diff = None,
-            Focus::Scroll => {
-                if let Some(mode) = self.scroll.take() {
-                    effects.push(scroll_request(mode.agent, SCROLL_BOTTOM));
-                }
-            }
-            Focus::Projects | Focus::Agents | Focus::Pane => {}
-        }
+        let effects = match self.scroll_mode() {
+            Some(mode) => vec![scroll_request(mode.agent, SCROLL_BOTTOM)],
+            None => Vec::new(),
+        };
         self.focus = focus;
         self.prefix_pending = false;
         effects
@@ -2086,7 +2091,7 @@ impl App {
                     Focus::Projects
                 };
             }
-            Action::Open => match (self.focus, self.selected_agent()) {
+            Action::Open => match (&self.focus, self.selected_agent()) {
                 (Focus::Projects, _) => self.focus = Focus::Agents,
                 (_, Some(agent)) if agent.status.is_running() => self.focus = Focus::Pane,
                 (_, Some(agent)) => {
@@ -2120,7 +2125,6 @@ impl App {
             },
             Action::Diff => {
                 if let Some(id) = self.selected_agent().map(|a| a.id) {
-                    self.focus = Focus::Diff;
                     return self.show_diff(id, DiffScope::All);
                 }
             }
@@ -2252,7 +2256,9 @@ impl App {
                     self.highlight_project(wrap(self.project_index, step, count));
                 }
             }
-            Focus::Agents | Focus::Pane | Focus::Diff | Focus::Scroll => self.move_agent(step),
+            Focus::Agents | Focus::Pane | Focus::Diff(_) | Focus::Scroll(_) => {
+                self.move_agent(step)
+            }
         }
     }
 
@@ -3815,12 +3821,12 @@ pub(crate) mod tests {
         assert_eq!(app.focus, Focus::Projects);
         let _ = app.on_key(code(KeyCode::Down));
         assert_eq!(
-            (app.focus, app.selected_project().map(|x| x.id)),
+            (app.focus.clone(), app.selected_project().map(|x| x.id)),
             (Focus::Projects, Some(q.id))
         );
         let _ = app.on_key(code(KeyCode::Up));
         assert_eq!(
-            (app.focus, app.selected_project().map(|x| x.id)),
+            (app.focus.clone(), app.selected_project().map(|x| x.id)),
             (Focus::Projects, Some(p.id))
         );
 
@@ -3829,12 +3835,12 @@ pub(crate) mod tests {
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
         let _ = app.on_key(code(KeyCode::Down));
         assert_eq!(
-            (app.focus, app.selected_agent().map(|x| x.id)),
+            (app.focus.clone(), app.selected_agent().map(|x| x.id)),
             (Focus::Agents, Some(b.id))
         );
         let _ = app.on_key(code(KeyCode::Up));
         assert_eq!(
-            (app.focus, app.selected_agent().map(|x| x.id)),
+            (app.focus.clone(), app.selected_agent().map(|x| x.id)),
             (Focus::Agents, Some(a.id))
         );
         assert_eq!(app.selected_project().map(|x| x.id), Some(p.id));
@@ -5865,11 +5871,15 @@ pub(crate) mod tests {
                 scope: DiffScope::All
             })]
         );
-        assert_eq!(app.focus, Focus::Diff);
+        assert!(
+            matches!(app.focus.clone(), Focus::Diff(_)),
+            "{:?}",
+            app.focus
+        );
     }
 
     fn diff_place(app: &App) -> (usize, usize) {
-        let view = app.diff.as_ref().expect("diff view");
+        let view = app.diff().expect("diff view");
         (view.cursor, view.scroll)
     }
 
@@ -5892,7 +5902,7 @@ pub(crate) mod tests {
             assert_eq!(diff_place(&app), expected, "{event:?}");
         }
         let _ = app.on_key(with(KeyCode::Esc, KeyModifiers::ALT));
-        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+        assert_eq!(app.focus, Focus::Agents);
 
         let (mut app, a, _) = running_pair();
         let _ = app.on_key(key('s'));
@@ -5921,15 +5931,12 @@ pub(crate) mod tests {
         let (mut app, a, b) = two_agents();
         let _ = app.set_pane_size(80, 10);
         open_diff(&mut app, a.id);
-        assert_eq!(app.diff.as_ref().and_then(|d| d.lines.as_ref()), None);
+        assert_eq!(app.diff().and_then(|d| d.lines.as_ref()), None);
         let text: Vec<String> = (0..100).map(|i| format!(" line {i}")).collect();
         app.apply_diff(b.id, Ok("+other".into()));
-        assert_eq!(app.diff.as_ref().and_then(|d| d.lines.as_ref()), None);
+        assert_eq!(app.diff().and_then(|d| d.lines.as_ref()), None);
         app.apply_diff(a.id, Ok(text.join("\n")));
-        assert_eq!(
-            app.diff.as_ref().and_then(|d| d.lines.as_ref()),
-            Some(&text)
-        );
+        assert_eq!(app.diff().and_then(|d| d.lines.as_ref()), Some(&text));
         for (event, expected) in [
             (key('j'), (1, 0)),
             (key('k'), (0, 0)),
@@ -5949,12 +5956,15 @@ pub(crate) mod tests {
         }
         for event in [key('x'), key('d'), key('n'), key('S'), code(KeyCode::Enter)] {
             assert!(app.on_key(event).is_empty(), "{event:?}");
-            assert_eq!((app.focus, &app.popup), (Focus::Diff, &None), "{event:?}");
+            assert!(
+                matches!((&app.focus, &app.popup), (Focus::Diff(_), None)),
+                "{event:?}"
+            );
         }
         for close in [key('D'), key('q'), code(KeyCode::Esc)] {
             assert!(app.on_key(close).is_empty());
             assert_eq!(app.focus, Focus::Agents, "{close:?}");
-            assert_eq!(app.diff, None, "{close:?}");
+            assert_eq!(app.diff(), None, "{close:?}");
             assert!(!app.prefix_pending);
             open_diff(&mut app, a.id);
             app.apply_diff(a.id, Ok(String::new()));
@@ -5962,16 +5972,20 @@ pub(crate) mod tests {
         app.apply_diff(a.id, Ok("+late".into()));
         let _ = app.on_key(key('q'));
         app.apply_diff(a.id, Ok("+late".into()));
-        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+        assert_eq!(app.focus, Focus::Agents);
 
         open_diff(&mut app, a.id);
         let _ = app.apply_server(ServerMessage::AgentUpdated(AgentInfo {
             status: Status::Exited(0),
             ..a.clone()
         }));
-        assert_eq!(app.focus, Focus::Diff);
+        assert!(
+            matches!(app.focus.clone(), Focus::Diff(_)),
+            "{:?}",
+            app.focus
+        );
         let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
-        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+        assert_eq!(app.focus, Focus::Agents);
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
     }
 
@@ -6126,9 +6140,13 @@ pub(crate) mod tests {
     fn scroll_mode_from_sidebar_and_prefix() {
         let (mut app, a, _) = running_pair();
         assert!(app.on_key(key('s')).is_empty());
-        assert_eq!(app.focus, Focus::Scroll);
+        assert!(
+            matches!(app.focus.clone(), Focus::Scroll(_)),
+            "{:?}",
+            app.focus
+        );
         assert_eq!(
-            app.scroll,
+            app.scroll_mode(),
             Some(ScrollMode {
                 agent: a.id,
                 from_pane: false
@@ -6140,9 +6158,13 @@ pub(crate) mod tests {
         let _ = app.on_key(ctrl('q'));
         assert!(app.prefix_pending);
         assert!(app.on_key(key('s')).is_empty());
-        assert_eq!(app.focus, Focus::Scroll);
+        assert!(
+            matches!(app.focus.clone(), Focus::Scroll(_)),
+            "{:?}",
+            app.focus
+        );
         assert!(!app.prefix_pending);
-        assert_eq!(app.scroll.map(|s| s.from_pane), Some(true));
+        assert_eq!(app.scroll_mode().map(|s| s.from_pane), Some(true));
     }
 
     #[test]
@@ -6162,11 +6184,14 @@ pub(crate) mod tests {
             (key('G'), i32::MIN / 2),
         ] {
             assert_eq!(app.on_key(event), scroll_effects(a.id, lines), "{event:?}");
-            assert_eq!(app.focus, Focus::Scroll, "{event:?}");
+            assert!(matches!(app.focus.clone(), Focus::Scroll(_)), "{event:?}");
         }
         for event in [key('x'), key('d'), key('n'), code(KeyCode::Enter), key('s')] {
             assert!(app.on_key(event).is_empty(), "{event:?}");
-            assert_eq!((app.focus, &app.popup), (Focus::Scroll, &None), "{event:?}");
+            assert!(
+                matches!((&app.focus, &app.popup), (Focus::Scroll(_), None)),
+                "{event:?}"
+            );
         }
         assert_eq!(app.on_key(ctrl('c')), vec![Effect::Quit]);
     }
@@ -6178,13 +6203,13 @@ pub(crate) mod tests {
         for exit in [key('q'), code(KeyCode::Esc)] {
             let _ = app.on_key(key('s'));
             assert_eq!(app.on_key(exit), bottom, "{exit:?}");
-            assert_eq!((app.focus, app.scroll), (Focus::Agents, None), "{exit:?}");
+            assert_eq!(app.focus, Focus::Agents, "{exit:?}");
 
             let _ = app.on_key(code(KeyCode::Enter));
             let _ = app.on_key(ctrl('q'));
             let _ = app.on_key(key('s'));
             assert_eq!(app.on_key(exit), bottom, "{exit:?}");
-            assert_eq!((app.focus, app.scroll), (Focus::Pane, None), "{exit:?}");
+            assert_eq!(app.focus, Focus::Pane, "{exit:?}");
             assert!(!app.prefix_pending);
             app.focus = Focus::Agents;
         }
@@ -6196,7 +6221,11 @@ pub(crate) mod tests {
             status: Status::Exited(0),
             ..a.clone()
         }));
-        assert_eq!(app.focus, Focus::Scroll);
+        assert!(
+            matches!(app.focus.clone(), Focus::Scroll(_)),
+            "{:?}",
+            app.focus
+        );
         assert_eq!(app.on_key(key('q')), bottom);
         assert_eq!(app.focus, Focus::Agents);
     }
@@ -6206,7 +6235,7 @@ pub(crate) mod tests {
         let (mut app, a, b) = running_pair();
         let _ = app.on_key(key('s'));
         let _ = app.apply_server(ServerMessage::AgentRemoved(a.id));
-        assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
+        assert_eq!(app.focus, Focus::Agents);
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
     }
 
@@ -6217,12 +6246,16 @@ pub(crate) mod tests {
         let exited = agent(&p, "exited", Status::Exited(1));
         let (mut app, _) = loaded(vec![p], vec![stopped, exited.clone()]);
         assert!(app.on_key(key('s')).is_empty());
-        assert_eq!(app.focus, Focus::Scroll);
-        assert_eq!(app.scroll.map(|s| s.agent), Some(exited.id));
+        assert!(
+            matches!(app.focus.clone(), Focus::Scroll(_)),
+            "{:?}",
+            app.focus
+        );
+        assert_eq!(app.scroll_mode().map(|s| s.agent), Some(exited.id));
         let _ = app.on_key(key('q'));
         let _ = app.on_key(key('k'));
         assert!(app.on_key(key('s')).is_empty());
-        assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
+        assert_eq!(app.focus, Focus::Agents);
         assert_eq!(
             app.current_message(Instant::now()),
             Some("stopped has no terminal yet — enter starts it")
@@ -6235,11 +6268,15 @@ pub(crate) mod tests {
         open_diff(&mut app, a.id);
         let _ = app.on_key(key('q'));
         assert!(app.on_key(key('D')).is_empty(), "a's diff is still loading");
-        assert_eq!(app.focus, Focus::Diff);
-        assert_eq!(app.diff.as_ref().map(|d| d.agent), Some(a.id));
+        assert!(
+            matches!(app.focus.clone(), Focus::Diff(_)),
+            "{:?}",
+            app.focus
+        );
+        assert_eq!(app.diff().map(|d| d.agent), Some(a.id));
         app.apply_diff(a.id, Ok("+one".into()));
         assert_eq!(
-            app.diff.as_ref().and_then(|d| d.lines.clone()),
+            app.diff().and_then(|d| d.lines.clone()),
             Some(vec!["+one".to_string()])
         );
         let _ = app.on_key(key('q'));
@@ -6279,11 +6316,7 @@ pub(crate) mod tests {
         open_diff(&mut app, a.id);
         let text: Vec<String> = (0..DIFF_LINE_CAP + 5).map(|i| format!("+{i}")).collect();
         app.apply_diff(a.id, Ok(text.join("\n")));
-        let lines = app
-            .diff
-            .as_ref()
-            .and_then(|d| d.lines.clone())
-            .expect("lines");
+        let lines = app.diff().and_then(|d| d.lines.clone()).expect("lines");
         assert_eq!(lines.len(), DIFF_LINE_CAP + 1);
         assert_eq!(lines[DIFF_LINE_CAP - 1], format!("+{}", DIFF_LINE_CAP - 1));
         assert_eq!(lines[DIFF_LINE_CAP], "… diff truncated (5 more lines)");
@@ -6291,11 +6324,7 @@ pub(crate) mod tests {
         let _ = app.on_key(key('q'));
         open_diff(&mut app, a.id);
         app.apply_diff(a.id, Ok("+\tx\u{1b}[2J\r".into()));
-        let lines = app
-            .diff
-            .as_ref()
-            .and_then(|d| d.lines.clone())
-            .expect("lines");
+        let lines = app.diff().and_then(|d| d.lines.clone()).expect("lines");
         assert_eq!(lines, ["+    x[2J"]);
     }
 
@@ -6304,7 +6333,7 @@ pub(crate) mod tests {
         let (mut app, a, _) = two_agents();
         open_diff(&mut app, a.id);
         app.apply_diff(a.id, Err("not a git repository".into()));
-        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+        assert_eq!(app.focus, Focus::Agents);
         assert_eq!(
             app.current_message(Instant::now()),
             Some("not a git repository")
@@ -6364,7 +6393,7 @@ pub(crate) mod tests {
         let (mut app, _) = loaded(vec![p, q], vec![a.clone(), b.clone()]);
         let areas = screen_areas(&app);
         let effects = app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 1)), &areas);
-        assert_eq!((app.focus, app.project_index), (Focus::Projects, 1));
+        assert_eq!((app.focus.clone(), app.project_index), (Focus::Projects, 1));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
         assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: b.id })]);
         assert!(
@@ -6376,7 +6405,10 @@ pub(crate) mod tests {
         app.focus = Focus::Pane;
         app.prefix_pending = true;
         let _ = app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 0)), &areas);
-        assert_eq!((app.focus, app.prefix_pending), (Focus::Projects, false));
+        assert_eq!(
+            (app.focus.clone(), app.prefix_pending),
+            (Focus::Projects, false)
+        );
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
     }
 
@@ -6393,12 +6425,15 @@ pub(crate) mod tests {
             app.on_mouse(mouse(MouseKind::Up, agent_row_at(&areas, 1)), &areas)
                 .is_empty()
         );
-        assert_eq!((app.focus, app.selection), (Focus::Agents, None));
+        assert_eq!((app.focus.clone(), app.selection), (Focus::Agents, None));
 
         app.focus = Focus::Pane;
         app.prefix_pending = true;
         let _ = app.on_mouse(mouse(MouseKind::Down, agent_row_at(&areas, 0)), &areas);
-        assert_eq!((app.focus, app.prefix_pending), (Focus::Agents, false));
+        assert_eq!(
+            (app.focus.clone(), app.prefix_pending),
+            (Focus::Agents, false)
+        );
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
 
         app.focus = Focus::Projects;
@@ -6414,9 +6449,9 @@ pub(crate) mod tests {
         open_diff(&mut app, a.id);
         let effects = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 0, 0)), &areas);
         assert!(effects.is_empty(), "{effects:?}");
-        assert_eq!((app.focus, app.selection), (Focus::Diff, None));
+        assert!(matches!(app.focus.clone(), Focus::Diff(_)) && app.selection.is_none());
         let _ = app.on_mouse(mouse(MouseKind::Down, agent_row_at(&areas, 1)), &areas);
-        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+        assert_eq!(app.focus, Focus::Agents);
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
 
         let _ = app.on_key(key('s'));
@@ -6431,12 +6466,12 @@ pub(crate) mod tests {
                 Effect::Send(Request::Subscribe { id: a.id }),
             ]
         );
-        assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
+        assert_eq!(app.focus, Focus::Agents);
 
         let _ = app.on_key(key('s'));
         let effects = app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 0)), &areas);
         assert_eq!(effects, scroll_effects(a.id, i32::MIN / 2));
-        assert_eq!((app.focus, app.scroll), (Focus::Projects, None));
+        assert_eq!(app.focus, Focus::Projects);
     }
 
     #[test]
@@ -6449,10 +6484,18 @@ pub(crate) mod tests {
             app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 0, 0)), &areas)
                 .is_empty()
         );
-        assert_eq!(app.focus, Focus::Scroll);
+        assert!(
+            matches!(app.focus.clone(), Focus::Scroll(_)),
+            "{:?}",
+            app.focus
+        );
         let effects = app.on_mouse(mouse(MouseKind::Up, in_pane(&areas, 4, 0)), &areas);
         assert_eq!(effects, vec![Effect::Copy("older".into())]);
-        assert_eq!(app.focus, Focus::Scroll);
+        assert!(
+            matches!(app.focus.clone(), Focus::Scroll(_)),
+            "{:?}",
+            app.focus
+        );
     }
 
     #[test]
@@ -6476,7 +6519,7 @@ pub(crate) mod tests {
                 event: InputEvent::Click { col: 4, row: 2 }
             })]
         );
-        assert_eq!((app.focus, app.selection), (Focus::Pane, None));
+        assert_eq!((app.focus.clone(), app.selection), (Focus::Pane, None));
 
         let p = project("p");
         let (mut empty, _) = loaded(vec![p], Vec::new());
@@ -6573,7 +6616,11 @@ pub(crate) mod tests {
         let _ = app.on_mouse(mouse(MouseKind::Down, at), &areas);
         let effects = app.on_mouse(mouse(MouseKind::Up, at), &areas);
         assert!(effects.is_empty(), "{effects:?}");
-        assert_eq!(app.focus, Focus::Scroll);
+        assert!(
+            matches!(app.focus.clone(), Focus::Scroll(_)),
+            "{:?}",
+            app.focus
+        );
     }
 
     #[test]
@@ -6596,13 +6643,13 @@ pub(crate) mod tests {
             app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 0)), &areas)
                 .is_empty()
         );
-        assert_eq!((&app.popup, app.focus), (&None, Focus::Agents));
+        assert_eq!((&app.popup, app.focus.clone()), (&None, Focus::Agents));
 
         let _ = app.on_key(key('x'));
         let effects = app.on_mouse(mouse(MouseKind::Down, in_pane(&areas, 0, 0)), &areas);
         assert!(effects.is_empty(), "{effects:?}");
         assert_eq!(
-            (&app.popup, app.focus, app.selection),
+            (&app.popup, app.focus.clone(), app.selection),
             (&None, Focus::Agents, None)
         );
         assert!(
@@ -6679,7 +6726,11 @@ pub(crate) mod tests {
             app.on_mouse(mouse(MouseKind::ScrollDown, at), &areas),
             scroll_effects(a.id, -3)
         );
-        assert_eq!(app.focus, Focus::Scroll);
+        assert!(
+            matches!(app.focus.clone(), Focus::Scroll(_)),
+            "{:?}",
+            app.focus
+        );
     }
 
     #[test]
@@ -6700,7 +6751,7 @@ pub(crate) mod tests {
         let effects = app.apply_server(ServerMessage::AgentUpdated(b.clone()));
         assert_eq!(effects.first(), scroll_effects(a.id, i32::MIN / 2).first());
         assert!(effects.contains(&Effect::Send(Request::Subscribe { id: b.id })));
-        assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
+        assert_eq!(app.focus, Focus::Agents);
     }
 
     #[test]
@@ -6712,7 +6763,7 @@ pub(crate) mod tests {
             ..a.clone()
         }));
         assert!(effects.is_empty(), "{effects:?}");
-        assert_eq!((app.focus, app.scroll), (Focus::Agents, None));
+        assert_eq!(app.focus, Focus::Agents);
     }
 }
 
@@ -7141,7 +7192,11 @@ mod diff_comment_tests {
     fn c_comments_on_the_cursor_line_and_edits_or_drops_it() {
         let (mut app, a) = with_diff();
         comment(&mut app, 6, "name this better");
-        assert_eq!(app.focus, Focus::Diff);
+        assert!(
+            matches!(app.focus.clone(), Focus::Diff(_)),
+            "{:?}",
+            app.focus
+        );
         let comments = &app.comments[&a.id];
         assert_eq!(comments.len(), 1);
         assert_eq!(
@@ -7207,7 +7262,7 @@ mod diff_comment_tests {
             ]
         );
         assert!(texts(&app, a.id).is_empty());
-        assert_eq!((app.focus, &app.diff), (Focus::Agents, &None));
+        assert_eq!(app.focus, Focus::Agents);
         assert_eq!(
             app.current_message(Instant::now()),
             Some("sent 2 comments to api")
@@ -7240,7 +7295,7 @@ mod diff_comment_tests {
         comment(&mut app, 4, "a");
         comment(&mut app, 6, "b");
         to_line(&mut app, 0);
-        let cursor = |app: &App| app.diff.as_ref().map(|d| d.cursor);
+        let cursor = |app: &App| app.diff().map(|d| d.cursor);
         let _ = app.on_key(key('n'));
         assert_eq!(cursor(&app), Some(4));
         let _ = app.on_key(key('n'));
@@ -7426,7 +7481,7 @@ mod diff_navigation_tests {
     }
 
     fn cursor(app: &App) -> usize {
-        app.diff.as_ref().expect("diff").cursor
+        app.diff().expect("diff").cursor
     }
 
     #[test]
@@ -7456,7 +7511,7 @@ mod diff_navigation_tests {
                 app.on_key(key('s')),
                 vec![Effect::Send(Request::GitDiff { id: a.id, scope })]
             );
-            let view = app.diff.as_ref().expect("diff");
+            let view = app.diff().expect("diff");
             assert_eq!((view.scope, view.lines.as_ref()), (scope, None));
             app.apply_diff(a.id, Ok(DIFF.into()));
         }
@@ -7465,7 +7520,7 @@ mod diff_navigation_tests {
     #[test]
     fn the_diff_counts_its_files() {
         let (app, _) = with_diff();
-        assert_eq!(app.diff.as_ref().map(DiffView::files), Some(2));
+        assert_eq!(app.diff().map(DiffView::files), Some(2));
     }
 }
 
@@ -7492,7 +7547,7 @@ mod screen_mode_tests {
         let _ = app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert!(app.on_key(key('+')).is_empty());
         assert_eq!(
-            (app.screen_mode, app.focus),
+            (app.screen_mode, app.focus.clone()),
             (ScreenMode::Wide, Focus::Pane)
         );
     }
