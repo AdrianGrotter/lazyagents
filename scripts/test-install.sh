@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
-# Exercises the Linux half of scripts/install.sh on any host, with fixture readelf output and
-# stub cargo, uname, readelf and patchelf.
-set -uo pipefail
+# Exercises the Linux half of the install on any host: scripts/install-linux.sh with fixture
+# readelf output, and scripts/install.sh with stub cargo, uname, readelf and patchelf and every
+# path it writes inside a temp dir.
+set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 fixtures="$root/scripts/fixtures/readelf"
-tmp=$(mktemp -d)
+tmp=$(mktemp -d) || exit 1
+if [[ $tmp != /* || ! -d $tmp || $(cd "$tmp" && pwd -P) == / ]]; then
+  echo "test-install: mktemp gave an unusable directory: '$tmp'" >&2
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT
 failures=0
 
-# shellcheck source=SCRIPTDIR/install.sh
-source "$root/scripts/install.sh"
+# shellcheck source=SCRIPTDIR/install-linux.sh
+source "$root/scripts/install-linux.sh"
 
 expect() {
-  local want=$1 desc=$2
+  local want=$1 desc=$2 got
   shift 2
-  "$@" >"$tmp/out.new" 2>&1
-  local got=$?
+  if "$@" >"$tmp/out.new" 2>&1; then got=0; else got=$?; fi
   mv "$tmp/out.new" "$tmp/out"
   if [[ $got == "$want" ]]; then
     echo "ok   $desc"
@@ -28,6 +32,10 @@ expect() {
 }
 
 same() { diff <(printf '%s\n' "$2") <(printf '%s\n' "$1"); }
+says() {
+  local text
+  for text in "$@"; do grep -qF "$text" "$tmp/out" || return 1; done
+}
 links_of() { nix_store_links <"$fixtures/$1"; }
 
 expect 0 "finds the interpreter and every runpath entry in the nix store" same "$(links_of nix-x86_64.txt)" \
@@ -55,7 +63,8 @@ expect 0 "looks in every directory given" same \
   "$tmp/sys/lib/ld-linux-aarch64.so.1"
 expect 1 "fails when no system loader has the name" system_loader /nix/store/x/lib/ld-musl.so.1 "$tmp/sys/lib64"
 
-# Stub tools: readelf prints a fixture until patchelf has run, then the system one.
+# Stub tools: readelf prints a fixture until patchelf has run, then the system one. The Darwin
+# tools refuse to run, so a run that takes the Darwin branch fails instead of touching a binary.
 stubs="$tmp/stubs"
 mkdir -p "$stubs"
 cat >"$stubs/readelf" <<'EOF'
@@ -82,6 +91,9 @@ mkdir -p "$2/bin"
 printf '#!/usr/bin/env bash\n[[ -e $STUB_STATE/broken ]] && { echo "version GLIBC_2.39 not found" >&2; exit 1; }\necho "lazyagents built"\n' >"$2/bin/lazyagents"
 chmod +x "$2/bin/lazyagents"
 EOF
+for tool in codesign install_name_tool otool; do
+  printf '#!/usr/bin/env bash\necho "%s stub: refusing to run" >&2\nexit 1\n' "$tool" >"$stubs/$tool"
+done
 chmod +x "$stubs"/*
 
 export STUB_FIXTURES=$fixtures STUB_TMP=$tmp
@@ -93,7 +105,12 @@ fresh() {
   printf '#!/usr/bin/env bash\n[[ -e $STUB_STATE/broken ]] && exit 1\necho "lazyagents built"\n' >"$STUB_STATE/build/bin/lazyagents"
   chmod +x "$STUB_STATE"/*/bin/lazyagents
 }
-relink() { PATH="$stubs:$PATH" install_linux "$STUB_STATE/build/bin/lazyagents" "$STUB_STATE/root/bin/lazyagents" "$@"; }
+relink_with() {
+  local path=$1
+  shift
+  PATH="$path" install_linux "$STUB_STATE/build/bin/lazyagents" "$STUB_STATE/root/bin/lazyagents" "$@"
+}
+relink() { relink_with "$stubs:$PATH" "$@"; }
 installed() { same "$("$STUB_STATE/root/bin/lazyagents")" "$1"; }
 
 fresh relink nix-x86_64.txt
@@ -118,13 +135,35 @@ expect 1 "fails when the relinked binary does not run" relink "$tmp/sys/lib64"
 expect 0 "shows why it does not run" grep -q "does not run" "$tmp/out"
 expect 0 "keeps the installed binary when the relinked one does not run" installed "lazyagents old"
 
+bare="$tmp/bare"
+mkdir -p "$bare"
+ln -s "$(command -v cat)" "$bare/cat"
+fresh notools nix-x86_64.txt
+expect 1 "fails without readelf" relink_with "$bare" "$tmp/sys/lib64"
+expect 0 "names the missing readelf and gives the rustup advice" \
+  says "readelf is not on PATH" "cargo install --locked"
+ln -s "$stubs/readelf" "$bare/readelf"
+expect 1 "fails without patchelf" relink_with "$bare" "$tmp/sys/lib64"
+expect 0 "names the missing patchelf" grep -q "patchelf is not on PATH" "$tmp/out"
+expect 0 "keeps the installed binary when a tool is missing" installed "lazyagents old"
+
+# The full run: only with uname and cargo resolving to the stubs and the install root in $tmp.
+dest="$tmp/install-root"
+refuse() {
+  echo "test-install: refusing to run scripts/install.sh: $1" >&2
+  exit 1
+}
+[[ $(PATH="$stubs:$PATH" && command -v uname) == "$stubs/uname" ]] || refuse "uname is not the stub"
+[[ $(PATH="$stubs:$PATH" && command -v cargo) == "$stubs/cargo" ]] || refuse "cargo is not the stub"
+[[ $dest == "$tmp"/?* ]] || refuse "the install root $dest is outside $tmp"
+mkdir -p "$tmp/home"
 fresh script system-x86_64.txt
 script() {
-  (cd "$root" && TMPDIR="$tmp" PATH="$stubs:$PATH" LAZYAGENTS_INSTALL_ROOT="$tmp/install-root" scripts/install.sh)
+  (cd "$root" && HOME="$tmp/home" TMPDIR="$tmp" PATH="$stubs:$PATH" LAZYAGENTS_INSTALL_ROOT="$dest" scripts/install.sh)
 }
 expect 0 "install.sh on Linux installs into LAZYAGENTS_INSTALL_ROOT" script
 expect 0 "install.sh runs the installed binary" grep -qx "lazyagents built" "$tmp/out"
-expect 0 "install.sh installs the binary it built" test -x "$tmp/install-root/bin/lazyagents"
+expect 0 "install.sh installs the binary it built" test -x "$dest/bin/lazyagents"
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures failure(s)"
