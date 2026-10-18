@@ -66,7 +66,8 @@ case, in its listed name, its name or its worktree branch. Text after `s:` match
 as listed instead: `s:needs`, `s:done`, `s:exited`. `enter` keeps it, shown in the box's title as
 `Agents · /<text>`, and `esc` while typing, or in the sidebar while one is kept, clears it.
 `backspace` deletes, `ctrl-u` empties it, and a paste adds its first line. While a filter is
-kept, `g` only visits agents that match it.
+kept, `g` only visits agents that match it. When it hides every agent, the Agents box and
+the pane say `no agents match /<text> · esc clears`.
 
 `J`/`K` scroll the selected agent's pane by half its height and leave the focus in the
 sidebar. Moving to another agent, or opening the pane with `enter`, scrolls it back to the

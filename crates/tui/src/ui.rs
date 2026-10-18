@@ -404,17 +404,23 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect, tick: u64) {
     let agents = app.visible_agents();
     if agents.is_empty() {
         let new = app.keymap.first_key(Action::NewAgent);
-        let text = match app.filter() {
-            "" => format!("no agents — press {new}"),
-            filter => format!("no agents match /{filter}"),
-        };
-        frame.render_widget(Paragraph::new(text).block(block), area);
+        let text = filter_miss(app).unwrap_or_else(|| format!("no agents — press {new}"));
+        let text = Paragraph::new(text).wrap(Wrap { trim: true });
+        frame.render_widget(text.block(block), area);
         return;
     }
     let items = agents.iter().map(|a| agent_row(app, a, tick)).collect();
     let style = selection_style(app.focus == Focus::Agents, &app.theme);
     let (list, mut state) = selectable_list(items, app.agent_index, block, style);
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// What an empty Agents box says while the filter hides every agent.
+fn filter_miss(app: &App) -> Option<String> {
+    match app.filter() {
+        "" => None,
+        filter => Some(format!("no agents match /{filter} · esc clears")),
+    }
 }
 
 fn kind_label(kind: AgentKind) -> &'static str {
@@ -657,10 +663,8 @@ fn draw_pane(frame: &mut Frame, app: &App, areas: &Areas) {
     frame.render_widget(pane_block, areas.pane);
     let Some(agent) = agent else {
         let new = app.keymap.first_key(Action::NewAgent);
-        frame.render_widget(
-            Paragraph::new(format!("press {new} to start an agent")),
-            areas.pane_inner,
-        );
+        let text = filter_miss(app).unwrap_or_else(|| format!("press {new} to start an agent"));
+        frame.render_widget(Paragraph::new(text), areas.pane_inner);
         return;
     };
     if let Some(error) = &agent.last_error
@@ -1669,6 +1673,20 @@ mod tests {
         assert!(text.contains("press a to add a project"), "{text}");
         assert!(text.contains("press n to start an agent"), "{text}");
         assert!(text.contains(" lazyagents "), "{text}");
+    }
+
+    #[test]
+    fn an_empty_filter_result_says_how_to_clear_the_filter() {
+        let p = project("p");
+        let (mut app, _) = loaded(vec![p.clone()], vec![agent(&p, "api", Status::Idle)]);
+        for key in ['/', 'z', 'z'] {
+            let _ = app.on_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+        }
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let (text, _) = render_at(&app, 120, 30);
+        assert!(text.contains("no agents match /zz · esc clears"), "{text}");
+        assert_eq!(text.matches("no agents match /zz").count(), 2, "{text}");
+        assert!(!text.contains("to start an agent"), "{text}");
     }
 
     #[test]
