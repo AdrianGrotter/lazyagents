@@ -400,21 +400,61 @@ fn without_a_worktree_include_nothing_is_copied() {
     );
 }
 
-/// The daemon's git calls inherit the test process's environment, which the setup script
-/// in `.config/nextest.toml` points away from the developer's global and system config.
+/// The daemon's git calls inherit the test process's environment, which the nextest setup
+/// script `scripts/nextest-isolated-git.sh` points away from the global and system config.
+/// Here both hold settings that break a merge: `merge.ff = only` refuses a diverged branch
+/// and `commit.gpgsign` with a failing `gpg.program` refuses the merge commit.
 #[test]
-fn tests_read_no_global_or_system_git_config() {
-    let outside = tempfile::tempdir().expect("dir outside any repo");
-    let output = std::process::Command::new("git")
-        .args(["config", "--list", "--show-scope"])
-        .current_dir(outside.path())
-        .output()
-        .expect("git config");
-    let listed = String::from_utf8_lossy(&output.stdout);
-    let leaked: Vec<&str> = listed
-        .lines()
-        .filter(|line| line.starts_with("global") || line.starts_with("system"))
-        .map(|line| line.split('=').next().unwrap_or(line))
-        .collect();
-    assert!(leaked.is_empty(), "{leaked:?}");
+fn hostile_global_and_system_git_config_do_not_reach_the_tests() {
+    let repo = repo();
+    let (_root, _wt) = worktree_with_commit(repo.path(), "feature.txt", "feature\n");
+    std::fs::write(repo.path().join("main.txt"), "main\n").expect("write");
+    git(repo.path(), &["add", "main.txt"]);
+    git(repo.path(), &["commit", "-q", "-m", "main moves on"]);
+
+    let home = tempfile::tempdir().expect("hostile home");
+    std::fs::write(
+        home.path().join(".gitconfig"),
+        "[merge]\n\tff = only\n[init]\n\tdefaultBranch = hostile\n",
+    )
+    .expect("hostile global config");
+    let system = home.path().join("system-gitconfig");
+    std::fs::write(
+        &system,
+        "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n",
+    )
+    .expect("hostile system config");
+    let hostile_git = |dir: &Path, args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("GIT_CONFIG_SYSTEM", &system)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run git")
+    };
+    let hint = "tests get their git isolation from nextest's setup script \
+                (scripts/nextest-isolated-git.sh); run them with `just test`";
+
+    let merged = hostile_git(repo.path(), &["merge", "--no-edit", "lazyagents/wt"]);
+    assert!(
+        merged.status.success(),
+        "the merge read the hostile config: {}\n{hint}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+    let parents = git(repo.path(), &["rev-list", "--parents", "-n", "1", "HEAD"]);
+    assert_eq!(parents.split_whitespace().count(), 3, "{parents}\n{hint}");
+
+    let fresh = tempfile::tempdir().expect("fresh repo");
+    let init = hostile_git(fresh.path(), &["init", "-q"]);
+    assert!(init.status.success(), "{init:?}");
+    let branch = hostile_git(fresh.path(), &["symbolic-ref", "--short", "HEAD"]);
+    assert_ne!(
+        String::from_utf8_lossy(&branch.stdout).trim(),
+        "hostile",
+        "git init read the hostile global config\n{hint}"
+    );
 }
