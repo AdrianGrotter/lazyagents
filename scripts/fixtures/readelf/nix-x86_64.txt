@@ -1,0 +1,74 @@
+
+Elf file type is DYN (Position-Independent Executable file)
+Entry point 0x97850
+There are 14 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x000310 0x000310 R   0x8
+  INTERP         0x000350 0x0000000000000350 0x0000000000000350 0x000053 0x000053 R   0x1
+      [Requesting program interpreter: /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2]
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x084aa8 0x084aa8 R   0x1000
+  LOAD           0x085000 0x0000000000085000 0x0000000000085000 0x2ef775 0x2ef775 R E 0x1000
+  LOAD           0x375000 0x0000000000375000 0x0000000000375000 0x156e18 0x156e18 R   0x1000
+  LOAD           0x4cca90 0x00000000004cca90 0x00000000004cca90 0x05d0e0 0x05d208 RW  0x1000
+  DYNAMIC        0x5268d8 0x00000000005268d8 0x00000000005268d8 0x000240 0x000240 RW  0x8
+  NOTE           0x4cbdd8 0x00000000004cbdd8 0x00000000004cbdd8 0x000020 0x000020 R   0x8
+  NOTE           0x4cbdf8 0x00000000004cbdf8 0x00000000004cbdf8 0x000020 0x000020 R   0x4
+  TLS            0x4cca90 0x00000000004cca90 0x00000000004cca90 0x000048 0x0000c0 R   0x8
+  GNU_PROPERTY   0x4cbdd8 0x00000000004cbdd8 0x00000000004cbdd8 0x000020 0x000020 R   0x8
+  GNU_EH_FRAME   0x44cf84 0x000000000044cf84 0x000000000044cf84 0x00ff0c 0x00ff0c R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+  GNU_RELRO      0x4cca90 0x00000000004cca90 0x00000000004cca90 0x05c570 0x05c570 R   0x1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     
+   01     .interp 
+   02     .interp .hash .gnu.hash .dynsym .dynstr .gnu.version .gnu.version_r .rela.dyn .rela.plt 
+   03     .init .plt .plt.got .text .fini 
+   04     .rodata .debug_gdb_scripts .eh_frame_hdr .eh_frame .gcc_except_table .note.gnu.property .note.ABI-tag 
+   05     .tdata .init_array .fini_array .data.rel.ro .dynamic .got .data .bss 
+   06     .dynamic 
+   07     .note.gnu.property 
+   08     .note.ABI-tag 
+   09     .tdata .tbss 
+   10     .note.gnu.property 
+   11     .eh_frame_hdr 
+   12     
+   13     .tdata .init_array .fini_array .data.rel.ro .dynamic .got 
+
+Dynamic section at offset 0x5268d8 contains 32 entries:
+  Tag        Type                         Name/Value
+ 0x0000000000000001 (NEEDED)             Shared library: [libpcre2-8.so.0]
+ 0x0000000000000001 (NEEDED)             Shared library: [libgcc_s.so.1]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [ld-linux-x86-64.so.2]
+ 0x000000000000001d (RUNPATH)            Library runpath: [/nix/store/7v8b5idfzwfl06hx6n0cvd5ikd5p0sbg-pcre2-10.48/lib:/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib:/nix/store/j7qx4s4mr17j1wqgvqdzj33lmrnzb387-gcc-16.2.0-lib/lib]
+ 0x000000000000000c (INIT)               0x85000
+ 0x000000000000000d (FINI)               0x374768
+ 0x0000000000000019 (INIT_ARRAY)         0x4ccad8
+ 0x000000000000001b (INIT_ARRAYSZ)       16 (bytes)
+ 0x000000000000001a (FINI_ARRAY)         0x4ccae8
+ 0x000000000000001c (FINI_ARRAYSZ)       8 (bytes)
+ 0x0000000000000004 (HASH)               0x3a8
+ 0x000000006ffffef5 (GNU_HASH)           0xa60
+ 0x0000000000000005 (STRTAB)             0x18e0
+ 0x0000000000000006 (SYMTAB)             0xa88
+ 0x000000000000000a (STRSZ)              2694 (bytes)
+ 0x000000000000000b (SYMENT)             24 (bytes)
+ 0x0000000000000015 (DEBUG)              0x0
+ 0x0000000000000003 (PLTGOT)             0x526b18
+ 0x0000000000000002 (PLTRELSZ)           48 (bytes)
+ 0x0000000000000014 (PLTREL)             RELA
+ 0x0000000000000017 (JMPREL)             0x84a78
+ 0x0000000000000007 (RELA)               0x2638
+ 0x0000000000000008 (RELASZ)             533568 (bytes)
+ 0x0000000000000009 (RELAENT)            24 (bytes)
+ 0x000000000000001e (FLAGS)              BIND_NOW
+ 0x000000006ffffffb (FLAGS_1)            Flags: NOW PIE
+ 0x000000006ffffffe (VERNEED)            0x2498
+ 0x000000006fffffff (VERNEEDNUM)         4
+ 0x000000006ffffff0 (VERSYM)             0x2366
+ 0x000000006ffffff9 (RELACOUNT)          22083
+ 0x0000000000000000 (NULL)               0x0

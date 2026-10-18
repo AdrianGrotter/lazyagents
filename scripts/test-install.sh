@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Exercises the Linux half of scripts/install.sh on any host, with fixture readelf output and
+# stub cargo, uname, readelf and patchelf.
+set -uo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+fixtures="$root/scripts/fixtures/readelf"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+failures=0
+
+# shellcheck source=SCRIPTDIR/install.sh
+source "$root/scripts/install.sh"
+
+expect() {
+  local want=$1 desc=$2
+  shift 2
+  "$@" >"$tmp/out.new" 2>&1
+  local got=$?
+  mv "$tmp/out.new" "$tmp/out"
+  if [[ $got == "$want" ]]; then
+    echo "ok   $desc"
+  else
+    echo "FAIL $desc (exit $got, want $want)"
+    sed 's/^/     /' "$tmp/out"
+    failures=$((failures + 1))
+  fi
+}
+
+same() { diff <(printf '%s\n' "$2") <(printf '%s\n' "$1"); }
+links_of() { nix_store_links <"$fixtures/$1"; }
+
+expect 0 "finds the interpreter and every runpath entry in the nix store" same "$(links_of nix-x86_64.txt)" \
+  "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2
+/nix/store/7v8b5idfzwfl06hx6n0cvd5ikd5p0sbg-pcre2-10.48/lib
+/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib
+/nix/store/j7qx4s4mr17j1wqgvqdzj33lmrnzb387-gcc-16.2.0-lib/lib"
+expect 0 "finds the aarch64 loader in the nix store" same "$(links_of nix-aarch64.txt)" \
+  "/nix/store/hx9wvdx2l59iahwf9nmrx7rwkm6cymgs-glibc-2.44-25/lib/ld-linux-aarch64.so.1
+/nix/store/hx9wvdx2l59iahwf9nmrx7rwkm6cymgs-glibc-2.44-25/lib"
+expect 0 "finds nothing in a binary linked against the system" same "$(links_of system-x86_64.txt)" ""
+sed 's/(RUNPATH)  /(RPATH)    /; s/Library runpath/Library rpath/' "$fixtures/nix-x86_64.txt" >"$tmp/rpath.txt"
+expect 0 "finds an old-style rpath too" same "$(nix_store_links <"$tmp/rpath.txt" | sed -n 2p)" \
+  "/nix/store/7v8b5idfzwfl06hx6n0cvd5ikd5p0sbg-pcre2-10.48/lib"
+expect 0 "reads the interpreter" same "$(elf_interpreter <"$fixtures/system-x86_64.txt")" \
+  "/lib64/ld-linux-x86-64.so.2"
+
+mkdir -p "$tmp/sys/lib64" "$tmp/sys/lib"
+touch "$tmp/sys/lib/ld-linux-aarch64.so.1" "$tmp/sys/lib64/ld-linux-x86-64.so.2"
+nix_loader=/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2
+expect 0 "picks the system loader of the same name" same \
+  "$(system_loader "$nix_loader" "$tmp/sys/lib64" "$tmp/sys/lib")" "$tmp/sys/lib64/ld-linux-x86-64.so.2"
+expect 0 "looks in every directory given" same \
+  "$(system_loader /nix/store/x/lib/ld-linux-aarch64.so.1 "$tmp/sys/lib64" "$tmp/sys/lib")" \
+  "$tmp/sys/lib/ld-linux-aarch64.so.1"
+expect 1 "fails when no system loader has the name" system_loader /nix/store/x/lib/ld-musl.so.1 "$tmp/sys/lib64"
+
+# Stub tools: readelf prints a fixture until patchelf has run, then the system one.
+stubs="$tmp/stubs"
+mkdir -p "$stubs"
+cat >"$stubs/readelf" <<'EOF'
+#!/usr/bin/env bash
+if [[ -e $STUB_STATE/patched ]]; then cat "$STUB_FIXTURES/system-x86_64.txt"; else cat "$STUB_FIXTURES/$STUB_ELF"; fi
+EOF
+cat >"$stubs/patchelf" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$STUB_STATE/patchelf.log"
+touch "$STUB_STATE/patched"
+EOF
+cat >"$stubs/uname" <<'EOF'
+#!/usr/bin/env bash
+echo Linux
+EOF
+cat >"$stubs/cargo" <<'EOF'
+#!/usr/bin/env bash
+while [[ $# -gt 0 && $1 != --root ]]; do shift; done
+case ${2:-} in
+  "$STUB_TMP"/*) ;;
+  *) echo "cargo stub: refusing --root ${2:-} outside $STUB_TMP" >&2; exit 1 ;;
+esac
+mkdir -p "$2/bin"
+printf '#!/usr/bin/env bash\n[[ -e $STUB_STATE/broken ]] && { echo "version GLIBC_2.39 not found" >&2; exit 1; }\necho "lazyagents built"\n' >"$2/bin/lazyagents"
+chmod +x "$2/bin/lazyagents"
+EOF
+chmod +x "$stubs"/*
+
+export STUB_FIXTURES=$fixtures STUB_TMP=$tmp
+fresh() {
+  export STUB_STATE="$tmp/state-$1" STUB_ELF=$2
+  rm -rf "$STUB_STATE"
+  mkdir -p "$STUB_STATE/root/bin" "$STUB_STATE/build/bin"
+  printf '#!/usr/bin/env bash\necho "lazyagents old"\n' >"$STUB_STATE/root/bin/lazyagents"
+  printf '#!/usr/bin/env bash\n[[ -e $STUB_STATE/broken ]] && exit 1\necho "lazyagents built"\n' >"$STUB_STATE/build/bin/lazyagents"
+  chmod +x "$STUB_STATE"/*/bin/lazyagents
+}
+relink() { PATH="$stubs:$PATH" install_linux "$STUB_STATE/build/bin/lazyagents" "$STUB_STATE/root/bin/lazyagents" "$@"; }
+installed() { same "$("$STUB_STATE/root/bin/lazyagents")" "$1"; }
+
+fresh relink nix-x86_64.txt
+expect 0 "relinks a nix-linked binary to the system loader" relink "$tmp/sys/lib64" "$tmp/sys/lib"
+expect 0 "patchelf sets the system loader and drops the runpath" same "$(cat "$STUB_STATE/patchelf.log")" \
+  "--set-interpreter $tmp/sys/lib64/ld-linux-x86-64.so.2 --remove-rpath $STUB_STATE/build/bin/lazyagents"
+expect 0 "installs the relinked binary" installed "lazyagents built"
+
+fresh clean system-x86_64.txt
+expect 0 "installs a system-linked binary as built" relink "$tmp/sys/lib64"
+expect 1 "leaves a system-linked binary unpatched" test -e "$STUB_STATE/patchelf.log"
+expect 0 "installs the system-linked binary" installed "lazyagents built"
+
+fresh noloader nix-aarch64.txt
+expect 1 "fails when the system has no loader for it" relink "$tmp/sys/lib64"
+expect 0 "says which loader it looked for" grep -q "ld-linux-aarch64.so.1" "$tmp/out"
+expect 0 "keeps the installed binary when it has no loader" installed "lazyagents old"
+
+fresh broken nix-x86_64.txt
+touch "$STUB_STATE/broken"
+expect 1 "fails when the relinked binary does not run" relink "$tmp/sys/lib64"
+expect 0 "shows why it does not run" grep -q "does not run" "$tmp/out"
+expect 0 "keeps the installed binary when the relinked one does not run" installed "lazyagents old"
+
+fresh script system-x86_64.txt
+script() {
+  (cd "$root" && TMPDIR="$tmp" PATH="$stubs:$PATH" LAZYAGENTS_INSTALL_ROOT="$tmp/install-root" scripts/install.sh)
+}
+expect 0 "install.sh on Linux installs into LAZYAGENTS_INSTALL_ROOT" script
+expect 0 "install.sh runs the installed binary" grep -qx "lazyagents built" "$tmp/out"
+expect 0 "install.sh installs the binary it built" test -x "$tmp/install-root/bin/lazyagents"
+
+if [[ $failures -gt 0 ]]; then
+  echo "$failures failure(s)"
+  exit 1
+fi
+echo "all install checks passed"

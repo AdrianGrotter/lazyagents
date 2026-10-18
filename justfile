@@ -20,6 +20,9 @@ deny:
 test-hooks:
     scripts/test-hooks.sh
 
+test-install:
+    scripts/test-install.sh
+
 test-harness:
     scripts/test-harness.sh
 
@@ -32,7 +35,7 @@ smoke-worktree:
 test-tui-hangup:
     scripts/test-tui-hangup.sh
 
-check: fmt-check lint test test-hooks test-harness smoke-tui test-tui-hangup smoke-worktree
+check: fmt-check lint test test-hooks test-install test-harness smoke-tui test-tui-hangup smoke-worktree
 
 install:
     scripts/install.sh

@@ -18,7 +18,7 @@ cd ~/some-project
 lazyagents                     # open the TUI
 ```
 
-`~/.local/bin` must be on your `PATH`. Run `just install` again after pulling to upgrade. The install path stays the same across upgrades, which matters: Claude agents call `lazyagents hook` through that path, so agents started before an upgrade keep reporting their status.
+`~/.local/bin` must be on your `PATH`; `LAZYAGENTS_INSTALL_ROOT` installs to `$LAZYAGENTS_INSTALL_ROOT/bin` instead. On Linux the build is relinked to the system's loader and libraries and installed only if it runs that way; when the system's glibc is older than the nix shell's, the script stops and says how to build with rustup instead. Run `just install` again after pulling to upgrade. The install path stays the same across upgrades, which matters: Claude agents call `lazyagents hook` through that path, so agents started before an upgrade keep reporting their status.
 
 The TUI starts the daemon if none is running. Quitting it leaves the agents running; run `lazyagents` again to reattach.
 

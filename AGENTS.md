@@ -10,9 +10,9 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 
 ## Commands
 
-- `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, tmux harness self-test, TUI smoke run (`scripts/smoke-tui.sh`), TUI hangup test (`scripts/test-tui-hangup.sh`), worktree smoke run (`scripts/smoke-worktree.sh`). The done gate. It takes 3-6 minutes: run it with a 10-minute timeout or in the background.
+- `just check`: fmt check, clippy with `-D warnings`, tests, hook tests, install script tests, tmux harness self-test, TUI smoke run (`scripts/smoke-tui.sh`), TUI hangup test (`scripts/test-tui-hangup.sh`), worktree smoke run (`scripts/smoke-worktree.sh`). The done gate. It takes 3-6 minutes: run it with a 10-minute timeout or in the background.
 - `just deny`: `cargo deny check` for advisories, licenses and sources; needs the network, so it is not part of `just check`
-- `just fmt`, `just lint`, `just test`, `just test-hooks`, `just smoke-tui`, `just test-tui-hangup`, `just smoke-worktree`
+- `just fmt`, `just lint`, `just test`, `just test-hooks`, `just test-install`, `just smoke-tui`, `just test-tui-hangup`, `just smoke-worktree`
 - `just dev [args]`: run the TUI (no args) or a CLI subcommand (`just dev ls`) from any directory. For experiments, point `LAZYAGENTS_STATE_DIR` at a temp dir so your real agents stay untouched.
 - `just install`: release build to `~/.local/bin/lazyagents`, the user's real binary. Its path is written into running Claude agents' hook settings, so it stays fixed; install only when the user asks.
 - `lazyagents ls|new|send|rename|kill|restart|rm|project add|project rm|shutdown`: manage projects and agents through the daemon without the TUI. Tests set `LAZYAGENTS_STATE_DIR` to a temp dir and shut the daemon down.
@@ -27,7 +27,7 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 | `crates/tui` | ratatui client: model (app.rs), rendering (ui.rs), keymap and config, connection, runtime |
 | `crates/lazyagents` | the binary and CLI |
 | `vendor/crossterm` | crossterm 0.29.0 with a dead-terminal fix (ADR 0005); drop when upstream releases it |
-| `scripts/` | tmux harness, hook tests, TUI smoke, hangup and worktree scripts |
+| `scripts/` | install script and its tests, tmux harness, hook tests, TUI smoke, hangup and worktree scripts |
 | `docs/` | architecture, protocol, keybindings, configuration, status detection, ADRs (`decisions/`) |
 
 ## Working rules
