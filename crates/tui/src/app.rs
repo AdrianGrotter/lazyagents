@@ -13,7 +13,7 @@ use ratatui::layout::{Position, Rect};
 use crate::approved;
 use crate::commands::{self, Context, CustomCommand, Output, Prompt};
 use crate::config::{Config, PresetDef, Theme};
-use crate::fixed_keys::{self, DiffKey, Motion, ScrollKey};
+use crate::fixed_keys::{self, DiffKey, HelpKey, Motion, ScrollKey};
 use crate::keymap::{Action, Keymap};
 use crate::keys;
 use crate::known::{self, KnownProject};
@@ -532,6 +532,10 @@ pub struct App {
     pub approved_setups: Vec<crate::approved::Approval>,
     /// What the help popup is filtered by while it is open.
     pub help_filter: String,
+    /// Whether keys typed in the help popup go to its filter.
+    pub help_typing: bool,
+    /// The help popup's first row on screen.
+    pub help_scroll: usize,
     /// Review comments per agent, kept until they are sent.
     pub comments: HashMap<AgentId, Vec<Comment>>,
     pub theme: Theme,
@@ -594,6 +598,8 @@ impl App {
             commands: config.commands,
             comments: HashMap::new(),
             help_filter: String::new(),
+            help_typing: false,
+            help_scroll: 0,
             screen_mode: ScreenMode::Normal,
             gh: false,
             approved_setups: Vec::new(),
@@ -1750,6 +1756,10 @@ impl App {
             Some(Popup::Rename { input, .. }) => input.push_str(&line),
             Some(Popup::CommandPrompt(run)) => run.input.push_str(&line),
             Some(Popup::Comment { input, .. }) => input.push_str(&line),
+            Some(Popup::Help) if self.help_typing => {
+                self.help_filter.push_str(&line);
+                self.help_scroll = 0;
+            }
             Some(Popup::Reply { input, .. }) => {
                 input.push_str(&text.replace("\r\n", " ").replace(['\r', '\n'], " "))
             }
@@ -2051,6 +2061,8 @@ impl App {
             }
             Action::Help => {
                 self.help_filter.clear();
+                self.help_typing = false;
+                self.help_scroll = 0;
                 self.popup = Some(Popup::Help);
             }
             Action::Down => self.step(1),
@@ -2310,21 +2322,7 @@ impl App {
         };
         match popup {
             Popup::Help => {
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                match key.code {
-                    KeyCode::Backspace => {
-                        self.help_filter.pop();
-                        self.popup = Some(Popup::Help);
-                    }
-                    KeyCode::Char(c) if c != '?' && !ctrl => {
-                        self.help_filter.push(c);
-                        self.popup = Some(Popup::Help);
-                    }
-                    KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
-                        self.popup = Some(Popup::Help);
-                    }
-                    _ => self.help_filter.clear(),
-                }
+                self.on_help_key(&key);
                 Vec::new()
             }
             Popup::Commands { index } => self.on_commands_key(index, key),
@@ -2427,6 +2425,43 @@ impl App {
             Popup::ProjectPicker { index } => self.on_picker_key(index, &key),
             Popup::AddProject(form) => self.on_project_form_key(form, &key),
             Popup::NewAgent(form) => self.on_form_key(form, key),
+        }
+    }
+
+    /// After `/`, keys edit the filter until `enter` keeps it or `esc` clears it; otherwise
+    /// they scroll, and the help key closes the popup like the table's close keys.
+    fn on_help_key(&mut self, key: &KeyEvent) {
+        self.popup = Some(Popup::Help);
+        if self.help_typing {
+            let before = self.help_filter.clone();
+            match edit(&mut self.help_filter, key) {
+                Edit::Submit => self.help_typing = false,
+                Edit::Cancel => {
+                    self.help_typing = false;
+                    self.help_filter.clear();
+                }
+                Edit::Continue => {}
+            }
+            if self.help_filter != before {
+                self.help_scroll = 0;
+            }
+            return;
+        }
+        let action = fixed_keys::help_key(key);
+        if action == Some(HelpKey::Close) || self.keymap.sidebar(key) == Some(Action::Help) {
+            self.popup = None;
+            self.help_filter.clear();
+            self.help_scroll = 0;
+            return;
+        }
+        match action {
+            Some(HelpKey::Filter) => self.help_typing = true,
+            Some(HelpKey::Move(motion)) => {
+                let screen = self.screen_size.unwrap_or(DEFAULT_SIZE);
+                let (last, page) = crate::ui::help_scroll_limits(self, screen);
+                self.help_scroll = motion.position(self.help_scroll, page, last);
+            }
+            Some(HelpKey::Close) | None => {}
         }
     }
 
@@ -7102,22 +7137,72 @@ mod help_tests {
     }
 
     #[test]
-    fn typing_in_the_help_filters_it_and_escape_closes_it() {
+    fn slash_filters_the_help_and_escape_closes_it() {
         let mut app = stopped();
         let _ = app.on_key(key('?'));
-        for c in "diff".chars() {
+        let _ = app.on_key(key('/'));
+        for c in "diff?".chars() {
             let _ = app.on_key(key(c));
         }
         assert_eq!(app.popup, Some(Popup::Help));
-        assert_eq!(app.help_filter, "diff");
+        assert_eq!(app.help_filter, "diff?");
         let _ = app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(app.help_filter, "dif");
+        assert_eq!(app.help_filter, "diff");
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            (&app.popup, app.help_filter.as_str()),
+            (&Some(Popup::Help), "diff")
+        );
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.help_filter, "diff");
+        let _ = app.on_key(key('/'));
+        let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            (&app.popup, app.help_filter.as_str()),
+            (&Some(Popup::Help), "")
+        );
+        let _ = app.on_key(key('/'));
+        let _ = app.on_paste("pane\nmore".into());
+        assert_eq!(app.help_filter, "pane");
+        let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let _ = app.on_key(key('/'));
+        let _ = app.on_key(key('x'));
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.popup, None);
         let _ = app.on_key(key('?'));
         assert_eq!(app.help_filter, "");
         let _ = app.on_key(key('?'));
         assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn the_help_scrolls_and_page_keys_keep_it_open() {
+        let mut app = stopped();
+        app.set_screen_size(60, 20);
+        let _ = app.on_key(key('?'));
+        let _ = app.on_key(key('k'));
+        assert_eq!(app.help_scroll, 0);
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.help_scroll, 2);
+        let _ = app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.popup, Some(Popup::Help));
+        assert!(app.help_scroll > 2, "{}", app.help_scroll);
+        let _ = app.on_key(key('G'));
+        let last = app.help_scroll;
+        let _ = app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.help_scroll, last);
+        let _ = app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(app.help_scroll < last);
+        let _ = app.on_key(key('g'));
+        assert_eq!((&app.popup, app.help_scroll), (&Some(Popup::Help), 0));
+        let _ = app.on_key(key('G'));
+        let _ = app.on_key(key('q'));
+        assert_eq!(app.popup, None);
+        let _ = app.on_key(key('?'));
+        assert_eq!(app.help_scroll, 0);
     }
 
     #[test]
