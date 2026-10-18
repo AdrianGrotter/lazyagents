@@ -117,7 +117,7 @@ n: cancel`:
 
 | Key | Action |
 |---|---|
-| `y` | remove the agent and its worktree (the branch stays) |
+| `y` | remove the agent and its worktree (the branch stays); once done the status bar says `removed <name> and its worktree, kept branch <branch>` |
 | `k` | remove the agent and keep the worktree |
 | `n`, `esc` | cancel |
 
