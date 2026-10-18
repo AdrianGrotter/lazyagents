@@ -314,7 +314,7 @@ into its base (`git merge-base --is-ancestor`); see ADR 0013.
 `crates/tui` is a client like the CLI; it holds no agent state of its own beyond what the
 daemon last told it.
 
-- **Model** (`app.rs`): `App` holds projects, agents, selection, focus (projects, agents,
+- **Model** (`app/`): `App` holds projects, agents, selection, focus (projects, agents,
   pane, diff or scroll), the open popup, the subscribed agent's screen, the git stats and
   diff the daemon sent, and the pane's text selection. Key, paste and mouse events and
   daemon messages go in; `Effect`s come out: `Send(Request)`, `Copy`, `Notify`,
@@ -326,6 +326,13 @@ daemon last told it.
   one, and sizes a running agent's PTY to the pane.
   It asks for the selected agent's `GitStat` when the selection changes and then every
   five seconds, with at most one request per agent in flight.
+  `app/mod.rs` holds `App`, the types the areas share, server sync, selection and key
+  dispatch; each area has its own module with its tests: `sidebar.rs` (sidebar actions),
+  `pane.rs` (pane keys and scroll mode), `popup.rs` (popup keys, help and confirmations),
+  `forms.rs` (the new agent and project forms, the project picker and the setup
+  approval), `diff.rs` (the diff view and review comments), `input.rs` (paste and mouse),
+  `commands.rs` (custom commands) and `finish.rs` (the finish menu). Test helpers more
+  than one area uses live in `app::tests`.
 - **Focus rule**: keys reach an agent only while the pane has focus, and focus moves into
   the pane only on an explicit user action: `enter` on a running agent, a click in the
   pane on a running agent (a click on an Agents row only selects), or a successful create
@@ -370,13 +377,13 @@ daemon last told it.
   terminal event, daemon message and finished command. A 100 ms tick redraws only while
   an agent is starting or working, or when the status message appears or expires; a tick
   never opens, closes or moves a popup.
-- **Mouse** (`app.rs`): the TUI captures the mouse. A click selects a row or focuses a box
-  or the pane, a drag selects pane cells and copies them on release, a click outside a
-  popup closes it, and the wheel scrolls the diff, the scroll-mode history or the pane's
-  scrollback, or goes to the agent when it enabled mouse reporting. A click in the pane
-  that ends in the cell it started in also goes to the agent, which the daemon reports
-  only when the agent enabled mouse reporting; drags never reach the agent (ADR 0015). See
-  [keybindings.md](keybindings.md#mouse).
+- **Mouse** (`app/input.rs`): the TUI captures the mouse. A click selects a row or
+  focuses a box or the pane, a drag selects pane cells and copies them on release, a click
+  outside a popup closes it, and the wheel scrolls the diff, the scroll-mode history or the
+  pane's scrollback, or goes to the agent when it enabled mouse reporting. A click in the
+  pane that ends in the cell it started in also goes to the agent, which the daemon
+  reports only when the agent enabled mouse reporting; drags never reach the agent (ADR
+  0015). See [keybindings.md](keybindings.md#mouse).
 - **Connection actor** (`connection.rs`): a task owning the `Client`. It forwards
   responses, errors and server events (agent list changes, screen frames) on one channel.
   `GitStat` and `GitDiff` go out without waiting for their replies, which the daemon may
@@ -399,6 +406,8 @@ daemon last told it.
   SIGTERM ignored ([ADR 0005](decisions/0005-vendor-crossterm-dead-tty-fix.md)). SIGHUP,
   SIGTERM and SIGINT also exit. The guard and a panic hook restore every terminal mode on
   any exit path, ignoring errors from a vanished terminal.
+  `run` drives the event loop; `restart_mismatched_daemon` holds the mismatch prompt and
+  restart, and `apply_effect` carries out each `Effect` the model returns.
 - **Custom commands** (`commands.rs`): `[[commands]]` from the config, expanded with
   shell-quoted values and run with `sh -c` by the runtime ([ADR
   0010](decisions/0010-custom-commands-run-by-the-tui.md)). A `terminal` command pauses the

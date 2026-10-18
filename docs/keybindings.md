@@ -1,6 +1,6 @@
 # Keybindings
 
-Status: implemented in crates/tui (app.rs, keymap.rs, keys.rs, config.rs).
+Status: implemented in crates/tui (app/, keymap.rs, keys.rs, config.rs).
 
 The keys below are the defaults. Every sidebar key, the pane prefix, the keys after it and
 the direct pane keys can be changed in `config.toml` (`[keys.sidebar]` and `[keys.pane]`);

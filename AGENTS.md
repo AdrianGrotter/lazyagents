@@ -24,7 +24,7 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 | `crates/protocol` | client↔daemon messages and framing |
 | `crates/daemon` | agents, PTYs, terminal emulation, persistence, git worktrees |
 | `crates/client` | connects to the daemon, starting it on demand; used by the CLI and the TUI |
-| `crates/tui` | ratatui client: model (app.rs), rendering (ui.rs), shared screen geometry (layout.rs, help.rs), keymap and config, connection, runtime |
+| `crates/tui` | ratatui client: model (`app/`, one module per area), rendering (ui.rs), shared screen geometry (layout.rs, help.rs), keymap and config, connection, runtime |
 | `crates/lazyagents` | the binary and CLI |
 | `vendor/crossterm` | crossterm 0.29.0 with a dead-terminal fix (ADR 0005); drop when upstream releases it |
 | `scripts/` | install script and its tests, tmux harness, hook tests, TUI smoke, hangup and worktree scripts |
