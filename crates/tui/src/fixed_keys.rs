@@ -158,10 +158,11 @@ pub enum HelpKey {
     Move(Motion),
 }
 
-pub const HELP_KEYS: [(KeySpec, HelpKey); 4] = [
+pub const HELP_KEYS: [(KeySpec, HelpKey); 5] = [
     (plain(KeyCode::Esc), HelpKey::Close),
     (char('q'), HelpKey::Close),
     (plain(KeyCode::Enter), HelpKey::Close),
+    (ctrl('c'), HelpKey::Close),
     (char('/'), HelpKey::Filter),
 ];
 

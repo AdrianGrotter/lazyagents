@@ -2431,9 +2431,26 @@ impl App {
 
     /// After `/`, keys edit the filter until `enter` keeps it or `esc` clears it; otherwise
     /// they scroll, `esc` clears a kept filter, and the help key closes the popup like the
-    /// table's close keys.
+    /// table's close keys. A close key held with ctrl closes it even while typing.
     fn on_help_key(&mut self, key: &KeyEvent) {
+        let action = fixed_keys::help_key(key);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let closes = action == Some(HelpKey::Close) && (ctrl || !self.help_typing)
+            || !self.help_typing && self.keymap.sidebar(key) == Some(Action::Help);
+        let clears = !self.help_typing && key.code == KeyCode::Esc && !self.help_filter.is_empty();
+        if closes && !clears {
+            self.popup = None;
+            self.help_filter.clear();
+            self.help_typing = false;
+            self.help_scroll = 0;
+            return;
+        }
         self.popup = Some(Popup::Help);
+        if clears {
+            self.help_filter.clear();
+            self.help_scroll = 0;
+            return;
+        }
         if self.help_typing {
             let before = self.help_filter.clone();
             match edit(&mut self.help_filter, key) {
@@ -2447,18 +2464,6 @@ impl App {
             if self.help_filter != before {
                 self.help_scroll = 0;
             }
-            return;
-        }
-        if key.code == KeyCode::Esc && !self.help_filter.is_empty() {
-            self.help_filter.clear();
-            self.help_scroll = 0;
-            return;
-        }
-        let action = fixed_keys::help_key(key);
-        if action == Some(HelpKey::Close) || self.keymap.sidebar(key) == Some(Action::Help) {
-            self.popup = None;
-            self.help_filter.clear();
-            self.help_scroll = 0;
             return;
         }
         match action {
@@ -5231,8 +5236,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn help_closes_on_escape_enter_or_question_mark() {
-        for close in [code(KeyCode::Esc), code(KeyCode::Enter), key('?')] {
+    fn help_closes_on_escape_enter_question_mark_or_ctrl_c() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('?'));
+        let _ = app.on_key(key('/'));
+        let _ = app.on_key(ctrl('c'));
+        assert_eq!((&app.popup, app.help_typing), (&None, false));
+        for close in [
+            code(KeyCode::Esc),
+            code(KeyCode::Enter),
+            key('?'),
+            ctrl('c'),
+        ] {
             let (mut app, _, _) = two_agents();
             let _ = app.on_key(key('?'));
             assert_eq!(app.popup, Some(Popup::Help));
