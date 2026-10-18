@@ -780,7 +780,7 @@ fn draw_selection(selection: Selection, area: Rect, buf: &mut Buffer) {
     }
 }
 
-/// Draws the diff from its scroll position, the cursor line highlighted while the view has
+/// Draws the diff from its scroll position, the cursor line reversed while the view has
 /// focus and each review comment on a row of its own under its line.
 fn diff_text<'a>(view: &'a DiffView, app: &App, height: u16) -> Paragraph<'a> {
     let theme = &app.theme;
@@ -812,7 +812,7 @@ fn diff_text<'a>(view: &'a DiffView, app: &App, height: u16) -> Paragraph<'a> {
             Style::new()
         };
         let style = if index == view.cursor && app.focus == Focus::Diff {
-            style.bg(theme.selected)
+            style.add_modifier(Modifier::REVERSED)
         } else {
             style
         };
@@ -3621,10 +3621,11 @@ mod tests {
         assert!(rows[new + 1].contains("  ✎ rename"), "{text}");
         assert!(rows[new + 2].contains(" same"), "{text}");
         let layout = layout(Rect::new(0, 0, 100, 30), &app);
-        assert_eq!(
-            buffer[(layout.pane_inner.x, new as u16)].bg,
-            app.theme.selected
-        );
+        let cursor = &buffer[(layout.pane_inner.x, new as u16)];
+        assert_eq!(cursor.fg, app.theme.diff_add);
+        assert!(cursor.modifier.contains(Modifier::REVERSED), "{cursor:?}");
+        let below = &buffer[(layout.pane_inner.x, new as u16 + 2)];
+        assert!(!below.modifier.contains(Modifier::REVERSED), "{below:?}");
         let status = text.lines().last().expect("status line");
         assert!(
             status.starts_with("q/esc/D close · c comment · S send comments"),

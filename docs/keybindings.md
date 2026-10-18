@@ -176,7 +176,8 @@ shows at most 20 000 lines. A git error closes it and shows the error in the sta
 | `D`, `q`, `esc` | close, back to the Agents box |
 | `ctrl-c` | quit the TUI (agents keep running) |
 
-The view scrolls to keep the cursor line, highlighted, on screen. The mouse wheel scrolls
+The view scrolls to keep the cursor line on screen. It is drawn reversed, so its colour
+stays visible as a bar: green on an added line, red on a removed one. The mouse wheel scrolls
 the diff and keeps the cursor inside it. The view closes by itself if its agent is removed.
 
 Review comments belong to the agent and stay, drawn under their line as `✎ <text>`, when the
