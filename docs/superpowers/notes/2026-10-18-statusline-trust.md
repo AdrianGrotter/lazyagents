@@ -31,6 +31,12 @@ lazyagents starts Claude interactively, without `-p` or any trust-bypassing flag
 never invokes `lazyagents statusline` in an untrusted folder, and lazyagents adds no code
 execution that Claude itself would not do.
 
+## Older Claude versions
+
+lazyagents enforces no minimum Claude version. On Claude older than 2.1.51, Claude itself
+runs a repository's status line before the folder is trusted, with or without lazyagents, so
+chaining it adds no new exposure; but users of those versions remain exposed, through Claude.
+
 ## Could `lazyagents statusline` check trust itself?
 
 - The daemon's `at_trust_dialog` flag (ADR 0017) only records that the agent showed the dialog
