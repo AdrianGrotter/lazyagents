@@ -111,14 +111,37 @@ pub fn add_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> anyho
     Ok(())
 }
 
-/// Removes a worktree `add_worktree` made, with the branch it created; true once the
-/// directory, git's record of the worktree and the branch are all gone. git keeps a locked
-/// worktree, and a branch checked out in a worktree it keeps.
+/// Removes a worktree `add_worktree` made, locked or not, with the branch it created; true
+/// once the directory, git's record of the worktree and the branch are all gone. In a
+/// project that is no longer a git repository only the directory is left to remove.
 pub fn discard_worktree(repo: &Path, path: &Path, branch: &str) -> bool {
+    if is_repository(repo) == Some(false) {
+        if let Err(e) = std::fs::remove_dir_all(path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %path.display(), "could not remove the leftover directory: {e}");
+        }
+        return !path.exists();
+    }
     undo_add(repo, path, branch, false);
     !path.exists()
         && registered(repo, path) == Some(false)
         && branch_exists(repo, branch).ok() == Some(false)
+}
+
+/// `None` when git fails for another reason than `repo` not being in a repository; matches
+/// git's English message, so a localized git always gets `None`.
+fn is_repository(repo: &Path) -> Option<bool> {
+    let output = command(Some(repo))
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        return Some(true);
+    }
+    String::from_utf8_lossy(&output.stderr)
+        .contains("not a git repository")
+        .then_some(false)
 }
 
 /// Whether git lists `path` as one of the repo's worktrees; `None` when it cannot tell.
@@ -165,9 +188,22 @@ pub fn worktree_failure(
     None
 }
 
+/// `path` is always a worktree the daemon made, so a lock on it (git's own while a checkout
+/// runs, left by an add that was killed) is overridden.
 fn undo_add(repo: &Path, path: &Path, branch: &str, branch_existed: bool) {
     let registered = registered(repo, path).unwrap_or(false);
-    let removed = registered && remove_worktree(repo, path, true).is_ok();
+    let removed = registered
+        && git(
+            Some(repo),
+            [
+                OsStr::new("worktree"),
+                OsStr::new("remove"),
+                OsStr::new("--force"),
+                OsStr::new("--force"),
+                path.as_os_str(),
+            ],
+        )
+        .is_ok();
     if !removed && path.exists() {
         let _ = std::fs::remove_dir_all(path);
     }

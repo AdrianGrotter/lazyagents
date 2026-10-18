@@ -183,11 +183,13 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   recorded in the same save that drops the pending worktree; a failed add drops it after
   git undid its work. When a daemon starts and finds pending worktrees, a crash or a
   shutdown cut a create short: it removes each one with its branch off the event loop
-  (keeping one an agent records) and keeps its name reserved until then (ADR 0021). One
-  git will not let go of (a locked worktree, or a branch checked out elsewhere) stays
-  pending, with a warning in the log, and is tried again at the next start. One whose
-  repository is definitely gone is dropped, with a line at info level, so the project can
-  be removed, and its leftover directory is deleted. Cleanup touches only an entry whose
+  (keeping one an agent records) and keeps its name reserved until then (ADR 0021). A
+  locked worktree is removed too (`git worktree remove --force --force`): git locks one
+  while it checks it out, and an add killed then leaves the lock behind. One git will not
+  let go of (a file it may not delete, or a branch checked out elsewhere) stays pending,
+  with a warning in the log, and is tried again at the next start. One whose repository
+  is definitely gone, or no longer a git repository, is dropped, with a line at info
+  level, so the project can be removed, and its leftover directory is deleted. Cleanup touches only an entry whose
   path is exactly `<state>/worktrees/<project>/<name>` (no `..` components) and whose
   branch is `lazyagents/<name>`; any other entry is forgotten with a warning in the log,
   its directory and branch left alone.

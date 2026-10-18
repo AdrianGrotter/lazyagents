@@ -1,7 +1,7 @@
 # 0021. Record worktrees being created in state.toml and remove them at the next start
 
 Date: 2026-10-18
-Status: Accepted
+Status: Accepted; amended below
 
 ## Context
 
@@ -22,3 +22,5 @@ The create plans its worktree first, off the loop: branch, base, path, and wheth
 ## Consequences
 
 A crash or a cut-short shutdown no longer leaves a worktree that blocks its name; the next start cleans up after it. A worktree create takes one more tick, and one more save of `state.toml`, before git starts. A user who makes the branch `lazyagents/<name>` by hand in the instant between the plan and the add, and whose daemon then crashes, would lose that branch at the next start.
+
+Amended: cleanup removes a locked worktree too (`git worktree remove --force --force`). A pending path is always one the daemon made, so its lock is git's own from an add killed mid-checkout, which otherwise kept the entry, and its name, forever. A project directory that is no longer a git repository has its leftover directory deleted and the entry dropped, as when the repository is gone. Cleanup touches only an entry whose path is `<state>/worktrees/<project>/<name>` and whose branch is `lazyagents/<name>`; any other is forgotten and left alone.

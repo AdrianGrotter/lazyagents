@@ -35,3 +35,19 @@ pub fn repo() -> tempfile::TempDir {
     git(dir.path(), &["commit", "-q", "-m", "init"]);
     dir
 }
+
+/// Makes `dir/stuck/file` with `stuck` read-only, so neither git nor `remove_dir_all` can
+/// delete `dir` until `deletable` is called on the returned path.
+pub fn undeletable(dir: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let stuck = dir.join("stuck");
+    std::fs::create_dir_all(&stuck).expect("stuck dir");
+    std::fs::write(stuck.join("file"), "x").expect("stuck file");
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+    stuck
+}
+
+pub fn deletable(stuck: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(stuck, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+}

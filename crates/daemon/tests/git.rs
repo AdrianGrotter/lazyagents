@@ -494,15 +494,32 @@ fn discarding_a_worktree_git_keeps_reports_what_is_left() {
     let wt = root.path().canonicalize().expect("canonical").join("wt");
     add_worktree(repo.path(), &wt, "lazyagents/wt", "main").expect("add");
     let wt_arg = wt.to_str().expect("utf8");
-    git(repo.path(), &["worktree", "lock", wt_arg]);
+    let stuck = common::undeletable(&wt);
 
     assert!(!discard_worktree(repo.path(), &wt, "lazyagents/wt"));
-    assert_ne!(git(repo.path(), &["branch", "--list", "lazyagents/wt"]), "");
+    assert!(wt.exists());
 
-    git(repo.path(), &["worktree", "unlock", wt_arg]);
+    common::deletable(&stuck);
     assert!(discard_worktree(repo.path(), &wt, "lazyagents/wt"));
     assert_eq!(git(repo.path(), &["branch", "--list", "lazyagents/wt"]), "");
     assert!(!wt.exists());
     let worktrees = git(repo.path(), &["worktree", "list", "--porcelain"]);
     assert!(!worktrees.contains(wt_arg), "{worktrees}");
+}
+
+#[test]
+fn discarding_a_locked_worktree_removes_it_and_its_branch() {
+    let repo = repo();
+    let root = tempfile::tempdir().expect("worktree root");
+    let wt = root.path().canonicalize().expect("canonical").join("wt");
+    add_worktree(repo.path(), &wt, "lazyagents/wt", "main").expect("add");
+    let wt_arg = wt.to_str().expect("utf8");
+    git(
+        repo.path(),
+        &["worktree", "lock", "--reason", "initializing", wt_arg],
+    );
+
+    assert!(discard_worktree(repo.path(), &wt, "lazyagents/wt"));
+    assert_eq!(git(repo.path(), &["branch", "--list", "lazyagents/wt"]), "");
+    assert!(!wt.exists());
 }

@@ -3795,7 +3795,7 @@ async fn a_leftover_git_will_not_let_go_of_is_retried_at_the_next_start() {
             "main",
         ],
     );
-    common::git(repo.path(), &["worktree", "lock", leftover_arg]);
+    let stuck = common::undeletable(&leftover);
     drop(conn);
     stop_daemon(&mut daemon).await;
     record_pending_worktree(&daemon, &project, "ghost", &leftover);
@@ -3822,12 +3822,9 @@ async fn a_leftover_git_will_not_let_go_of_is_retried_at_the_next_start() {
     let state = StatePaths::new(daemon.path()).state_file();
     let kept = std::fs::read_to_string(&state).expect("state");
     assert!(kept.contains("lazyagents/ghost"), "{kept}");
-    assert_ne!(
-        common::git(repo.path(), &["branch", "--list", "lazyagents/ghost"]),
-        ""
-    );
+    assert!(leftover.exists());
 
-    common::git(repo.path(), &["worktree", "unlock", leftover_arg]);
+    common::deletable(&stuck);
     daemon.task = Some(spawn_daemon(daemon.path()).await);
     wait_until_no_pending_worktree(&daemon).await;
     assert_eq!(
@@ -4004,4 +4001,63 @@ async fn a_branch_outside_lazyagents_survives_an_entry_naming_it() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_ne!(common::git(repo.path(), &["branch", "--list", "main"]), "");
     assert!(leftover.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_locked_leftover_is_removed_at_the_next_start() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let leftover = worktree_path(&daemon, &project, "ghost");
+    let leftover_arg = leftover.to_str().expect("utf8");
+    common::git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "lazyagents/ghost",
+            leftover_arg,
+            "main",
+        ],
+    );
+    common::git(
+        repo.path(),
+        &["worktree", "lock", "--reason", "initializing", leftover_arg],
+    );
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree(&daemon, &project, "ghost", &leftover);
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    assert!(!leftover.exists());
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", "lazyagents/*"]),
+        ""
+    );
+    let worktrees = common::git(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert!(!worktrees.contains("ghost"), "{worktrees}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pending_worktree_of_a_project_no_longer_a_repo_is_dropped_at_the_next_start() {
+    let mut daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let (project, repo) = add_repo_project(&mut conn).await;
+    let leftover = worktree_path(&daemon, &project, "ghost");
+    std::fs::create_dir_all(&leftover).expect("leftover directory");
+    drop(conn);
+    stop_daemon(&mut daemon).await;
+    record_pending_worktree(&daemon, &project, "ghost", &leftover);
+    std::fs::remove_dir_all(repo.path().join(".git")).expect("remove .git");
+
+    daemon.task = Some(spawn_daemon(daemon.path()).await);
+    wait_until_no_pending_worktree(&daemon).await;
+    assert!(!leftover.exists());
+    let mut conn = Conn::open(daemon.path()).await;
+    conn.request(Request::RemoveProject { id: project.id })
+        .await
+        .expect("the project can be removed");
 }
