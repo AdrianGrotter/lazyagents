@@ -488,6 +488,15 @@ pub struct Message {
     pub at: Instant,
 }
 
+/// What removing an agent does with its worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeRemoval {
+    Keep,
+    Remove,
+    /// Remove it even when it has uncommitted changes.
+    Force,
+}
+
 struct PendingRemove {
     agent: AgentId,
     interactions: u64,
@@ -878,12 +887,6 @@ impl App {
                 self.git_stats.remove(&id);
             }
         }
-    }
-
-    /// Fills the open diff view with the diff of its own scope.
-    pub fn apply_diff(&mut self, id: AgentId, result: Result<String, String>) {
-        let scope = self.diff().map_or(DiffScope::All, |view| view.scope);
-        self.apply_scoped_diff(id, scope, result);
     }
 
     /// A reply for another scope than the view shows is dropped, since the user moved on.
@@ -2523,9 +2526,15 @@ impl App {
     fn on_confirm_key(&mut self, action: &Confirmed, key: &KeyEvent) -> Option<Vec<Effect>> {
         let effects = match (action, key.code) {
             (_, KeyCode::Char('n') | KeyCode::Esc) => Vec::new(),
-            (Confirmed::RemoveWorktree(id), KeyCode::Char('y')) => self.remove(*id, true, false),
-            (Confirmed::RemoveWorktree(id), KeyCode::Char('k')) => self.remove(*id, false, false),
-            (Confirmed::ForceRemove(id), KeyCode::Char('y')) => self.remove(*id, true, true),
+            (Confirmed::RemoveWorktree(id), KeyCode::Char('y')) => {
+                self.remove(*id, WorktreeRemoval::Remove)
+            }
+            (Confirmed::RemoveWorktree(id), KeyCode::Char('k')) => {
+                self.remove(*id, WorktreeRemoval::Keep)
+            }
+            (Confirmed::ForceRemove(id), KeyCode::Char('y')) => {
+                self.remove(*id, WorktreeRemoval::Force)
+            }
             (Confirmed::RemoveWorktree(_) | Confirmed::ForceRemove(_), _) => return None,
             (Confirmed::Kill(id), KeyCode::Char('y') | KeyCode::Enter) => {
                 vec![Effect::Send(Request::KillAgent { id: *id })]
@@ -2534,7 +2543,7 @@ impl App {
                 vec![self.restart(*id)]
             }
             (Confirmed::Remove(id), KeyCode::Char('y') | KeyCode::Enter) => {
-                self.remove(*id, false, false)
+                self.remove(*id, WorktreeRemoval::Keep)
             }
             (Confirmed::RemoveProject(id), KeyCode::Char('y') | KeyCode::Enter) => {
                 vec![Effect::Send(Request::RemoveProject { id: *id })]
@@ -2552,7 +2561,12 @@ impl App {
 
     /// Remembers a remove that the daemon may refuse for a dirty worktree, so the refusal
     /// can offer to force it.
-    fn remove(&mut self, id: AgentId, remove_worktree: bool, force: bool) -> Vec<Effect> {
+    fn remove(&mut self, id: AgentId, worktree: WorktreeRemoval) -> Vec<Effect> {
+        let (remove_worktree, force) = match worktree {
+            WorktreeRemoval::Keep => (false, false),
+            WorktreeRemoval::Remove => (true, false),
+            WorktreeRemoval::Force => (true, true),
+        };
         if remove_worktree
             && let Some(agent) = self.agents.iter().find(|a| a.id == id)
             && let Some(worktree) = &agent.worktree
@@ -3289,7 +3303,7 @@ impl App {
                     cwd: worktree.path.clone(),
                 }]
             }
-            FinishChoice::Remove => self.remove(id, true, false),
+            FinishChoice::Remove => self.remove(id, WorktreeRemoval::Remove),
             FinishChoice::RemoveWithBranch => {
                 let done = format!("removed {}, its worktree and branch", agent.name);
                 self.removals.insert(id, done);
@@ -3418,6 +3432,12 @@ pub(crate) mod tests {
             waiting_for: None,
             usage: None,
         }
+    }
+
+    /// Answers the open diff view's request with `result`.
+    pub(crate) fn apply_diff(app: &mut App, id: AgentId, result: Result<String, String>) {
+        let scope = app.diff().map_or(DiffScope::All, |view| view.scope);
+        app.apply_scoped_diff(id, scope, result);
     }
 
     pub(crate) fn loaded(projects: Vec<Project>, agents: Vec<AgentInfo>) -> (App, Vec<Effect>) {
@@ -5930,7 +5950,7 @@ pub(crate) mod tests {
         let _ = app.set_pane_size(80, 10);
         open_diff(&mut app, a.id);
         let text: Vec<String> = (0..100).map(|i| format!(" line {i}")).collect();
-        app.apply_diff(a.id, Ok(text.join("\n")));
+        apply_diff(&mut app, a.id, Ok(text.join("\n")));
         for (event, expected) in [
             (with(KeyCode::PageDown, KeyModifiers::CONTROL), (10, 1)),
             (with(KeyCode::PageUp, KeyModifiers::SHIFT), (0, 0)),
@@ -5976,9 +5996,9 @@ pub(crate) mod tests {
         open_diff(&mut app, a.id);
         assert_eq!(app.diff().and_then(|d| d.lines.as_ref()), None);
         let text: Vec<String> = (0..100).map(|i| format!(" line {i}")).collect();
-        app.apply_diff(b.id, Ok("+other".into()));
+        apply_diff(&mut app, b.id, Ok("+other".into()));
         assert_eq!(app.diff().and_then(|d| d.lines.as_ref()), None);
-        app.apply_diff(a.id, Ok(text.join("\n")));
+        apply_diff(&mut app, a.id, Ok(text.join("\n")));
         assert_eq!(app.diff().and_then(|d| d.lines.as_ref()), Some(&text));
         for (event, expected) in [
             (key('j'), (1, 0)),
@@ -6010,11 +6030,11 @@ pub(crate) mod tests {
             assert_eq!(app.diff(), None, "{close:?}");
             assert!(!app.prefix_pending);
             open_diff(&mut app, a.id);
-            app.apply_diff(a.id, Ok(String::new()));
+            apply_diff(&mut app, a.id, Ok(String::new()));
         }
-        app.apply_diff(a.id, Ok("+late".into()));
+        apply_diff(&mut app, a.id, Ok("+late".into()));
         let _ = app.on_key(key('q'));
-        app.apply_diff(a.id, Ok("+late".into()));
+        apply_diff(&mut app, a.id, Ok("+late".into()));
         assert_eq!(app.focus, Focus::Agents);
 
         open_diff(&mut app, a.id);
@@ -6317,7 +6337,7 @@ pub(crate) mod tests {
             app.focus
         );
         assert_eq!(app.diff().map(|d| d.agent), Some(a.id));
-        app.apply_diff(a.id, Ok("+one".into()));
+        apply_diff(&mut app, a.id, Ok("+one".into()));
         assert_eq!(
             app.diff().and_then(|d| d.lines.clone()),
             Some(vec!["+one".to_string()])
@@ -6358,7 +6378,7 @@ pub(crate) mod tests {
         let (mut app, a, _) = two_agents();
         open_diff(&mut app, a.id);
         let text: Vec<String> = (0..DIFF_LINE_CAP + 5).map(|i| format!("+{i}")).collect();
-        app.apply_diff(a.id, Ok(text.join("\n")));
+        apply_diff(&mut app, a.id, Ok(text.join("\n")));
         let lines = app.diff().and_then(|d| d.lines.clone()).expect("lines");
         assert_eq!(lines.len(), DIFF_LINE_CAP + 1);
         assert_eq!(lines[DIFF_LINE_CAP - 1], format!("+{}", DIFF_LINE_CAP - 1));
@@ -6366,7 +6386,7 @@ pub(crate) mod tests {
 
         let _ = app.on_key(key('q'));
         open_diff(&mut app, a.id);
-        app.apply_diff(a.id, Ok("+\tx\u{1b}[2J\r".into()));
+        apply_diff(&mut app, a.id, Ok("+\tx\u{1b}[2J\r".into()));
         let lines = app.diff().and_then(|d| d.lines.clone()).expect("lines");
         assert_eq!(lines, ["+    x[2J"]);
     }
@@ -6375,7 +6395,7 @@ pub(crate) mod tests {
     fn diff_error_closes_with_message() {
         let (mut app, a, _) = two_agents();
         open_diff(&mut app, a.id);
-        app.apply_diff(a.id, Err("not a git repository".into()));
+        apply_diff(&mut app, a.id, Err("not a git repository".into()));
         assert_eq!(app.focus, Focus::Agents);
         assert_eq!(
             app.current_message(Instant::now()),
@@ -7175,7 +7195,7 @@ mod reply_tests {
 
 #[cfg(test)]
 mod diff_comment_tests {
-    use super::tests::{agent, loaded, project};
+    use super::tests::{agent, apply_diff, loaded, project};
     use super::*;
     use protocol::{InputEvent, Key as ProtoKey, KeyCode as ProtoCode, Modifiers};
 
@@ -7207,7 +7227,7 @@ mod diff_comment_tests {
         let (mut app, _) = loaded(vec![p], vec![a.clone()]);
         let _ = app.set_pane_size(80, 10);
         let _ = app.on_key(key('D'));
-        app.apply_diff(a.id, Ok(DIFF.into()));
+        apply_diff(&mut app, a.id, Ok(DIFF.into()));
         (app, a)
     }
 
@@ -7356,7 +7376,7 @@ mod diff_comment_tests {
         comment(&mut app, 5, "why?");
         let _ = app.on_key(key('q'));
         let _ = app.on_key(key('D'));
-        app.apply_diff(a.id, Ok(DIFF.into()));
+        apply_diff(&mut app, a.id, Ok(DIFF.into()));
         assert_eq!(texts(&app, a.id), ["why?"]);
     }
 }
@@ -7484,7 +7504,7 @@ mod help_tests {
 
 #[cfg(test)]
 mod diff_navigation_tests {
-    use super::tests::{agent, loaded, project};
+    use super::tests::{agent, apply_diff, loaded, project};
     use super::*;
     use protocol::DiffScope;
 
@@ -7520,7 +7540,7 @@ mod diff_navigation_tests {
                 scope: DiffScope::All
             })]
         );
-        app.apply_diff(a.id, Ok(DIFF.into()));
+        apply_diff(&mut app, a.id, Ok(DIFF.into()));
         (app, a)
     }
 
@@ -7557,7 +7577,7 @@ mod diff_navigation_tests {
             );
             let view = app.diff().expect("diff");
             assert_eq!((view.scope, view.lines.as_ref()), (scope, None));
-            app.apply_diff(a.id, Ok(DIFF.into()));
+            apply_diff(&mut app, a.id, Ok(DIFF.into()));
         }
     }
 

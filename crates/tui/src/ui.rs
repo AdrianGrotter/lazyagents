@@ -1543,7 +1543,7 @@ fn form_lines(form: &NewAgentForm, app: &App) -> (Vec<Line<'static>>, Option<usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{agent, loaded, loaded_with, project, worktree_agent};
+    use crate::app::tests::{agent, apply_diff, loaded, loaded_with, project, worktree_agent};
     use crate::app::{App, Effect, Focus, MouseInput, MouseKind, Popup, ProjectField, ProjectForm};
     use crate::config::Config;
     use crate::config::{DONE_BLUE, ERROR_RED, IDLE_GREEN, NEEDS_PURPLE, WORKING_YELLOW};
@@ -3253,7 +3253,7 @@ mod tests {
         let _ = app.on_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
         let (screen, _) = render(app);
         assert!(screen.contains("loading diff…"), "{screen}");
-        app.apply_diff(id, Ok(text.to_string()));
+        apply_diff(app, id, Ok(text.to_string()));
     }
 
     const SAMPLE_DIFF: &str =
