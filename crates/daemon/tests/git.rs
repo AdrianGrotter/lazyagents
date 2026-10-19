@@ -400,8 +400,8 @@ fn without_a_worktree_include_nothing_is_copied() {
     );
 }
 
-/// The daemon's git calls inherit the test process's environment, which the nextest setup
-/// script `scripts/nextest-isolated-git.sh` points away from the global and system config.
+/// The daemon's git calls inherit the test process's environment, which `scripts/test.sh`
+/// points away from the global and system config.
 /// Here both hold settings that break a merge: `merge.ff = only` refuses a diverged branch
 /// and `commit.gpgsign` with a failing `gpg.program` refuses the merge commit.
 #[test]
@@ -436,8 +436,8 @@ fn hostile_global_and_system_git_config_do_not_reach_the_tests() {
             .output()
             .expect("run git")
     };
-    let hint = "tests get their git isolation from nextest's setup script \
-                (scripts/nextest-isolated-git.sh); run them with `just test`";
+    let hint = "tests get their git isolation from the environment scripts/test.sh \
+                exports; run them with `just test`";
 
     let merged = hostile_git(repo.path(), &["merge", "--no-edit", "lazyagents/wt"]);
     assert!(

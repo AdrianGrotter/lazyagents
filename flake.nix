@@ -26,7 +26,6 @@
           packages = [
             toolchain
             pkgs.just
-            pkgs.cargo-nextest
             pkgs.cargo-deny
             pkgs.jq
             pkgs.tmux

@@ -12,7 +12,7 @@ lint:
     cargo clippy --workspace --all-targets --locked -- -D warnings
 
 test:
-    cargo nextest run --workspace --locked --no-tests=pass
+    scripts/test.sh
 
 deny:
     cargo deny check
