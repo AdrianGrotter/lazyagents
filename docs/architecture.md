@@ -65,31 +65,35 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
 
 - **One daemon per state dir.** The daemon takes an exclusive lock on `daemon.lock`
   before it touches the socket, and holds it until it exits. Right after taking it, the
-  daemon writes two lines into the file: its pid, then its start time as
-  `ps -o lstart=` prints it (just the pid when `ps` cannot tell). A client trusts the
-  pid only while the lock is held and, when a start time is recorded, `ps` still reports
-  that start time for the pid, so an entry outliving its daemon never names a recycled
-  pid. A pid-only file, as older daemons write, is trusted on the lock alone. A client
+  daemon writes two lines into the file: its pid, then its start time in decimal (just
+  the pid when the start time cannot be read). A client trusts the pid only while the
+  lock is held and, when a start time is recorded, the pid still has that start time,
+  so an entry outliving its daemon never names a recycled pid. Daemons from before ADR
+  0031 recorded the `ps -o lstart=` text in the C locale and UTC instead; a client
+  compares that text to the pid's start time to the second. A pid-only file, as older
+  daemons write, is trusted on the lock alone. A client
   checking whether a daemon runs takes the lock for a moment, so a starting daemon tries
   for up to 200 ms before it gives up; a second daemon then fails with "a daemon is
   already running (pid N)". A leftover socket nobody
   answers on is removed only while the lock is held.
-- **Reading start times.** Every start time, in the lock file and in process tracking,
-  comes from one `ps` command (`protocol::lockfile::ps`): `/bin/ps` when it exists, else
-  `ps` on `PATH` (NixOS has no `/bin/ps`), run with `LC_ALL=C` and `TZ=UTC0`. `lstart`
-  is otherwise printed in the caller's locale and time zone, so a client in another
-  locale, or a change of the system time zone, would make a live process look recycled.
-  Debug builds run `$LAZYAGENTS_PS` in place of `ps` when it is set, so tests can
-  substitute a slow `ps`; release builds ignore it.
+- **Reading the process table.** Every pid, parent pid and start time, in the lock file
+  and in process tracking, comes from `protocol::process`, which reads the kernel
+  directly and launches nothing (ADR 0031): libproc on macOS, `/proc/<pid>/stat` on
+  Linux. A start time is the microseconds since the epoch on macOS and the clock ticks
+  since boot on Linux, so it does not depend on locale or time zone and does not move
+  when the system clock is set. A reading takes about a millisecond. On macOS it leaves
+  out other users' processes and zombies, which the daemon could not signal anyway; a
+  descendant whose only link to the agent runs through another user's process, such as
+  a command run with `sudo -u`, is therefore not tracked.
 - **Tracking agent processes.** Each agent leads its own session and process group.
-  About once a second the daemon reads the process table (`ps -A -o pid=,ppid=,lstart=`)
-  on a separate thread and records every
+  About once a second the daemon reads the process table on a separate thread and
+  records every
   descendant of each running agent with its start time. Each reading is merged with the
   agent's earlier list: entries still running with the same start time stay, even after
   they left the agent's tree (reparented to init or moved to a new session, as Claude's
   Bash-tool shells do); entries that exited, or whose pid now belongs to a process with
   another start time, are pruned. A recycled pid is therefore never signalled. A
-  reading that fails (`ps` cannot run, exits non-zero or lists nothing) leaves every
+  reading that fails (the table cannot be read or lists nothing) leaves every
   list as it was.
 - **Stopping an agent.** Kill, remove, restart and shutdown stop, in one pass, the
   agent's current process tree (read just before signalling, because a dying parent
@@ -131,8 +135,7 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   next kill, remove, restart or shutdown; it forgets the group once it is empty.
 - **Known limit.** A descendant escapes when it detaches (a double fork and `setsid`)
   and its parent exits before a reading links it to the agent. That window is one
-  snapshot interval plus one `ps` run, since readings run one after another, and it
-  grows when `ps` is slow under load.
+  snapshot interval plus one reading, since readings run one after another.
 - **Shutdown.** A `Shutdown` request, SIGTERM and SIGINT all take the same path:
   stop every agent as above, finish the requests still in flight (see below) for up to
   13 s after it began, then remove the socket and release the lock.
@@ -145,7 +148,7 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
 
 One event loop serves every client: it takes requests and hooks, feeds agent output to the
 terminals and sends frames. Anything that can take long runs on a thread of its own and
-answers the request when it finishes: `ps` readings, stops with their grace period, git
+answers the request when it finishes: process-table readings, stops with their grace period, git
 commands (worktree add with the user's checkout hooks, `.worktreeinclude` copies, status
 checks, worktree removal, merges, stats and diffs) and direnv calls. A new connection gets
 its `Welcome` from its own task before the loop sees it, so a client is greeted at once and
@@ -504,7 +507,7 @@ daemon last told it.
 - `lazyagents shutdown` waits up to `protocol::SHUTDOWN_WAIT` (20 s) in all for the
   daemon's reply, which comes after every agent tree is gone, and for the socket to
   disappear. It stays above the daemon's slowest shutdown: the first pass (up to 10 s
-  for a running process snapshot, the 2 s grace period and the `ps` readings after it)
+  for a running process snapshot, the 2 s grace period and the process-table readings after it)
   ends by the 13 s at which shutdown stops waiting for requests in flight, and the
   second pass adds the grace period and its readings.
 - All daemon errors logged with `tracing` to `daemon.log`; TUI shows the last error in

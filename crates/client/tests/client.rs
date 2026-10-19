@@ -393,7 +393,7 @@ fn stale_start_time_is_never_signalled() {
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = StatePaths::new(dir.path());
     let (fake, holder) = locked_sleeper(&paths, |pid| {
-        protocol::lockfile::format(pid, Some("Mon Jan  1 00:00:00 1990"))
+        protocol::lockfile::format(pid, Some(protocol::process::Start(1)))
     });
     let pid = fake.0.lock().expect("child").id();
 
@@ -414,8 +414,8 @@ fn matching_start_time_is_stopped() {
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = StatePaths::new(dir.path());
     let (fake, holder) = locked_sleeper(&paths, |pid| {
-        let start = protocol::lockfile::process_start(pid).expect("start of sleep");
-        protocol::lockfile::format(pid, Some(&start))
+        let start = protocol::process::start(pid).expect("start of sleep");
+        protocol::lockfile::format(pid, Some(start))
     });
 
     let result = client::stop_daemon(&paths, Duration::from_secs(5));

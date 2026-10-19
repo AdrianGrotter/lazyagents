@@ -40,7 +40,7 @@ impl InstanceLock {
             }
         }
         let pid = std::process::id();
-        let holder = lockfile::format(pid, lockfile::process_start(pid).as_deref());
+        let holder = lockfile::format(pid, protocol::process::start(pid));
         file.set_len(0)
             .and_then(|()| file.write_all(holder.as_bytes()))
             .with_context(|| format!("writing {}", path.display()))?;

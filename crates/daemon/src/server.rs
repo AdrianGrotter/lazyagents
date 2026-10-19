@@ -32,6 +32,7 @@ use crate::status::{awaits_trust, on_hook, settle, trust_keys};
 use crate::store::{self, AgentRecord, PendingWorktree, StoredState};
 use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent, session_title};
 use crate::{direnv, git};
+use protocol::process::Start;
 
 pub struct Config {
     pub paths: StatePaths,
@@ -1436,10 +1437,10 @@ impl Daemon {
             self.stop(&ids, SHUTDOWN_GRACE);
         }
         if !self.leftovers.is_empty() {
-            let pids: Vec<(u32, &str)> = self
+            let pids: Vec<(u32, Start)> = self
                 .leftovers
                 .iter()
-                .map(|(_, tracked)| (tracked.pid, tracked.start.as_str()))
+                .map(|(_, tracked)| (tracked.pid, tracked.start))
                 .collect();
             tracing::error!(
                 ?pids,
@@ -1933,7 +1934,7 @@ impl Daemon {
     }
 
     /// Applies a finished snapshot and, once per `SNAPSHOT`, starts the next one on a
-    /// separate thread so `ps` never blocks the event loop.
+    /// separate thread so a slow process-table reading never blocks the event loop.
     fn refresh_tracked(&mut self, now: Instant) {
         if let Some(pending) = &self.snapshot {
             match pending.rx.try_recv() {
@@ -2054,8 +2055,8 @@ impl Daemon {
         }
     }
 
-    /// Reaps the leftovers again, at most once per `SNAPSHOT` so a `ps` that keeps
-    /// failing does not start a reaper on every tick.
+    /// Reaps the leftovers again, at most once per `SNAPSHOT` so a process table that keeps
+    /// failing to read does not start a reaper on every tick.
     fn retry_leftovers(&mut self, now: Instant) {
         if self.leftovers.is_empty()
             || self
@@ -2413,7 +2414,7 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(10);
 
-    /// Shutdown stops every agent (a snapshot wait, the grace period and `ps` readings),
+    /// Shutdown stops every agent (a snapshot wait, the grace period and table readings),
     /// waits for the requests in flight until `SHUTDOWN_DRAIN` after it began, then stops
     /// what turned up meanwhile (the grace period and readings again).
     #[test]
@@ -2483,7 +2484,7 @@ mod tests {
         let id = add_agent(&mut daemon, Status::Exited(0));
         let tracked = Tracked {
             pid: 4242,
-            start: "Thu Oct 15 10:00:00 2026".into(),
+            start: Start(1_792_058_400_000_000),
         };
         if let Some(agent) = daemon.agents.get_mut(&id) {
             agent.tracked = vec![tracked.clone()];
@@ -2558,7 +2559,7 @@ mod tests {
             let tracked = reap::snapshot(std::process::id())
                 .into_iter()
                 .find(|t| t.pid == pid)
-                .expect("ps lists the child");
+                .expect("the table lists the child");
             (stubborn, tracked)
         }
 
@@ -2791,7 +2792,7 @@ mod tests {
         let id = add_agent(&mut daemon, Status::Exited(0));
         let tracked = Tracked {
             pid: 4242,
-            start: "Thu Oct 15 10:00:00 2026".into(),
+            start: Start(1_792_058_400_000_000),
         };
         if let Some(agent) = daemon.agents.get_mut(&id) {
             agent.tracked = vec![tracked.clone()];
@@ -2849,7 +2850,7 @@ mod tests {
         let id = AgentId::random();
         let previous = vec![Tracked {
             pid: 4242,
-            start: "Thu Oct 15 10:00:00 2026".into(),
+            start: Start(1_792_058_400_000_000),
         }];
         assert_eq!(
             take_snapshot(None, vec![(id, 3, 4241, previous.clone())]),

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use protocol::process::{self, Process, Start};
 use rustix::process::{
     Pid, Signal, kill_process, kill_process_group, test_kill_process, test_kill_process_group,
 };
@@ -26,81 +27,57 @@ pub fn readings() -> u64 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tracked {
     pub pid: u32,
-    pub start: String,
+    pub start: Start,
 }
 
-/// One reading of `ps`: `(pid, ppid, start)` for every process, where `start` is the
-/// `lstart` text in the C locale and UTC, so readings compare equal across a change of
-/// the system time zone.
+/// One reading of the process table: `(pid, ppid, start)` for every process.
 pub struct ProcessTable {
-    rows: Vec<(u32, u32, String)>,
+    rows: Vec<(u32, u32, Start)>,
 }
 
 impl ProcessTable {
-    /// `None` when `ps` cannot run, fails or lists nothing, so a bad reading is never
+    /// `None` when the table cannot be read or lists nothing, so a bad reading is never
     /// taken to mean that every process is gone.
     pub fn read() -> Option<Self> {
-        match protocol::lockfile::ps()
-            .args(["-A", "-o", "pid=,ppid=,lstart="])
-            .output()
-        {
-            Ok(output) => Self::parse(output.status.success(), &output.stdout).inspect(|_| {
-                READINGS.fetch_add(1, Ordering::SeqCst);
-            }),
-            Err(e) => {
-                tracing::warn!(error = %e, "running ps failed");
-                None
-            }
-        }
+        Self::from_processes(process::all()).inspect(|_| {
+            READINGS.fetch_add(1, Ordering::SeqCst);
+        })
     }
 
-    fn parse(success: bool, stdout: &[u8]) -> Option<Self> {
-        if !success {
-            tracing::warn!("ps exited with an error");
+    fn from_processes(processes: Option<Vec<Process>>) -> Option<Self> {
+        let Some(processes) = processes else {
+            tracing::warn!("reading the process table failed");
+            return None;
+        };
+        if processes.is_empty() {
+            tracing::warn!("the process table listed no processes");
             return None;
         }
-        let rows: Vec<(u32, u32, String)> = String::from_utf8_lossy(stdout)
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim_start();
-                let (pid, rest) = line.split_once(char::is_whitespace)?;
-                let rest = rest.trim_start();
-                let (ppid, start) = rest.split_once(char::is_whitespace)?;
-                Some((
-                    pid.parse().ok()?,
-                    ppid.parse().ok()?,
-                    start.trim().to_string(),
-                ))
-            })
+        let rows = processes
+            .into_iter()
+            .map(|process| (process.pid, process.ppid, process.start))
             .collect();
-        if rows.is_empty() {
-            tracing::warn!("ps listed no processes");
-            return None;
-        }
         Some(Self { rows })
     }
 
     /// `previous` entries still running with their recorded start time, plus the
     /// current descendants of `root`.
     pub fn track(&self, root: u32, previous: &[Tracked]) -> Vec<Tracked> {
-        let starts: HashMap<u32, &str> = self
+        let starts: HashMap<u32, Start> = self
             .rows
             .iter()
-            .map(|(pid, _, start)| (*pid, start.as_str()))
+            .map(|&(pid, _, start)| (pid, start))
             .collect();
         let mut tracked: Vec<Tracked> = previous
             .iter()
-            .filter(|t| starts.get(&t.pid) == Some(&t.start.as_str()))
+            .filter(|t| starts.get(&t.pid) == Some(&t.start))
             .cloned()
             .collect();
         for pid in self.descendants(&[root]) {
-            if let Some(start) = starts.get(&pid)
+            if let Some(&start) = starts.get(&pid)
                 && !tracked.iter().any(|t| t.pid == pid)
             {
-                tracked.push(Tracked {
-                    pid,
-                    start: start.to_string(),
-                });
+                tracked.push(Tracked { pid, start });
             }
         }
         tracked
@@ -118,11 +95,11 @@ impl ProcessTable {
             .collect()
     }
 
-    fn start(&self, pid: u32) -> Option<&str> {
+    fn start(&self, pid: u32) -> Option<Start> {
         self.rows
             .iter()
             .find(|(row, _, _)| *row == pid)
-            .map(|(_, _, start)| start.as_str())
+            .map(|&(_, _, start)| start)
     }
 
     fn running(&self, tracked: &[Tracked]) -> Vec<u32> {
@@ -198,7 +175,7 @@ fn terminate_with(
         return Vec::new();
     }
     let mut pids = trees.clone();
-    let mut starts: HashMap<u32, String> = HashMap::new();
+    let mut starts: HashMap<u32, Start> = HashMap::new();
     let mut unverified = Vec::new();
     match read().or_else(|| {
         std::thread::sleep(POLL);
@@ -209,7 +186,7 @@ fn terminate_with(
             pids.extend(table.running(tracked));
             starts = pids
                 .iter()
-                .filter_map(|&pid| Some((pid, table.start(pid)?.to_string())))
+                .filter_map(|&pid| Some((pid, table.start(pid)?)))
                 .collect();
         }
         None => {
@@ -240,7 +217,7 @@ fn terminate_with(
     match read() {
         Some(table) => {
             pids.retain(|&pid| {
-                trees.contains(&pid) || table.start(pid) == starts.get(&pid).map(String::as_str)
+                trees.contains(&pid) || table.start(pid) == starts.get(&pid).copied()
             });
             let descendants = table.descendants(&pids);
             pids.extend(descendants);
@@ -372,52 +349,47 @@ mod tests {
     fn track_keeps_reparented_entries_and_drops_exited_or_reused_ones() {
         let table = ProcessTable {
             rows: vec![
-                (10, 1, "t10".into()),
-                (11, 10, "t11".into()),
-                (20, 1, "t20".into()),
-                (21, 1, "new21".into()),
+                (10, 1, Start(10)),
+                (11, 10, Start(11)),
+                (20, 1, Start(20)),
+                (21, 1, Start(212)),
             ],
         };
-        let tracked = |pid: u32, start: &str| Tracked {
+        let tracked = |pid: u32, start: u64| Tracked {
             pid,
-            start: start.into(),
+            start: Start(start),
         };
         let previous = [
-            tracked(11, "t11"),
-            tracked(20, "t20"),
-            tracked(21, "old21"),
-            tracked(30, "t30"),
+            tracked(11, 11),
+            tracked(20, 20),
+            tracked(21, 211),
+            tracked(30, 30),
         ];
         assert_eq!(
             table.track(10, &previous),
-            [tracked(11, "t11"), tracked(20, "t20")]
+            [tracked(11, 11), tracked(20, 20)]
         );
-        assert_eq!(table.track(10, &[]), [tracked(11, "t11")]);
+        assert_eq!(table.track(10, &[]), [tracked(11, 11)]);
     }
 
     #[test]
-    fn a_failed_or_empty_ps_reading_is_no_table() {
-        let output = b"  10     1 Thu Oct 15 10:00:00 2026\n";
-        assert!(ProcessTable::parse(true, output).is_some());
-        assert!(ProcessTable::parse(false, output).is_none());
-        assert!(ProcessTable::parse(true, b"").is_none());
-        assert!(ProcessTable::parse(true, b"garbage\n").is_none());
+    fn an_empty_reading_is_no_table() {
+        let row = protocol::process::Process {
+            pid: 10,
+            ppid: 1,
+            start: Start(10),
+        };
+        assert!(ProcessTable::from_processes(Some(vec![row])).is_some());
+        assert!(ProcessTable::from_processes(Some(Vec::new())).is_none());
+        assert!(ProcessTable::from_processes(None).is_none());
     }
 
     #[test]
-    fn start_times_read_the_same_in_any_locale_and_time_zone() {
+    fn the_table_gives_this_process_its_own_start() {
         let pid = std::process::id();
-        let output = protocol::lockfile::ps()
-            .args(["-o", "lstart=", "-p", &pid.to_string()])
-            .output()
-            .expect("ps");
-        let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let table = ProcessTable::read().expect("ps");
-        let ours = table.rows.iter().find(|(row, _, _)| *row == pid);
-        assert_eq!(
-            ours.map(|(_, _, start)| start.as_str()),
-            Some(expected.as_str())
-        );
+        let table = ProcessTable::read().expect("a process table");
+        assert_eq!(table.start(pid), protocol::process::start(pid));
+        assert!(table.start(pid).is_some());
     }
 
     #[test]
@@ -482,17 +454,24 @@ mod tests {
     }
 
     fn tracked_child() -> (Child, Tracked) {
-        let child = Child(
+        let mut child = Child(
             Command::new("sh")
-                .args(["-c", "trap '' TERM HUP; exec sleep 300"])
+                .args(["-c", "trap '' TERM HUP; echo trapped; exec sleep 300"])
+                .stdout(std::process::Stdio::piped())
                 .spawn()
                 .expect("spawn"),
         );
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.0.stdout.take().expect("stdout")),
+            &mut line,
+        )
+        .expect("trapped");
         let pid = child.0.id();
         let tracked = snapshot(std::process::id())
             .into_iter()
             .find(|t| t.pid == pid)
-            .expect("ps lists the child");
+            .expect("the table lists the child");
         (child, tracked)
     }
 
@@ -545,7 +524,7 @@ mod tests {
         let left = terminate_with(
             &real_then(|| {
                 Some(ProcessTable {
-                    rows: vec![(pid, 1, "Thu Jan  1 00:00:00 1970".into())],
+                    rows: vec![(pid, 1, Start(0))],
                 })
             }),
             &[],
@@ -596,7 +575,7 @@ mod tests {
         let recorded = snapshot(root).into_iter().find(|t| t.pid == leaf);
         let stale = Tracked {
             pid: leaf,
-            start: "Thu Jan  1 00:00:00 1970".into(),
+            start: Start(0),
         };
         terminate_tracked(&[stale], Duration::from_millis(200));
         let survived_stale = alive(leaf);
@@ -614,7 +593,7 @@ mod tests {
         child.wait().expect("wait");
 
         let recorded = recorded.expect("snapshot lists the sleep");
-        assert!(!recorded.start.is_empty(), "{recorded:?}");
+        assert!(recorded.start > Start(0), "{recorded:?}");
         assert!(
             survived_stale,
             "killed {leaf} despite a different start time"

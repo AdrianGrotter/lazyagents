@@ -5,6 +5,7 @@ mod input;
 pub mod lockfile;
 mod message;
 mod paths;
+pub mod process;
 mod screen;
 mod types;
 
@@ -22,5 +23,5 @@ pub const PROTOCOL_VERSION: u32 = 8;
 
 /// How long a client waits for the daemon to stop. It covers the daemon's slowest
 /// clean shutdown: waiting out a running process snapshot, then the agents' grace
-/// period, then the `ps` readings that verify what is left.
+/// period, then the process-table readings that verify what is left.
 pub const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(20);

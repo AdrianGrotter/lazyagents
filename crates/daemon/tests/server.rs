@@ -16,7 +16,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
 
 /// How long anything the daemon is expected to do may take. With the whole suite running in
-/// parallel each spawned process (`ps`, every git command) can take seconds, so a request
+/// parallel each spawned process (every git command) can take seconds, so a request
 /// that runs several, such as creating a worktree agent, needs well over 10 s.
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -1919,7 +1919,11 @@ async fn the_lock_file_records_the_daemons_pid_and_start_time() {
         protocol::lockfile::parse(&contents),
         Some(protocol::lockfile::Holder {
             pid,
-            start: Some(protocol::lockfile::process_start(pid).expect("our start")),
+            start: Some(
+                protocol::process::start(pid)
+                    .expect("our start")
+                    .to_string()
+            ),
         }),
         "{contents:?}"
     );
