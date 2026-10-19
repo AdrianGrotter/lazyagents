@@ -96,18 +96,22 @@ impl Default for Theme {
     }
 }
 
-const PANE_ACTIONS: [(&str, Action); 6] = [
+const PANE_ACTIONS: [(&str, Action); 8] = [
     ("next", Action::PaneNext),
     ("previous", Action::PanePrevious),
+    ("next_active", Action::PaneNextActive),
+    ("previous_active", Action::PanePreviousActive),
     ("leave", Action::PaneLeave),
     ("scroll", Action::PaneScroll),
     ("send_prefix", Action::PaneSendPrefix),
     ("screen", Action::PaneScreenMode),
 ];
 
-const DIRECT_ACTIONS: [(&str, Action); 3] = [
+const DIRECT_ACTIONS: [(&str, Action); 5] = [
     ("direct_next", Action::PaneNext),
     ("direct_previous", Action::PanePrevious),
+    ("direct_next_active", Action::PaneNextActive),
+    ("direct_previous_active", Action::PanePreviousActive),
     ("direct_leave", Action::PaneLeave),
 ];
 
@@ -612,6 +616,35 @@ mod tests {
             config.warnings,
             vec!["keys.pane.direct_previous: ctrl-q is the prefix".to_string()]
         );
+    }
+
+    #[test]
+    fn the_active_agent_keys_can_be_rebound() {
+        let config = load_text(
+            r#"
+            [keys.sidebar]
+            next_active = "ctrl-n"
+            previous_active = "ctrl-p"
+
+            [keys.pane]
+            next_active = "n"
+            previous_active = "p"
+            direct_next_active = "ctrl-n"
+            direct_previous_active = "ctrl-p"
+            "#,
+        );
+        assert_eq!(config.warnings, Vec::<String>::new());
+        let keymap = &config.keymap;
+        assert_eq!(keymap.sidebar(&ctrl('n')), Some(Action::NextActive));
+        assert_eq!(keymap.sidebar(&ctrl('p')), Some(Action::PreviousActive));
+        assert_eq!(keymap.after_prefix(&key('n')), Some(Action::PaneNextActive));
+        assert_eq!(
+            keymap.after_prefix(&key('p')),
+            Some(Action::PanePreviousActive)
+        );
+        assert_eq!(keymap.after_prefix(&key('J')), None);
+        assert_eq!(keymap.direct(&ctrl('n')), Some(Action::PaneNextActive));
+        assert_eq!(keymap.direct(&ctrl('p')), Some(Action::PanePreviousActive));
     }
 
     #[test]

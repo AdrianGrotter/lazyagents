@@ -66,10 +66,12 @@ the other actions keep theirs. An empty list unbinds an action.
 
 Key strings: a single character (`q`, `?`, `]`), `space`, `enter`, `esc`, `tab`,
 `backtab`, `backspace`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`,
-`pagedown`, `f1` to `f12`, optionally with the modifiers `ctrl-`, `alt-` and `shift-` in
-front (`ctrl-q`, `alt-enter`, `shift-tab`). Write a shifted letter as the letter itself
-(`R`, not `shift-r`). A bare character matches whether or not the terminal reports
-SHIFT; with `ctrl` or `alt`, SHIFT counts, so `ctrl-Q` is not `ctrl-q`.
+`pagedown`, `f1` to `f12`, optionally with the modifiers `ctrl-`, `alt-`, `cmd-` and
+`shift-` in front (`ctrl-q`, `alt-enter`, `ctrl-cmd-j`, `shift-tab`); `super-` is another
+name for `cmd-`. Write a shifted letter as the letter itself (`R`, not `shift-r`). A bare
+character matches whether or not the terminal reports SHIFT; with `ctrl` or `alt`, SHIFT
+counts, so `ctrl-Q` is not `ctrl-q`. Only terminals that speak the kitty keyboard protocol
+report `cmd` (as the super modifier); elsewhere a `cmd-` key never fires.
 
 ### `[keys.sidebar]`
 
@@ -82,6 +84,8 @@ SHIFT; with `ctrl` or `alt`, SHIFT counts, so `ctrl-Q` is not `ctrl-q`.
 | `up` | `k`, `up` |
 | `next_agent` | `ctrl-j` |
 | `previous_agent` | `ctrl-k` |
+| `next_active` | `ctrl-cmd-j` |
+| `previous_active` | `ctrl-cmd-k` |
 | `focus_projects` | `h`, `left`, `backtab`, `1` |
 | `focus_agents` | `l`, `right`, `2` |
 | `toggle_focus` | `tab` |
@@ -118,6 +122,8 @@ its own.
 | `prefix` | `ctrl-q` | exactly one key; in the pane it is not sent to the agent but waits for one of the keys below |
 | `next` | `j` | next agent, staying in the pane |
 | `previous` | `k` | previous agent, staying in the pane |
+| `next_active` | `J` | next agent that is starting, working or needs input, staying in the pane |
+| `previous_active` | `K` | previous such agent, staying in the pane |
 | `leave` | `q`, `esc` | back to the sidebar |
 | `scroll` | `s` | scroll mode |
 | `send_prefix` | the prefix | send one prefix key to the agent |
@@ -125,6 +131,8 @@ its own.
 | `direct_leave` | `ctrl-]`, `ctrl-5`, `ctrl-h` | leave without the prefix |
 | `direct_next` | `ctrl-j` | next agent without the prefix, staying in the pane |
 | `direct_previous` | `ctrl-k` | previous agent without the prefix, staying in the pane |
+| `direct_next_active` | `ctrl-cmd-j` | next active agent without the prefix, staying in the pane |
+| `direct_previous_active` | `ctrl-cmd-k` | previous active agent without the prefix, staying in the pane |
 
 Setting `prefix` also makes pressing it twice send it to the agent, unless `send_prefix`
 is set too. The direct keys may not contain the prefix.

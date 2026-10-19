@@ -37,6 +37,10 @@ impl App {
                 self.focus = Focus::Agents;
                 self.move_agent(if action == Action::NextAgent { 1 } else { -1 });
             }
+            Action::NextActive | Action::PreviousActive => {
+                self.focus = Focus::Agents;
+                self.move_active(if action == Action::NextActive { 1 } else { -1 });
+            }
             Action::FocusProjects => self.focus = Focus::Projects,
             Action::FocusAgents => self.focus = Focus::Agents,
             Action::ToggleFocus => {
@@ -149,6 +153,8 @@ impl App {
             Action::ScreenMode => self.screen_mode = self.screen_mode.next(),
             Action::PaneNext
             | Action::PanePrevious
+            | Action::PaneNextActive
+            | Action::PanePreviousActive
             | Action::PaneLeave
             | Action::PaneScroll
             | Action::PaneSendPrefix
@@ -186,6 +192,25 @@ impl App {
         }
         let row = self.selected_row().unwrap_or(self.settled_row);
         self.select_row(wrap(row, step, count));
+    }
+
+    /// Moves to the nearest other listed agent in the direction of `step` that is
+    /// starting, working or needs input, wrapping around the list.
+    pub(super) fn move_active(&mut self, step: i32) {
+        let row = self.selected_row().unwrap_or(self.settled_row);
+        let target = {
+            let agents = self.visible_agents();
+            (1..agents.len())
+                .map(|offset| wrap(row, step * offset as i32, agents.len()))
+                .find(|&r| is_active(agents[r].status))
+        };
+        match target {
+            Some(target) => self.select_row(target),
+            None if self.selected_agent().is_some_and(|a| is_active(a.status)) => {
+                self.fail("no other agent is active")
+            }
+            None => self.fail("no agent is active"),
+        }
     }
 
     /// Whether the next-attention key has an agent to go to besides the selected one.
@@ -273,6 +298,13 @@ impl App {
     }
 }
 
+fn is_active(status: Status) -> bool {
+    matches!(
+        status,
+        Status::Starting | Status::Working | Status::NeedsInput
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +313,7 @@ mod tests {
         update,
     };
     use protocol::ServerMessage;
+    use ratatui::crossterm::event::KeyModifiers;
     use std::time::Instant;
 
     #[test]
@@ -698,6 +731,75 @@ mod tests {
         assert_eq!(
             app.current_message(Instant::now()),
             Some("no other agent needs attention")
+        );
+    }
+
+    fn ctrl_cmd(c: char) -> KeyEvent {
+        KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::CONTROL | KeyModifiers::SUPER,
+        )
+    }
+
+    #[test]
+    fn ctrl_cmd_j_and_k_skip_agents_that_are_not_active() {
+        let p = project("p");
+        let q = project("q");
+        let idle = agent(&p, "a", Status::Idle);
+        let working = agent(&p, "b", Status::Working);
+        let exited = agent(&p, "c", Status::Exited(0));
+        let starting = agent(&p, "d", Status::Starting);
+        let stopped = agent(&p, "e", Status::Stopped);
+        let waiting = agent(&p, "f", Status::NeedsInput);
+        let elsewhere = agent(&q, "g", Status::Working);
+        let (mut app, _) = loaded(
+            vec![p, q],
+            vec![
+                idle.clone(),
+                working.clone(),
+                exited,
+                starting.clone(),
+                stopped,
+                waiting.clone(),
+                elsewhere,
+            ],
+        );
+        app.select_agent(idle.id);
+        let _ = app.on_key(key('h'));
+        let selected = |app: &App| app.selected_agent().map(|x| x.id);
+        assert_eq!(
+            app.on_key(ctrl_cmd('j')),
+            vec![Effect::Send(Request::Subscribe { id: working.id })]
+        );
+        assert_eq!(app.focus, Focus::Agents);
+        let _ = app.on_key(ctrl_cmd('j'));
+        assert_eq!(selected(&app), Some(starting.id));
+        let _ = app.on_key(ctrl_cmd('j'));
+        assert_eq!(selected(&app), Some(waiting.id));
+        let _ = app.on_key(ctrl_cmd('k'));
+        assert_eq!(selected(&app), Some(starting.id));
+    }
+
+    #[test]
+    fn ctrl_cmd_j_says_when_no_other_agent_is_active() {
+        let p = project("p");
+        let a = agent(&p, "a", Status::Idle);
+        let b = agent(&p, "b", Status::Working);
+        let (mut app, _) = loaded(vec![p], vec![a.clone(), b.clone()]);
+        app.select_agent(a.id);
+        let _ = app.on_key(ctrl_cmd('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert!(app.on_key(ctrl_cmd('j')).is_empty());
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("no other agent is active")
+        );
+        update(&mut app, &b, Status::Idle);
+        let _ = app.on_key(ctrl_cmd('k'));
+        assert_eq!(
+            app.current_message(Instant::now()),
+            Some("no agent is active")
         );
     }
 

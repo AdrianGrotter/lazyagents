@@ -2863,6 +2863,10 @@ mod tests {
         for (key, action) in [
             ("j/down, k/up", "move down / up in the focused box"),
             ("ctrl-j, ctrl-k", "next / previous agent, from either box"),
+            (
+                "ctrl-cmd-j, ctrl-cmd-k",
+                "next / previous active agent (starting, working, needs input)",
+            ),
             ("h/left/backtab/1, l/right/2", "focus Projects / Agents"),
             ("tab", "switch between Projects and Agents"),
             ("enter", "open the agent's pane"),
@@ -2889,10 +2893,10 @@ mod tests {
             ("y, N, i", "approve / deny / reply to the agent"),
             ("ctrl-q q/esc", "back to the sidebar"),
             ("ctrl-]/ctrl-5/ctrl-h", "back to the sidebar"),
-            ("ctrl-q j", "next agent"),
-            ("ctrl-j", "next agent"),
-            ("ctrl-q k", "previous agent"),
-            ("ctrl-k", "previous agent"),
+            ("ctrl-q j, ctrl-q k", "next / previous agent"),
+            ("ctrl-j, ctrl-k", "next / previous agent"),
+            ("ctrl-q J, ctrl-q K", "next / previous active agent"),
+            ("ctrl-cmd-j, ctrl-cmd-k", "next / previous active agent"),
             ("s", "scroll the agent's history"),
             ("ctrl-q s", "scroll the agent's history"),
             ("ctrl-q ctrl-q", "send ctrl-q to the agent"),
@@ -2942,9 +2946,8 @@ mod tests {
             ("M/ctrl-n", "new agent"),
             ("ctrl-x, Q", "quit (agents keep running)"),
             ("ctrl-a x", "back to the sidebar"),
-            ("ctrl-a j", "next agent"),
-            ("ctrl-j", "next agent"),
-            ("ctrl-k", "previous agent"),
+            ("ctrl-a j, ctrl-a k", "next / previous agent"),
+            ("ctrl-j, ctrl-k", "next / previous agent"),
             ("ctrl-a ctrl-a", "send ctrl-a to the agent"),
         ] {
             assert!(

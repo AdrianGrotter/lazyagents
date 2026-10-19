@@ -7,7 +7,7 @@ use crate::fixed_keys;
 use crate::keymap::{self, Action};
 use crate::layout::{text_width, wrap_words};
 
-const SIDEBAR_HELP: [(&[Action], &str); 22] = [
+const SIDEBAR_HELP: [(&[Action], &str); 23] = [
     (
         &[Action::Down, Action::Up],
         "move down / up in the focused box",
@@ -15,6 +15,10 @@ const SIDEBAR_HELP: [(&[Action], &str); 22] = [
     (
         &[Action::NextAgent, Action::PreviousAgent],
         "next / previous agent, from either box",
+    ),
+    (
+        &[Action::NextActive, Action::PreviousActive],
+        "next / previous active agent (starting, working, needs input)",
     ),
     (
         &[Action::FocusProjects, Action::FocusAgents],
@@ -105,15 +109,28 @@ pub fn rows(app: &App, filter: &str, width: usize) -> Vec<Row> {
         })
         .collect();
     let mut pane = Vec::new();
-    for (action, text) in [
-        (Action::PaneLeave, "back to the sidebar"),
-        (Action::PaneNext, "next agent"),
-        (Action::PanePrevious, "previous agent"),
+    for (actions, text) in [
+        (&[Action::PaneLeave][..], "back to the sidebar"),
+        (
+            &[Action::PaneNext, Action::PanePrevious],
+            "next / previous agent",
+        ),
+        (
+            &[Action::PaneNextActive, Action::PanePreviousActive],
+            "next / previous active agent",
+        ),
     ] {
-        pane.push((keymap.describe(action), text.to_string(), true));
-        let direct = keymap.direct_keys(action);
-        if !direct.is_empty() {
-            pane.push((keymap::join(&direct), text.to_string(), true));
+        let keys: Vec<String> = actions.iter().map(|a| keymap.describe(*a)).collect();
+        pane.push((keys.join(", "), text.to_string(), true));
+        if actions.iter().any(|a| !keymap.direct_keys(*a).is_empty()) {
+            let direct: Vec<String> = actions
+                .iter()
+                .map(|a| match keymap.direct_keys(*a) {
+                    keys if keys.is_empty() => "unbound".to_string(),
+                    keys => keymap::join(&keys),
+                })
+                .collect();
+            pane.push((direct.join(", "), text.to_string(), true));
         }
     }
     pane.extend([

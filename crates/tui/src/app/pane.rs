@@ -34,6 +34,10 @@ pub(super) fn prefix_help(keymap: &Keymap) -> String {
     };
     let parts: Vec<String> = [
         (keys(&[Action::PaneNext, Action::PanePrevious]), "switch"),
+        (
+            keys(&[Action::PaneNextActive, Action::PanePreviousActive]),
+            "active",
+        ),
         (keys(&[Action::PaneLeave]), "sidebar"),
         (keys(&[Action::PaneScroll]), "scroll"),
         (keys(&[Action::PaneScreenMode]), "screen"),
@@ -142,6 +146,8 @@ impl App {
             return match self.keymap.after_prefix(&key) {
                 Some(Action::PaneNext) => self.cycle_in_pane(1),
                 Some(Action::PanePrevious) => self.cycle_in_pane(-1),
+                Some(Action::PaneNextActive) => self.cycle_active_in_pane(1),
+                Some(Action::PanePreviousActive) => self.cycle_active_in_pane(-1),
                 Some(Action::PaneLeave) => {
                     self.leave_pane();
                     Vec::new()
@@ -169,6 +175,8 @@ impl App {
         match self.keymap.direct(&key) {
             Some(Action::PaneNext) => self.cycle_in_pane(1),
             Some(Action::PanePrevious) => self.cycle_in_pane(-1),
+            Some(Action::PaneNextActive) => self.cycle_active_in_pane(1),
+            Some(Action::PanePreviousActive) => self.cycle_active_in_pane(-1),
             Some(_) => {
                 self.leave_pane();
                 Vec::new()
@@ -189,6 +197,11 @@ impl App {
 
     fn cycle_in_pane(&mut self, step: i32) -> Vec<Effect> {
         self.move_agent(step);
+        self.sync()
+    }
+
+    fn cycle_active_in_pane(&mut self, step: i32) -> Vec<Effect> {
+        self.move_active(step);
         self.sync()
     }
 
@@ -345,7 +358,9 @@ mod tests {
         assert_eq!(app.focus, Focus::Pane);
         assert_eq!(
             app.message.as_ref().map(|m| m.text.as_str()),
-            Some("ctrl-q: j/k switch · q/esc sidebar · s scroll · + screen · ctrl-q send")
+            Some(
+                "ctrl-q: j/k switch · J/K active · q/esc sidebar · s scroll · + screen · ctrl-q send"
+            )
         );
         assert_eq!(
             app.on_key(key('x')),
@@ -462,6 +477,42 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_cmd_j_and_prefix_big_j_switch_to_active_agents_in_the_pane() {
+        let p = project("p");
+        let a = agent(&p, "a", Status::Working);
+        let b = agent(&p, "b", Status::Idle);
+        let c = agent(&p, "c", Status::Working);
+        let (mut app, _) = loaded(vec![p], vec![a.clone(), b, c.clone()]);
+        let _ = app.on_key(code(KeyCode::Enter));
+        let ctrl_cmd = |ch| {
+            KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::CONTROL | KeyModifiers::SUPER,
+            )
+        };
+        assert_eq!(
+            app.on_key(ctrl_cmd('j')),
+            vec![Effect::Send(Request::Subscribe { id: c.id })]
+        );
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(
+            app.on_key(ctrl_cmd('k')),
+            vec![Effect::Send(Request::Subscribe { id: a.id })]
+        );
+        let _ = app.on_key(ctrl('q'));
+        assert_eq!(
+            app.on_key(key('K')),
+            vec![Effect::Send(Request::Subscribe { id: c.id })]
+        );
+        let _ = app.on_key(ctrl('q'));
+        assert_eq!(
+            app.on_key(key('J')),
+            vec![Effect::Send(Request::Subscribe { id: a.id })]
+        );
+        assert_eq!(app.focus, Focus::Pane);
+    }
+
+    #[test]
     fn ctrl_l_reaches_the_agent() {
         let (mut app, a, _) = two_agents();
         let _ = app.on_key(code(KeyCode::Enter));
@@ -554,7 +605,7 @@ mod tests {
         assert!(app.on_key(key('z')).is_empty());
         assert_eq!(
             app.message.as_ref().map(|m| m.text.as_str()),
-            Some("ctrl-a: n/p switch · x sidebar · s scroll · + screen · ctrl-a send")
+            Some("ctrl-a: n/p switch · J/K active · x sidebar · s scroll · + screen · ctrl-a send")
         );
     }
 

@@ -35,6 +35,7 @@ const fn spec(code: KeyCode) -> KeySpec {
         ctrl: false,
         alt: false,
         shift: false,
+        cmd: false,
     }
 }
 

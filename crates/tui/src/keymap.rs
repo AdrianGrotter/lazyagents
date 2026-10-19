@@ -12,6 +12,8 @@ pub enum Action {
     Up,
     NextAgent,
     PreviousAgent,
+    NextActive,
+    PreviousActive,
     FocusProjects,
     FocusAgents,
     FocusPane,
@@ -38,6 +40,8 @@ pub enum Action {
     ScreenMode,
     PaneNext,
     PanePrevious,
+    PaneNextActive,
+    PanePreviousActive,
     PaneLeave,
     PaneScroll,
     PaneSendPrefix,
@@ -50,6 +54,8 @@ impl Action {
             self,
             Action::PaneNext
                 | Action::PanePrevious
+                | Action::PaneNextActive
+                | Action::PanePreviousActive
                 | Action::PaneLeave
                 | Action::PaneScroll
                 | Action::PaneSendPrefix
@@ -64,11 +70,12 @@ pub struct KeySpec {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    pub cmd: bool,
 }
 
 impl KeySpec {
     pub fn parse(s: &str) -> Result<KeySpec, String> {
-        let (mut ctrl, mut alt, mut shift) = (false, false, false);
+        let (mut ctrl, mut alt, mut shift, mut cmd) = (false, false, false, false);
         let mut rest = s;
         while let Some((modifier, after)) = rest.split_once('-') {
             let flag = match modifier {
@@ -76,6 +83,7 @@ impl KeySpec {
                 "ctrl" => &mut ctrl,
                 "alt" => &mut alt,
                 "shift" => &mut shift,
+                "cmd" | "super" => &mut cmd,
                 _ => break,
             };
             if std::mem::replace(flag, true) {
@@ -122,6 +130,7 @@ impl KeySpec {
             ctrl,
             alt,
             shift,
+            cmd,
         })
     }
 
@@ -135,7 +144,8 @@ impl KeySpec {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
-        if (self.ctrl, self.alt) != (ctrl, alt) {
+        let cmd = key.modifiers.contains(KeyModifiers::SUPER);
+        if (self.ctrl, self.alt, self.cmd) != (ctrl, alt, cmd) {
             return false;
         }
         match self.code {
@@ -151,6 +161,7 @@ impl KeySpec {
             (self.ctrl, KeyModifiers::CONTROL),
             (self.alt, KeyModifiers::ALT),
             (self.shift, KeyModifiers::SHIFT),
+            (self.cmd, KeyModifiers::SUPER),
         ] {
             if on {
                 modifiers |= flag;
@@ -188,6 +199,7 @@ impl fmt::Display for KeySpec {
         for (on, name) in [
             (self.ctrl, "ctrl-"),
             (self.alt, "alt-"),
+            (self.cmd, "cmd-"),
             (self.shift, "shift-"),
         ] {
             if on {
@@ -256,6 +268,8 @@ impl Keymap {
                 ("up", Up),
                 ("ctrl-j", NextAgent),
                 ("ctrl-k", PreviousAgent),
+                ("ctrl-cmd-j", NextActive),
+                ("ctrl-cmd-k", PreviousActive),
                 ("h", FocusProjects),
                 ("left", FocusProjects),
                 ("backtab", FocusProjects),
@@ -292,6 +306,8 @@ impl Keymap {
             pane: bindings(&[
                 ("j", PaneNext),
                 ("k", PanePrevious),
+                ("J", PaneNextActive),
+                ("K", PanePreviousActive),
                 ("q", PaneLeave),
                 ("esc", PaneLeave),
                 ("s", PaneScroll),
@@ -304,6 +320,8 @@ impl Keymap {
                 ("ctrl-h", PaneLeave),
                 ("ctrl-j", PaneNext),
                 ("ctrl-k", PanePrevious),
+                ("ctrl-cmd-j", PaneNextActive),
+                ("ctrl-cmd-k", PanePreviousActive),
             ]),
         }
     }
@@ -459,6 +477,7 @@ mod tests {
             ctrl,
             alt,
             shift,
+            cmd: false,
         }
     }
 
@@ -572,6 +591,20 @@ mod tests {
             KeyCode::Char('q'),
             KeyModifiers::CONTROL | KeyModifiers::ALT
         )));
+    }
+
+    #[test]
+    fn cmd_is_a_modifier_that_must_match_exactly() {
+        let ctrl_cmd_j = KeySpec::parse("ctrl-cmd-j").expect("ctrl-cmd-j");
+        assert_eq!(KeySpec::parse("ctrl-super-j"), Ok(ctrl_cmd_j));
+        assert_eq!(ctrl_cmd_j.to_string(), "ctrl-cmd-j");
+        assert!(KeySpec::parse("cmd-super-j").is_err());
+        let ctrl_super = KeyModifiers::CONTROL | KeyModifiers::SUPER;
+        assert!(ctrl_cmd_j.matches(&ev(KeyCode::Char('j'), ctrl_super)));
+        assert!(!ctrl_cmd_j.matches(&ev(KeyCode::Char('j'), KeyModifiers::CONTROL)));
+        let ctrl_j = KeySpec::parse("ctrl-j").expect("ctrl-j");
+        assert!(!ctrl_j.matches(&ev(KeyCode::Char('j'), ctrl_super)));
+        assert_eq!(ctrl_cmd_j.event(), ev(KeyCode::Char('j'), ctrl_super));
     }
 
     #[test]

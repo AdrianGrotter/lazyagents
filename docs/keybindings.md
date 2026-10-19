@@ -22,6 +22,7 @@ Two input modes:
 |---|---|
 | `j`/`k`, `↑`/`↓` | move within the Agents box |
 | `ctrl-j`/`ctrl-k` | next / previous agent in the Agents box, from either box; focuses Agents |
+| `ctrl-cmd-j`/`ctrl-cmd-k` | next / previous active agent in the Agents box: one that is starting, working or needs input, skipping idle, `done`, exited and stopped ones. From either box; focuses Agents. Needs a terminal that reports `cmd` (kitty keyboard protocol) |
 | `h`/`l`, `←`/`→`, `tab`/`shift-tab` | switch between Projects and Agents |
 | `1`/`2` | focus Projects / Agents; each box's title starts with the first plain digit key bound to focus it (`[1] Projects`, `[2] Agents`), or no number when none is |
 | `enter` | focus main pane (pane mode); on a stopped or exited agent, start it (Claude: resume session) and focus the pane once it runs. With Projects focused: open the project switcher |
@@ -231,6 +232,7 @@ below. After `ctrl-q`, one more key picks a pane action:
 |---|---|
 | `ctrl-q j` | next agent in the Agents panel, staying in the pane |
 | `ctrl-q k` | previous agent in the Agents panel, staying in the pane |
+| `ctrl-q J`, `ctrl-q K` | next / previous active agent (starting, working or needs input), staying in the pane |
 | `ctrl-q q`, `ctrl-q esc` | back to the sidebar |
 | `ctrl-q s` | scroll mode |
 | `ctrl-q +` | next screen mode, staying in the pane |
@@ -238,7 +240,7 @@ below. After `ctrl-q`, one more key picks a pane action:
 
 While the prefix waits for its second key the status bar shows `ctrl-q …`. Any other key
 after `ctrl-q` cancels the prefix, reaches nobody, and the status bar lists the prefix
-keys (`ctrl-q: j/k switch · q/esc sidebar · s scroll · + screen · ctrl-q send`). Switching
+keys (`ctrl-q: j/k switch · J/K active · q/esc sidebar · s scroll · + screen · ctrl-q send`). Switching
 onto an agent that is not running returns focus to the sidebar. A
 pending prefix is dropped whenever focus leaves the pane, and when a paste arrives; the
 paste still reaches the agent.
@@ -249,6 +251,7 @@ Direct keys act without the prefix:
 |---|---|
 | `ctrl-j` | next agent in the Agents panel, staying in the pane |
 | `ctrl-k` | previous agent in the Agents panel, staying in the pane |
+| `ctrl-cmd-j`, `ctrl-cmd-k` | next / previous active agent, staying in the pane |
 | `ctrl-h`, `ctrl-]` | back to the sidebar; legacy terminals report `ctrl-]` as `ctrl-5`, which works too |
 
 These keys never reach the agent, so in Claude Code `ctrl-j` no longer inserts a newline,
