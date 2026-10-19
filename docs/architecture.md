@@ -36,7 +36,7 @@ Subcommands:
   on stdin to the daemon.
 - `lazyagents ls` — list projects and agents.
 - `lazyagents project add [path] [--name n]` / `project rm <project>` — register or
-  unregister a project.
+  unregister a project. Project names are unique, ignoring case.
 - `lazyagents new <name> [--project p] [--kind claude|generic] [--prompt text] [-- cmd...]`
   — start an agent. `--prompt` is the agent's first message: Claude gets it as its
   positional prompt argument (after `--`), any other command has it typed in, followed

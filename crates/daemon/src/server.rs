@@ -758,6 +758,17 @@ impl Daemon {
             .filter(|n| !n.trim().is_empty())
             .or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| path.display().to_string());
+        if let Some(taken) = self
+            .projects
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(&name))
+        {
+            return Err(format!(
+                "the project at {} is already named {}; give this one another name",
+                taken.path.display(),
+                taken.name
+            ));
+        }
         let project = Project {
             id: ProjectId::random(),
             name,

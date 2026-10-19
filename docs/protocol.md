@@ -50,7 +50,8 @@ does not compile in the test until its sample is added.
 `Request`:
 
 - `ListProjects`
-- `AddProject { path, name }`
+- `AddProject { path, name }`: a path already registered returns its project unchanged; a
+  name another project has, in any case, is refused
 - `RemoveProject { id }`
 - `ListAgents`
 - `CreateAgent(CreateAgent)`: `project`, `name`, `kind`, `command`, `cols`, `rows`,

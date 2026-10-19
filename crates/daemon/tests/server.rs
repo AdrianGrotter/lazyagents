@@ -432,6 +432,37 @@ async fn adding_the_same_project_twice_returns_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_project_name_in_use_in_any_case_is_refused() {
+    let daemon = TestDaemon::start().await;
+    let mut conn = Conn::open(daemon.path()).await;
+    let root = tempfile::tempdir().expect("root");
+    for dir in ["one/web", "two/web", "three"] {
+        std::fs::create_dir_all(root.path().join(dir)).expect("project dir");
+    }
+    let add = |dir: &str, name: Option<&str>| Request::AddProject {
+        path: root.path().join(dir),
+        name: name.map(str::to_string),
+    };
+    let Ok(Response::Project(first)) = conn.request(add("one/web", None)).await else {
+        panic!("add project failed");
+    };
+    for request in [add("two/web", None), add("three", Some("WEB"))] {
+        let Err(message) = conn.request(request).await else {
+            panic!("a second project named web was added");
+        };
+        assert!(message.contains("web"), "{message}");
+        assert!(
+            message.contains(&first.path.display().to_string()),
+            "{message}"
+        );
+    }
+    let Ok(Response::Project(renamed)) = conn.request(add("two/web", Some("web-2"))).await else {
+        panic!("add project failed");
+    };
+    assert_eq!(renamed.name, "web-2");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn generic_agent_streams_output_and_takes_input() {
     let daemon = TestDaemon::start().await;
     let mut conn = Conn::open(daemon.path()).await;
