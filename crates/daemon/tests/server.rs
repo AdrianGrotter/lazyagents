@@ -808,7 +808,7 @@ async fn claude_agents_get_sessions_hooks_and_resume() {
     std::fs::write(
         &fake,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec sleep 30\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}.tmp'\nmv '{0}.tmp' '{0}'\nexec sleep 30\n",
             args_file.display()
         ),
     )
@@ -882,7 +882,7 @@ fn fake_claude(dir: &Path) -> (PathBuf, PathBuf) {
     std::fs::write(
         &fake,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec sleep 30\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}.tmp'\nmv '{0}.tmp' '{0}'\nexec sleep 30\n",
             args_file.display()
         ),
     )
