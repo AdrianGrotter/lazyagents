@@ -5,6 +5,7 @@ mod forms;
 mod input;
 mod pane;
 mod popup;
+mod projects;
 mod sidebar;
 
 use std::collections::{HashMap, HashSet};
@@ -104,7 +105,16 @@ pub struct Help {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Popup {
     Help(Help),
+    /// Row `i` is `App::projects[i]`, the project the new agent goes in.
+    NewAgentProject {
+        index: usize,
+    },
     NewAgent(NewAgentForm),
+    /// Row 0 is all projects, row `i` is `App::projects[i - 1]` and the last row adds a
+    /// project.
+    ProjectSwitcher {
+        index: usize,
+    },
     Rename {
         agent: AgentId,
         input: String,
@@ -261,7 +271,10 @@ pub struct App {
     pub focus: Focus,
     pub view: AgentView,
     pub popup: Option<Popup>,
+    /// The current project, whose agents the Agents box lists outside the all-agents view.
     pub project_index: usize,
+    /// The project last picked for a new agent, where the list starts in the all-agents view.
+    new_agent_project: Option<ProjectId>,
     /// Kept among `visible_agents()` by `settle_selection` whenever any agent is listed.
     pub selected: Option<AgentId>,
     /// The selected agent's row when the selection last settled; the agent that comes to
@@ -336,6 +349,7 @@ impl App {
             view: AgentView::Project,
             popup,
             project_index: 0,
+            new_agent_project: None,
             selected: None,
             settled_row: 0,
             subscribed: None,
@@ -491,6 +505,13 @@ impl App {
         self.agents
             .iter()
             .filter(|a| a.project == project && a.status == Status::NeedsInput)
+            .count()
+    }
+
+    pub fn attention_anywhere(&self) -> usize {
+        self.agents
+            .iter()
+            .filter(|a| a.status == Status::NeedsInput)
             .count()
     }
 
@@ -704,7 +725,7 @@ impl App {
                     self.projects.push(project.clone());
                 }
                 if let Some(index) = self.projects.iter().position(|p| p.id == project.id) {
-                    self.highlight_project(index);
+                    self.switch_project(Some(index));
                 }
             }
             Response::Agent(info) => {
@@ -817,17 +838,11 @@ impl App {
         }
     }
 
-    /// Keeps the highlighted project; if it is gone, highlights the selected agent's
-    /// project, and otherwise leaves the index to be clamped.
+    /// Keeps the current project; if it is gone, leaves the index to be clamped.
     fn replace_projects(&mut self, projects: Vec<Project>) {
-        let highlighted = self.selected_project().map(|p| p.id);
-        let agent_project = self.selected_agent().map(|a| a.project);
+        let current = self.selected_project().map(|p| p.id);
         self.projects = projects;
-        let position = |id: ProjectId| self.projects.iter().position(|p| p.id == id);
-        if let Some(index) = highlighted
-            .and_then(position)
-            .or_else(|| agent_project.and_then(position))
-        {
+        if let Some(index) = current.and_then(|id| self.projects.iter().position(|p| p.id == id)) {
             self.project_index = index;
         }
     }
@@ -913,20 +928,17 @@ impl App {
         self.sync()
     }
 
-    /// Highlights a project and selects its first agent; in the all-agents view a
-    /// project without agents keeps the current agent selected.
-    fn highlight_project(&mut self, index: usize) {
-        self.project_index = index;
-        let project = self.projects.get(index).map(|p| p.id);
-        let first = self
-            .visible_agents()
-            .iter()
-            .position(|a| Some(a.project) == project);
-        match (self.view, first) {
-            (AgentView::Project, _) => self.select_row(0),
-            (AgentView::All, Some(first)) => self.select_row(first),
-            (AgentView::All, None) => {}
+    /// Makes the project current, or with `None` lists all agents, and selects the first
+    /// agent listed.
+    fn switch_project(&mut self, index: Option<usize>) {
+        match index {
+            Some(index) => {
+                self.project_index = index;
+                self.view = AgentView::Project;
+            }
+            None => self.view = AgentView::All,
         }
+        self.select_row(0);
     }
 
     /// A selected agent that the new filter hides gives way to the first row.
@@ -936,12 +948,14 @@ impl App {
         self.sync()
     }
 
-    /// Selects the agent and highlights its project.
+    /// Selects the agent; outside the all-agents view its project becomes current.
     pub fn select_agent(&mut self, id: AgentId) {
         let Some(project) = self.agents.iter().find(|a| a.id == id).map(|a| a.project) else {
             return;
         };
-        if let Some(index) = self.projects.iter().position(|p| p.id == project) {
+        if self.view == AgentView::Project
+            && let Some(index) = self.projects.iter().position(|p| p.id == project)
+        {
             self.project_index = index;
         }
         if let Some(row) = self.visible_agents().iter().position(|a| a.id == id) {
@@ -1557,21 +1571,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn all_view_selection_moves_the_project_highlight() {
-        let p = project("p");
-        let q = project("q");
-        let b = agent(&q, "b", Status::Idle);
-        let (mut app, _) = loaded(
-            vec![p.clone(), q.clone()],
-            vec![agent(&p, "a", Status::Idle), b.clone()],
-        );
-        app.view = AgentView::All;
-        app.select_agent(b.id);
-        assert_eq!(app.project_index, 1);
-        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
-    }
-
-    #[test]
     fn projects_changed_reorder_keeps_the_selected_agent() {
         let p = project("p");
         let q = project("q");
@@ -1625,6 +1624,12 @@ pub(crate) mod tests {
         for c in text.chars() {
             let _ = app.on_key(key(c));
         }
+    }
+
+    /// Opens the new agent form for the project the project list starts at.
+    pub(crate) fn open_new_agent(app: &mut App) {
+        let _ = app.on_key(key('n'));
+        let _ = app.on_key(code(KeyCode::Enter));
     }
 
     pub(super) fn input_key(id: AgentId, k: protocol::Key) -> Effect {
@@ -1778,7 +1783,7 @@ pub(crate) mod tests {
 
     pub(super) fn submit_shell_agent(app: &mut App, name: &str) -> (AgentInfo, Request) {
         let project = app.selected_project().map(|p| p.id).expect("project");
-        let _ = app.on_key(key('n'));
+        open_new_agent(app);
         type_text(app, name);
         let _ = app.on_key(code(KeyCode::Tab));
         let _ = app.on_key(code(KeyCode::Right));
@@ -1884,7 +1889,7 @@ pub(crate) mod tests {
     #[test]
     fn a_refused_new_agent_keeps_the_form_with_the_input_and_the_error() {
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         type_text(&mut app, "dup");
         let request = sent(&app.on_key(code(KeyCode::Enter)));
         assert_eq!(
@@ -1917,12 +1922,12 @@ pub(crate) mod tests {
     #[test]
     fn escape_while_a_form_waits_leaves_its_reply_to_the_status_line() {
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         type_text(&mut app, "dup");
         let request = sent(&app.on_key(code(KeyCode::Enter)));
         let _ = app.on_key(code(KeyCode::Esc));
         assert_eq!(app.popup, None);
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         let _ = app.apply_reply(&request, Err("refused".into()));
         assert_eq!(submission(&app), Submission::Editing);
         assert_eq!(
@@ -2169,65 +2174,32 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn all_view_project_highlight_selects_its_first_agent_or_keeps_the_current() {
-        let (mut app, projects, _, b) = all_view_with_three_projects();
-        let _ = app.on_key(key('h'));
-        let effects = app.on_key(key('j'));
-        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[1].id));
-        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
-        assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: b.id })]);
-        let effects = app.on_key(key('j'));
-        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[2].id));
-        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
-        assert!(effects.is_empty(), "{effects:?}");
-        let _ = app.apply_server(ServerMessage::AgentUpdated(b.clone()));
-        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[2].id));
-        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
-    }
-
-    #[test]
-    fn all_view_added_project_keeps_the_current_agent_unless_it_has_agents() {
+    fn an_added_project_becomes_current() {
         let (mut app, projects, a, b) = all_view_with_three_projects();
         let _ = app.on_key(key('j'));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
         let s = project("s");
         let effects = app.apply_response(Response::Project(s.clone()));
+        assert_eq!(app.view, AgentView::Project);
         assert_eq!(app.selected_project().map(|x| x.id), Some(s.id));
-        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
-        assert_eq!(effects, vec![Effect::RememberProjects(vec![known_of(&s)])]);
+        assert_eq!(app.selected_agent(), None);
+        assert!(effects.contains(&Effect::RememberProjects(vec![known_of(&s)])));
         let _ = app.apply_response(Response::Project(projects[0].clone()));
         assert_eq!(app.selected_project().map(|x| x.id), Some(projects[0].id));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
     }
 
     #[test]
-    fn all_view_removing_the_highlighted_project_snaps_to_the_selected_agent() {
+    fn removing_the_current_project_in_all_keeps_the_selected_agent() {
         let (mut app, projects, a, _) = all_view_with_three_projects();
-        let _ = app.on_key(key('h'));
-        let _ = app.on_key(key('k'));
-        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[2].id));
-        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+        app.project_index = 2;
         let effects = app.apply_server(ServerMessage::ProjectsChanged(vec![
             projects[0].clone(),
             projects[1].clone(),
         ]));
-        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[0].id));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(projects[1].id));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
         assert!(effects.is_empty(), "{effects:?}");
-    }
-
-    #[test]
-    fn all_view_removing_the_highlighted_project_without_agents_clamps() {
-        let p = project("p");
-        let q = project("q");
-        let r = project("r");
-        let (mut app, _) = loaded(vec![p.clone(), q.clone(), r], vec![]);
-        let _ = app.on_key(key('A'));
-        let _ = app.on_key(key('h'));
-        let _ = app.on_key(key('k'));
-        assert_eq!(app.project_index, 2);
-        let _ = app.apply_server(ServerMessage::ProjectsChanged(vec![p, q.clone()]));
-        assert_eq!(app.selected_project().map(|x| x.id), Some(q.id));
     }
 
     #[test]

@@ -49,7 +49,7 @@ pub fn areas_in(area: Rect, project_count: usize, info_lines: usize, mode: Scree
     .min(area.width);
     let project_rows = match project_count {
         0 => EMPTY_PROJECTS_ROWS,
-        count => count.min(6) as u16,
+        _ => 1,
     };
     let projects_height = (project_rows + 2).min(body_height);
     let below_projects = body_height - projects_height;
@@ -236,14 +236,14 @@ mod tests {
     #[test]
     fn info_panel_fits_its_content_and_shrinks_on_short_terminals() {
         let tall = areas(Rect::new(0, 0, 100, 30), 2, 7);
-        assert_eq!((tall.info.height, tall.agents.height), (9, 16));
+        assert_eq!((tall.info.height, tall.agents.height), (9, 17));
         assert_eq!(tall.info.bottom(), tall.status.y);
         let medium = areas(Rect::new(0, 0, 100, 20), 2, 7);
-        assert_eq!((medium.info.height, medium.agents.height), (7, 8));
+        assert_eq!((medium.info.height, medium.agents.height), (8, 8));
         let short = areas(Rect::new(0, 0, 100, 16), 2, 7);
-        assert_eq!((short.info.height, short.agents.height), (6, 5));
+        assert_eq!((short.info.height, short.agents.height), (6, 6));
         let tiny = areas(Rect::new(0, 0, 100, 8), 2, 7);
-        assert_eq!((tiny.info.height, tiny.agents.height), (3, 0));
+        assert_eq!((tiny.info.height, tiny.agents.height), (4, 0));
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
         let a = areas(Rect::new(0, 0, 100, 30), 2, 4);
         assert_eq!(a.status, Rect::new(0, 29, 100, 1));
         assert_eq!(a.projects.width, 25);
-        assert_eq!(a.projects.height, 4);
+        assert_eq!(a.projects.height, 3);
         assert_eq!(a.info.height, 6);
         assert_eq!(a.pane.x, 25);
         assert_eq!(a.pane_inner, Rect::new(26, 1, 73, 27));

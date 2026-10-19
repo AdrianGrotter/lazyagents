@@ -151,6 +151,11 @@ impl App {
                 }
             },
             Popup::ProjectPicker { index } => self.on_picker_key(index, &key),
+            Popup::ProjectSwitcher { index } => self.on_switcher_key(index, &key),
+            Popup::NewAgentProject { index } => {
+                self.on_new_agent_project_key(index, &key);
+                Vec::new()
+            }
             Popup::AddProject(form) => self.on_project_form_key(form, &key),
             Popup::NewAgent(form) => self.on_form_key(form, key),
         }

@@ -33,10 +33,12 @@ harness wait-for "$name" 'press a to add a project' 20
 harness keys "$name" a
 harness wait-for "$name" ' Add project ' 5
 harness keys "$name" Enter
-harness wait-for "$name" '▸ tui-smoke-project' 5
+harness wait-for "$name" '│tui-smoke-project' 5
 
 harness keys "$name" n
-harness wait-for "$name" ' New agent ' 5
+harness wait-for "$name" ' New agent · project ' 5
+harness keys "$name" Enter
+harness wait-for "$name" ' New agent in ' 5
 harness type "$name" demo
 harness keys "$name" Tab Right
 harness wait-for "$name" '‹ shell ›' 5

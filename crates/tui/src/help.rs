@@ -23,7 +23,7 @@ const SIDEBAR_HELP: [(&[Action], &str); 22] = [
     (&[Action::ToggleFocus], "switch between Projects and Agents"),
     (
         &[Action::Open],
-        "open the agent's pane, restarting it if it is not running",
+        "open the agent's pane, restarting it if it is not running; in Projects: switch project",
     ),
     (
         &[Action::FocusPane],
@@ -31,7 +31,10 @@ const SIDEBAR_HELP: [(&[Action], &str); 22] = [
     ),
     (&[Action::NewAgent], "new agent"),
     (&[Action::Stop, Action::Restart], "stop / restart agent"),
-    (&[Action::Remove], "remove agent (in Projects: the project)"),
+    (
+        &[Action::Remove],
+        "remove agent (in Projects: the current project)",
+    ),
     (&[Action::Rename], "rename agent"),
     (&[Action::ScreenMode], "wider pane / full screen / normal"),
     (&[Action::AddProject], "add project"),

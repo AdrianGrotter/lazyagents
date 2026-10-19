@@ -3,7 +3,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use crate::keymap::Action;
 
-use super::forms::{NewAgentForm, Submission};
+use super::forms::Submission;
 use super::pane::{press, scroll_request};
 use super::{AgentView, App, Confirmed, DEFAULT_SIZE, Effect, Focus, Help, Popup, label, wrap};
 
@@ -47,7 +47,7 @@ impl App {
                 };
             }
             Action::Open | Action::FocusPane => match (&self.focus, self.selected_agent()) {
-                (Focus::Projects, _) if action == Action::Open => self.focus = Focus::Agents,
+                (Focus::Projects, _) if action == Action::Open => self.open_switcher(),
                 (_, Some(agent)) if agent.status.is_running() => self.focus = Focus::Pane,
                 (_, Some(agent)) => {
                     let id = agent.id;
@@ -57,15 +57,13 @@ impl App {
                 (_, None) => {}
             },
             Action::NewAgent => self.open_new_agent(),
-            Action::AddProject => {
-                self.popup = Some(if self.project_candidates().is_empty() {
-                    self.project_form()
-                } else {
-                    Popup::ProjectPicker { index: 0 }
-                });
-            }
+            Action::AddProject => self.open_add_project(),
             Action::Stop => self.confirm_for_selected("Stop", Confirmed::Kill),
-            Action::Remove if self.focus == Focus::Projects => self.confirm_remove_project(),
+            Action::Remove if self.focus == Focus::Projects => {
+                if let Some(id) = self.selected_project().map(|p| p.id) {
+                    self.confirm_remove_project(id);
+                }
+            }
             Action::Remove => match self.selected_agent() {
                 Some(agent) if agent.worktree.is_some() => {
                     self.popup = Some(Popup::Confirm {
@@ -101,15 +99,11 @@ impl App {
             }
             Action::NextAttention => self.next_attention(),
             Action::ToggleAllAgents => {
-                let selected = self.selected_agent().map(|a| a.id);
                 self.view = match self.view {
                     AgentView::Project => AgentView::All,
                     AgentView::All => AgentView::Project,
                 };
                 self.settled_row = 0;
-                if let Some(id) = selected {
-                    self.select_agent(id);
-                }
             }
             Action::Scroll => self.enter_scroll(false),
             Action::Commands => self.popup = Some(Popup::Commands { index: 0 }),
@@ -168,24 +162,6 @@ impl App {
         Effect::Send(Request::RestartAgent { id, cols, rows })
     }
 
-    fn confirm_remove_project(&mut self) {
-        let Some(project) = self.selected_project() else {
-            return;
-        };
-        if self.agents.iter().any(|a| a.project == project.id) {
-            let message = format!("remove {}'s agents first", project.name);
-            self.fail(message);
-            return;
-        }
-        let prompt = format!(
-            "Remove project {}? It stays in the add list ({}).",
-            project.name,
-            self.keymap.first_key(Action::AddProject)
-        );
-        let action = Confirmed::RemoveProject(project.id);
-        self.popup = Some(Popup::Confirm { prompt, action });
-    }
-
     fn confirm_for_selected(&mut self, verb: &str, action: fn(AgentId) -> Confirmed) {
         if let Some(agent) = self.selected_agent() {
             let prompt = format!("{verb} {}?", agent.name);
@@ -196,12 +172,7 @@ impl App {
 
     fn step(&mut self, step: i32) {
         match self.focus {
-            Focus::Projects => {
-                let count = self.projects.len();
-                if count > 0 {
-                    self.highlight_project(wrap(self.project_index, step, count));
-                }
-            }
+            Focus::Projects => {}
             Focus::Agents | Focus::Pane | Focus::Diff(_) | Focus::Scroll(_) => {
                 self.move_agent(step)
             }
@@ -215,27 +186,6 @@ impl App {
         }
         let row = self.selected_row().unwrap_or(self.settled_row);
         self.select_row(wrap(row, step, count));
-        if self.view == AgentView::All
-            && let Some(project) = self.selected_agent().map(|a| a.project)
-            && let Some(index) = self.projects.iter().position(|p| p.id == project)
-        {
-            self.project_index = index;
-        }
-    }
-
-    fn open_new_agent(&mut self) {
-        if self.selected_project().is_none() {
-            let add = self.keymap.first_key(Action::AddProject);
-            self.fail(format!("add a project first ({add})"));
-            return;
-        }
-        let outside_git = self
-            .selected_project()
-            .is_some_and(|p| !(self.is_git_repo)(&p.path));
-        self.popup = Some(Popup::NewAgent(NewAgentForm {
-            outside_git,
-            ..NewAgentForm::default()
-        }));
     }
 
     /// Whether the next-attention key has an agent to go to besides the selected one.
@@ -392,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn arrows_switch_boxes_and_move_within_the_list() {
+    fn arrows_switch_boxes_and_move_within_the_agents() {
         let p = project("p");
         let q = project("q");
         let a = agent(&p, "alpha", Status::Idle);
@@ -402,11 +352,6 @@ mod tests {
         let _ = app.on_key(code(KeyCode::Left));
         assert_eq!(app.focus, Focus::Projects);
         let _ = app.on_key(code(KeyCode::Down));
-        assert_eq!(
-            (app.focus.clone(), app.selected_project().map(|x| x.id)),
-            (Focus::Projects, Some(q.id))
-        );
-        let _ = app.on_key(code(KeyCode::Up));
         assert_eq!(
             (app.focus.clone(), app.selected_project().map(|x| x.id)),
             (Focus::Projects, Some(p.id))
@@ -425,6 +370,99 @@ mod tests {
             (app.focus.clone(), app.selected_agent().map(|x| x.id)),
             (Focus::Agents, Some(a.id))
         );
+        assert_eq!(app.selected_project().map(|x| x.id), Some(p.id));
+    }
+
+    #[test]
+    fn enter_on_the_projects_box_opens_the_switcher_at_the_current_project() {
+        let (p, q) = (project("p"), project("q"));
+        let (mut app, _) = loaded(vec![p, q], Vec::new());
+        let _ = app.on_key(key('1'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.popup, Some(Popup::ProjectSwitcher { index: 1 }));
+        let _ = app.on_key(code(KeyCode::Esc));
+        assert_eq!(app.popup, None);
+        let _ = app.on_key(key('A'));
+        let _ = app.on_key(key('1'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.popup, Some(Popup::ProjectSwitcher { index: 0 }));
+    }
+
+    #[test]
+    fn the_switcher_makes_the_picked_project_current() {
+        let (p, q) = (project("p"), project("q"));
+        let a = agent(&p, "a", Status::Idle);
+        let b = agent(&q, "b", Status::Idle);
+        let (mut app, _) = loaded(vec![p.clone(), q.clone()], vec![a, b.clone()]);
+        let _ = app.on_key(key('1'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(key('j'));
+        let effects = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.popup, None);
+        assert_eq!(app.view, AgentView::Project);
+        assert_eq!(app.selected_project().map(|x| x.id), Some(q.id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.focus, Focus::Agents);
+        assert!(effects.contains(&Effect::Send(Request::Subscribe { id: b.id })));
+    }
+
+    #[test]
+    fn all_projects_heads_the_switcher() {
+        let (p, q) = (project("p"), project("q"));
+        let a = agent(&p, "a", Status::Idle);
+        let b = agent(&q, "b", Status::Idle);
+        let (mut app, _) = loaded(vec![p.clone(), q], vec![a, b]);
+        let _ = app.on_key(key('1'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(key('k'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(app.view, AgentView::All);
+        assert_eq!(app.visible_agents().len(), 2);
+        assert_eq!(app.selected_project().map(|x| x.id), Some(p.id));
+    }
+
+    #[test]
+    fn the_switcher_ends_with_adding_a_project() {
+        let (mut app, _) = loaded(vec![project("p")], Vec::new());
+        let _ = app.on_key(key('1'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.popup, Some(Popup::ProjectSwitcher { index: 2 }));
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert!(
+            matches!(app.popup, Some(Popup::AddProject(_))),
+            "{:?}",
+            app.popup
+        );
+    }
+
+    #[test]
+    fn selecting_an_agent_of_another_project_in_all_keeps_the_current_project() {
+        let (p, q) = (project("p"), project("q"));
+        let a = agent(&p, "a", Status::Idle);
+        let b = agent(&q, "b", Status::Idle);
+        let (mut app, _) = loaded(vec![p.clone(), q], vec![a.clone(), b.clone()]);
+        let _ = app.on_key(key('A'));
+        let _ = app.on_key(key('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(p.id));
+        let _ = app.on_key(key('A'));
+        assert_eq!(app.view, AgentView::Project);
+        assert_eq!(app.selected_project().map(|x| x.id), Some(p.id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+    }
+
+    #[test]
+    fn g_in_all_keeps_the_current_project() {
+        let (p, q) = (project("p"), project("q"));
+        let waiting = agent(&q, "w", Status::NeedsInput);
+        let (mut app, _) = loaded(
+            vec![p.clone(), q],
+            vec![agent(&p, "a", Status::Idle), waiting.clone()],
+        );
+        let _ = app.on_key(key('A'));
+        let _ = app.on_key(key('g'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(waiting.id));
         assert_eq!(app.selected_project().map(|x| x.id), Some(p.id));
     }
 
@@ -528,11 +566,12 @@ mod tests {
     }
 
     #[test]
-    fn d_on_a_project_without_agents_confirms_removing_it() {
+    fn d_in_the_switcher_confirms_removing_a_project_without_agents() {
         let (p, q) = (project("p"), project("q"));
         let a = agent(&p, "alpha", Status::Idle);
         let (mut app, _) = loaded(vec![p, q.clone()], vec![a]);
         let _ = app.on_key(key('1'));
+        let _ = app.on_key(code(KeyCode::Enter));
         let _ = app.on_key(key('j'));
         let _ = app.on_key(key('d'));
         assert!(
@@ -556,6 +595,17 @@ mod tests {
         let _ = app.on_key(key('1'));
         let _ = app.on_key(key('d'));
         assert_eq!(app.popup, None);
+        let message = app.current_message(Instant::now()).unwrap_or_default();
+        assert!(message.contains("agents first"), "{message}");
+    }
+
+    #[test]
+    fn d_in_the_switcher_on_a_project_with_agents_refuses_and_keeps_it_open() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('1'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(key('d'));
+        assert_eq!(app.popup, Some(Popup::ProjectSwitcher { index: 1 }));
         let message = app.current_message(Instant::now()).unwrap_or_default();
         assert!(message.contains("agents first"), "{message}");
     }
@@ -664,14 +714,43 @@ mod tests {
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
         let _ = app.on_key(key('j'));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
-        assert_eq!(app.selected_project().map(|x| x.id), Some(q.id));
+        let _ = app.on_key(key('A'));
+        assert_eq!(app.view, AgentView::Project);
+    }
+
+    #[test]
+    fn n_picks_the_project_first_starting_at_the_current_one() {
+        let (p, q) = (project("p"), project("q"));
+        let (mut app, _) = loaded(vec![p.clone(), q.clone()], Vec::new());
         let _ = app.on_key(key('n'));
+        assert_eq!(app.popup, Some(Popup::NewAgentProject { index: 0 }));
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert!(
+            matches!(&app.popup, Some(Popup::NewAgent(form)) if form.project == q.id),
+            "{:?}",
+            app.popup
+        );
         type_text(&mut app, "new");
         let c = created(app.on_key(code(KeyCode::Enter)));
         assert_eq!(c.project, q.id);
-        let _ = app.on_key(code(KeyCode::Esc));
+        assert_eq!(app.selected_project().map(|x| x.id), Some(p.id));
+    }
+
+    #[test]
+    fn n_in_all_starts_at_the_project_last_picked_for_a_new_agent() {
+        let (p, q) = (project("p"), project("q"));
+        let (mut app, _) = loaded(vec![p, q], Vec::new());
         let _ = app.on_key(key('A'));
-        assert_eq!(app.view, AgentView::Project);
+        let _ = app.on_key(key('n'));
+        assert_eq!(app.popup, Some(Popup::NewAgentProject { index: 0 }));
+        let _ = app.on_key(key('j'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(code(KeyCode::Esc));
+        let _ = app.on_key(key('n'));
+        assert_eq!(app.popup, Some(Popup::NewAgentProject { index: 1 }));
+        let _ = app.on_key(code(KeyCode::Esc));
+        assert_eq!(app.popup, None);
     }
 }
 

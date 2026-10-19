@@ -77,8 +77,9 @@ pub enum Submission {
     Failed(String),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAgentForm {
+    pub project: ProjectId,
     pub name: String,
     pub preset: Preset,
     pub command: String,
@@ -122,6 +123,21 @@ pub(super) fn normalize_name(input: &str) -> String {
 }
 
 impl NewAgentForm {
+    pub fn new(project: ProjectId, outside_git: bool) -> Self {
+        Self {
+            project,
+            name: String::new(),
+            preset: Preset::default(),
+            command: String::new(),
+            worktree: false,
+            base: String::new(),
+            prompt: String::new(),
+            field: Field::default(),
+            submission: Submission::default(),
+            outside_git,
+        }
+    }
+
     pub fn fields(&self) -> Vec<Field> {
         let mut fields = vec![Field::Name, Field::Preset];
         if self.preset == Preset::Custom {
@@ -341,9 +357,7 @@ impl App {
     }
 
     fn submit_form(&mut self, form: NewAgentForm) -> Vec<Effect> {
-        let Some(project) = self.selected_project().map(|p| p.id) else {
-            return Vec::new();
-        };
+        let project = form.project;
         let name = match normalize_name(&form.name) {
             name if name.is_empty() => self.free_name(project, form.preset),
             name => name,
@@ -484,8 +498,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::tests::{
-        agent, code, configured, created, ctrl, form, key, known_of, loaded, loaded_with, project,
-        submission, two_agents, type_text, with_known_old,
+        agent, code, configured, created, ctrl, form, key, known_of, loaded, loaded_with,
+        open_new_agent, project, submission, two_agents, type_text, with_known_old,
     };
     use protocol::Status;
 
@@ -510,7 +524,7 @@ mod tests {
     #[test]
     fn form_submit_normalizes_the_name() {
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         type_text(&mut app, " my  new agent ");
         let c = created(app.on_key(code(KeyCode::Enter)));
         assert_eq!(c.name, "my-new-agent");
@@ -519,7 +533,7 @@ mod tests {
     #[test]
     fn number_keys_are_text_in_the_new_agent_name_field() {
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         let _ = app.on_key(key('1'));
         let _ = app.on_key(key('2'));
         assert_eq!(form(&app).name, "12");
@@ -718,7 +732,7 @@ mod tests {
     #[test]
     fn new_agent_form_creates_each_preset() {
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         type_text(&mut app, "api");
         let c = created(app.on_key(code(KeyCode::Enter)));
         assert_eq!(
@@ -728,7 +742,7 @@ mod tests {
         assert_eq!((c.cols, c.rows), (120, 40));
 
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         type_text(&mut app, "sh1");
         let _ = app.on_key(code(KeyCode::Tab));
         let _ = app.on_key(code(KeyCode::Right));
@@ -739,7 +753,7 @@ mod tests {
         );
 
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         type_text(&mut app, "job");
         let _ = app.on_key(code(KeyCode::Tab));
         let _ = app.on_key(code(KeyCode::Right));
@@ -766,7 +780,7 @@ mod tests {
             "#,
         );
         let (mut app, _) = loaded_with(config, vec![project("p")], vec![]);
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         type_text(&mut app, "cx");
         let _ = app.on_key(code(KeyCode::Tab));
         let preset = |app: &App| match &app.popup {
@@ -801,11 +815,11 @@ mod tests {
             agent(&q, "claude-2", Status::Idle),
         ];
         let (mut app, _) = loaded(vec![p, q], agents);
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         assert_eq!(created(app.on_key(code(KeyCode::Enter))).name, "claude-2");
         let _ = app.on_key(code(KeyCode::Esc));
 
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         type_text(&mut app, "   ");
         let _ = app.on_key(code(KeyCode::Tab));
         let _ = app.on_key(code(KeyCode::Right));
@@ -826,7 +840,7 @@ mod tests {
     #[test]
     fn a_custom_preset_without_a_command_says_so_in_the_form() {
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         let _ = app.on_key(code(KeyCode::Tab));
         let _ = app.on_key(code(KeyCode::Left));
         assert_eq!(form(&app).preset, Preset::Custom);
@@ -841,7 +855,7 @@ mod tests {
     #[test]
     fn form_worktree_toggle_and_base_field() {
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         let mut order = vec![form(&app).field];
         for _ in 0..3 {
             let _ = app.on_key(code(KeyCode::Tab));
@@ -899,7 +913,7 @@ mod tests {
     #[test]
     fn form_sends_worktree_request_when_on() {
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         type_text(&mut app, "wt");
         let _ = app.on_key(code(KeyCode::Tab));
         let _ = app.on_key(code(KeyCode::Right));
@@ -916,7 +930,7 @@ mod tests {
 
         for (typed, base) in [(" dev ", Some("dev".to_string())), ("  ", None)] {
             let (mut app, _, _) = two_agents();
-            let _ = app.on_key(key('n'));
+            open_new_agent(&mut app);
             type_text(&mut app, "wt");
             let _ = app.on_key(code(KeyCode::Up));
             let _ = app.on_key(code(KeyCode::Up));
@@ -931,7 +945,7 @@ mod tests {
     #[test]
     fn form_sends_the_prompt() {
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         let _ = app.on_key(code(KeyCode::Up));
         assert_eq!(form(&app).field, Field::Prompt);
         type_text(&mut app, "fix it");
@@ -940,7 +954,7 @@ mod tests {
         assert_eq!(c.prompt.as_deref(), Some("fix it in parser.rs"));
 
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         let _ = app.on_key(code(KeyCode::Up));
         type_text(&mut app, "   ");
         let c = created(app.on_key(code(KeyCode::Enter)));
@@ -950,7 +964,7 @@ mod tests {
     #[test]
     fn form_worktree_is_off_by_default() {
         let (mut app, _, _) = two_agents();
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         assert!(!form(&app).worktree);
         assert_eq!(form(&app).base, "");
         type_text(&mut app, "api");
@@ -962,7 +976,7 @@ mod tests {
     fn a_project_outside_git_offers_no_worktree() {
         let (mut app, _, _) = two_agents();
         app.is_git_repo = |_| false;
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         assert!(form(&app).outside_git);
         let mut order = vec![form(&app).field];
         for _ in 0..3 {
@@ -979,6 +993,7 @@ mod tests {
 #[cfg(test)]
 mod setup_tests {
     use super::*;
+    use crate::app::tests::open_new_agent;
     use protocol::Project;
 
     fn key(c: char) -> KeyEvent {
@@ -1008,7 +1023,7 @@ mod setup_tests {
 
     /// Opens the new agent form, turns on Worktree and submits.
     fn submit_worktree_agent(app: &mut App) -> Vec<Effect> {
-        let _ = app.on_key(key('n'));
+        open_new_agent(app);
         let _ = app.on_key(code(KeyCode::Tab));
         let _ = app.on_key(code(KeyCode::Tab));
         let _ = app.on_key(key(' '));
@@ -1193,7 +1208,7 @@ mod setup_tests {
     #[test]
     fn a_plain_agent_never_runs_the_setup() {
         let (mut app, _dir) = with_setup("npm install");
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         let effects = app.on_key(code(KeyCode::Enter));
         assert_eq!(created_setup(&effects), Some(None));
     }

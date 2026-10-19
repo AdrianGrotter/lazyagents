@@ -266,7 +266,7 @@ title = "Commit message"
 | `description` | required | the name shown in the menu, the help and messages |
 | `command` | required | a template run with `sh -c` |
 | `key` | none | a sidebar key; it wins over the action bound to the same key, with a warning |
-| `context` | `agent` | `agent` runs in the selected agent's directory (its worktree for a worktree agent) and needs a selected agent; `project` runs in the selected project's directory |
+| `context` | `agent` | `agent` runs in the selected agent's directory (its worktree for a worktree agent) and needs a selected agent; `project` runs in the current project's directory, or with all agents listed in the selected agent's project directory |
 | `output` | `terminal` | `terminal` suspends the TUI and runs the command in the real terminal until it exits; `agent` starts it as a new generic agent in the sidebar, named `<name>-<n>`; `popup` runs it in the background and shows its output (stdout and stderr) in a popup; `none` runs it in the background and says in the status bar how it ended |
 | `name` | `command` | the base of the agent's name for `output = "agent"` |
 | `prompts` | none | `[[commands.prompts]]` asked in order before the command runs |
@@ -282,7 +282,7 @@ so a value with spaces, quotes or `$(...)` stays one literal word: write
 | `agent.title` | the name the Agents box shows: a Claude agent's session title, else its name |
 | `agent.cwd` | the agent's directory |
 | `agent.branch`, `agent.base` | a worktree agent's branch and base; empty for other agents |
-| `project.name`, `project.path` | the agent's project, or the selected project for `context = "project"` |
+| `project.name`, `project.path` | the project the command runs for: the agent's project, or for `context = "project"` the current project (with all agents listed, the selected agent's) |
 | `form.<key>` | the answer to the prompt with that `key` |
 
 The `agent.*` variables exist only while an agent is selected. Prompts:

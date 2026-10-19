@@ -20,19 +20,19 @@ Two input modes:
 
 | Key | Action |
 |---|---|
-| `j`/`k`, `↑`/`↓` | move within the focused box |
+| `j`/`k`, `↑`/`↓` | move within the Agents box |
 | `ctrl-j`/`ctrl-k` | next / previous agent in the Agents box, from either box; focuses Agents |
 | `h`/`l`, `←`/`→`, `tab`/`shift-tab` | switch between Projects and Agents |
 | `1`/`2` | focus Projects / Agents; each box's title starts with the first plain digit key bound to focus it (`[1] Projects`, `[2] Agents`), or no number when none is |
-| `enter` | focus main pane (pane mode); on a stopped or exited agent, start it (Claude: resume session) and focus the pane once it runs |
+| `enter` | focus main pane (pane mode); on a stopped or exited agent, start it (Claude: resume session) and focus the pane once it runs. With Projects focused: open the project switcher |
 | `ctrl-l` | like `enter`, but from the Projects box too: opens the selected agent's pane |
-| `n` | new agent popup: name (optional), preset (`claude`, `shell`, custom command), worktree toggle, base branch and first prompt |
+| `n` | new agent: pick its project (the list starts at the current project; with all agents listed, at the project last picked here), then a form with name (optional), preset (`claude`, `shell`, custom command), worktree toggle, base branch and first prompt |
 | `x` | stop agent (confirm) |
 | `r` | restart agent (confirm while it is running; Claude: resume session) |
-| `d` | remove agent (confirm; for a worktree agent, choose whether the worktree goes too); with Projects focused, remove the project (confirm; refused while it has agents) |
+| `d` | remove agent (confirm; for a worktree agent, choose whether the worktree goes too); with Projects focused, remove the current project (confirm; refused while it has agents) |
 | `R` | rename agent |
 | `a` | add project: a picker of projects added before, or the new project form when there are none |
-| `A` | toggle between the selected project's agents and all agents |
+| `A` | toggle between the current project's agents and all agents |
 | `g` | jump to the next agent that needs input; when no other agent does, to the next one listed as `done` |
 | `D` | diff view of the agent's changes in the main pane |
 | `s` | scroll mode: browse the agent's terminal history (running or exited agents) |
@@ -61,7 +61,7 @@ send` while it has review comments. Then come `? help`, `g next input` while ano
 needs input or is `done`, the agent's own actions (`enter open`, `x stop` and `r restart`
 only while it runs, `s scroll` only once it has a terminal, `D diff` for an agent in a git
 repository, `F finish` for a worktree agent), and the general ones, ending with `q quit`. With
-Projects focused they offer the project actions (`n new agent`, `a add project`, `d remove
+Projects focused they offer the project actions (`enter switch project`, `n new agent`, `a add project`, `d remove
 project` once the project has no agents) instead of the agent's. With no project yet they
 are `a add a project · ? help · q quit`; while a filter is kept they start with `esc clear
 filter`. In full screen (`+` twice) the first hint is the way back: `+ exit full screen` in
@@ -92,8 +92,22 @@ the Agents box and the pane say `no agents match /<text> · esc clears`.
 sidebar. Moving to another agent, or opening the pane with `enter`, scrolls it back to the
 bottom. A stopped agent has no terminal to scroll.
 
+The Projects box shows one line, as lazygit's status box shows the current repository: the
+current project, whose agents the Agents box lists, or `All projects` while it lists all
+agents, with the count of agents that need input (`● 2`). Selecting an agent never changes
+the current project. It changes when you switch, add a project, or press `A`, and, while one
+project is listed, when `g` or a new agent lands in another project. `enter` on the box (or
+a click on it) opens the switcher: `All projects`, then every project with its path and
+waiting count, then `+ add project…`. `j`/`k` (or `↓`/`↑`) move, `enter` switches (or
+opens the add project picker), `d` removes the highlighted project (confirm; refused while
+it has agents) and `esc`/`q` closes. Switching focuses the Agents box.
+
 Before the first project is added, the Projects box, the Agents box and the pane all point
 at `a` (add a project), since `n` needs a project to put the agent in.
+
+The project list `n` opens has the same keys: `j`/`k` move, `enter` opens the new agent
+form for the highlighted project, whose title names it (`New agent in <project>`), and
+`esc`/`q` cancels.
 
 The add project picker lists `+ new project…` and then every known project that is not in
 the sidebar, most recently added first. `j`/`k` (or `↓`/`↑`) move, `enter` adds the
@@ -272,9 +286,9 @@ three lines at a time instead of reaching the agent.
 
 | Action | Effect |
 |---|---|
-| click a Projects row | select that project and focus Projects |
+| click the Projects box | focus Projects and open the project switcher |
 | click an Agents row | select that agent and focus Agents (never the pane) |
-| click elsewhere in the Projects or Agents box | focus that box |
+| click elsewhere in the Agents box | focus it |
 | click in the pane | focus the pane if the agent is running; otherwise the status bar says `<name> is not running — enter starts it` (`enter restarts it` for an exited agent) |
 | release in the cell the click started in | send the click to a running agent that enabled mouse reporting, such as Claude Code's subagent list; outside scroll mode only |
 | drag in the pane | select text, shown reversed; the selection stays inside the pane |
@@ -330,5 +344,5 @@ changes them):
 | `○` (grey) | stopped |
 
 The colours are GitHub's pull request colours, as lazygit shows them. Attention:
-`NeedsInput` agents are highlighted, sort first within their project, and their project
-row shows a count (`● 2`).
+`NeedsInput` agents are highlighted, sort first within their project, and the Projects box
+and the switcher show a count (`● 2`).

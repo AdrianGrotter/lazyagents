@@ -8,7 +8,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::commands::{self, Context, Output, Prompt};
 
 use super::popup::{Edit, edit};
-use super::{App, DEFAULT_SIZE, Effect, MessageKind, PendingCreate, Popup, label, wrap};
+use super::{AgentView, App, DEFAULT_SIZE, Effect, MessageKind, PendingCreate, Popup, label, wrap};
 
 /// A custom command waiting on its prompts; `vars` fills its template.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,8 +35,10 @@ impl App {
         };
         let description = command.description.clone();
         let agent = self.selected_agent().cloned();
-        let project = match (command.context, &agent) {
-            (Context::Agent, Some(agent)) => self.projects.iter().find(|p| p.id == agent.project),
+        let project = match &agent {
+            Some(agent) if command.context == Context::Agent || self.view == AgentView::All => {
+                self.projects.iter().find(|p| p.id == agent.project)
+            }
             _ => self.selected_project(),
         }
         .cloned();
@@ -388,6 +390,27 @@ mod tests {
                 cwd: "/p/p".into(),
                 show: true,
             }]
+        );
+    }
+
+    #[test]
+    fn project_commands_in_all_run_in_the_selected_agents_project() {
+        let config = crate::config::parse(
+            "[[commands]]\nkey = \"T\"\ndescription = \"tests\"\ncommand = \"make test\"\ncontext = \"project\"",
+        )
+        .expect("config");
+        let (p, q) = (project("p"), project("q"));
+        let agents = vec![agent(&p, "a", Status::Idle), agent(&q, "b", Status::Idle)];
+        let (mut app, _) = loaded_with(config, vec![p, q], agents);
+        let _ = app.on_key(key('A'));
+        let _ = app.on_key(key('j'));
+        let effects = app.on_key(key('T'));
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::RunInTerminal { cwd, .. }] if cwd == std::path::Path::new("/p/q")
+            ),
+            "{effects:?}"
         );
     }
 

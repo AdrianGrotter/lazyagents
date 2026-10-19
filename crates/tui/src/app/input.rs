@@ -146,6 +146,8 @@ impl App {
             Some(
                 Popup::Help(_)
                 | Popup::ProjectPicker { .. }
+                | Popup::ProjectSwitcher { .. }
+                | Popup::NewAgentProject { .. }
                 | Popup::Confirm { .. }
                 | Popup::Commands { .. }
                 | Popup::Finish { .. }
@@ -268,14 +270,8 @@ impl App {
     fn on_click(&mut self, at: Position, areas: &Areas) -> Vec<Effect> {
         if areas.projects.contains(at) {
             let mut effects = self.leave_for_sidebar(Focus::Projects);
-            let row = layout::row_at(
-                areas.projects,
-                self.project_index,
-                self.projects.len(),
-                at.y,
-            );
-            if let Some(index) = row {
-                self.highlight_project(index);
+            if !self.projects.is_empty() {
+                self.open_switcher();
             }
             effects.extend(self.sync());
             return effects;
@@ -326,8 +322,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::tests::{
-        agent, code, ctrl, in_pane, key, loaded, mouse, open_diff, project, running_pair,
-        screen_areas, scroll_effects, submit_shell_agent, two_agents,
+        agent, code, ctrl, in_pane, key, loaded, mouse, open_diff, open_new_agent, project,
+        running_pair, screen_areas, scroll_effects, submit_shell_agent, two_agents,
     };
     use protocol::Cell;
     use protocol::{AgentInfo, Response, ServerMessage};
@@ -390,7 +386,7 @@ mod tests {
             })]
         );
         let _ = app.on_key(ctrl(']'));
-        let _ = app.on_key(key('n'));
+        open_new_agent(&mut app);
         assert!(app.on_paste("pasted\nignored".into()).is_empty());
         match &app.popup {
             Some(Popup::NewAgent(form)) => assert_eq!(form.name, "pasted"),
@@ -467,30 +463,21 @@ mod tests {
     }
 
     #[test]
-    fn click_project_row_selects_and_focuses_projects() {
+    fn a_click_on_the_projects_box_focuses_it_and_opens_the_switcher() {
         let p = project("p");
         let q = project("q");
         let a = agent(&p, "alpha", Status::Idle);
-        let b = agent(&q, "beta", Status::Idle);
-        let (mut app, _) = loaded(vec![p, q], vec![a.clone(), b.clone()]);
+        let (mut app, _) = loaded(vec![p, q], vec![a.clone()]);
         let areas = screen_areas(&app);
-        let effects = app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 1)), &areas);
-        assert_eq!((app.focus.clone(), app.project_index), (Focus::Projects, 1));
-        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
-        assert_eq!(effects, vec![Effect::Send(Request::Subscribe { id: b.id })]);
-        assert!(
-            app.on_mouse(mouse(MouseKind::Up, project_row_at(&areas, 1)), &areas)
-                .is_empty()
-        );
-        assert_eq!(app.focus, Focus::Projects);
-
         app.focus = Focus::Pane;
         app.prefix_pending = true;
-        let _ = app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 0)), &areas);
+        let effects = app.on_mouse(mouse(MouseKind::Down, project_row_at(&areas, 0)), &areas);
+        assert!(effects.is_empty(), "{effects:?}");
         assert_eq!(
             (app.focus.clone(), app.prefix_pending),
             (Focus::Projects, false)
         );
+        assert_eq!(app.popup, Some(Popup::ProjectSwitcher { index: 1 }));
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
     }
 

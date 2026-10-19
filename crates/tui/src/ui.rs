@@ -38,6 +38,8 @@ const COMMENT_HINT: &str = "enter save (empty removes) · esc cancel";
 const SETUP_TOO_SMALL: &str = "The terminal is too small to show the script · s skip it · n cancel";
 const CHOICE_HINT: &str = "j/k move · enter pick · esc cancel";
 const PICKER_HINT: &str = "j/k move · enter add · x forget · esc cancel";
+const SWITCHER_HINT: &str = "j/k move · enter switch · d remove · esc cancel";
+const ALL_PROJECTS: &str = "All projects";
 const PROJECT_FORM_HINT: &str = "tab field · enter add · esc cancel";
 const PICKER_ROWS: usize = 12;
 const NEW_AGENT_WIDTH: u16 = 56;
@@ -207,22 +209,23 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(hint.block(block), area);
         return;
     }
-    let items = app
-        .projects
-        .iter()
-        .map(|project| {
-            let attention = app.attention(project.id);
-            let mut spans = vec![Span::raw(project.name.clone())];
-            if attention > 0 {
-                spans.push(Span::raw(" "));
-                spans.push(Span::raw(format!("● {attention}")).fg(app.theme.attention));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
-    let style = selection_style(app.focus == Focus::Projects, &app.theme);
-    let (list, mut state) = selectable_list(items, app.project_index, block, style);
-    frame.render_stateful_widget(list, area, &mut state);
+    let line = match (app.view, app.selected_project()) {
+        (AgentView::Project, Some(project)) => {
+            project_line(project.name.clone(), app.attention(project.id), &app.theme)
+        }
+        _ => project_line(ALL_PROJECTS.into(), app.attention_anywhere(), &app.theme),
+    };
+    frame.render_widget(Paragraph::new(line).block(block), area);
+}
+
+/// `name`, then how many of its agents need input when any do.
+fn project_line(name: String, attention: usize, theme: &Theme) -> Line<'static> {
+    let mut spans = vec![Span::raw(name)];
+    if attention > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(format!("● {attention}")).fg(theme.attention));
+    }
+    Line::from(spans)
 }
 
 /// The name is cut to fit `width` cells, so the status after it stays visible.
@@ -838,6 +841,9 @@ fn sidebar_hints(app: &App) -> Vec<String> {
             }
         }
         (Focus::Projects, _) => {
+            if !app.projects.is_empty() {
+                hints.extend(key(Action::Open, "switch project"));
+            }
             hints.extend(key(Action::NewAgent, "new agent"));
             hints.extend(key(Action::AddProject, "add project"));
             let empty = app
@@ -1202,7 +1208,11 @@ fn popup_content(popup: &Popup, app: &App, screen: (u16, u16)) -> PopupContent {
         }
         Popup::NewAgent(form) => {
             let (lines, cursor) = form_lines(form, app);
-            PopupContent::new(" New agent ", NEW_AGENT_WIDTH, lines).cursor_at(cursor)
+            let title = match app.projects.iter().find(|p| p.id == form.project) {
+                Some(project) => format!(" New agent in {} ", project.name),
+                None => " New agent ".to_string(),
+            };
+            PopupContent::new(title, NEW_AGENT_WIDTH, lines).cursor_at(cursor)
         }
         Popup::Rename {
             input, submission, ..
@@ -1214,6 +1224,14 @@ fn popup_content(popup: &Popup, app: &App, screen: (u16, u16)) -> PopupContent {
             lines.extend(form_footer(submission, RENAME_HINT, FORM_WIDTH, theme));
             PopupContent::new(" Rename ", FORM_WIDTH, lines).cursor_at(Some(0))
         }
+        Popup::ProjectSwitcher { index } => {
+            PopupContent::fitting(" Projects ", 60, switcher_lines(app, *index))
+        }
+        Popup::NewAgentProject { index } => PopupContent::fitting(
+            " New agent · project ",
+            40,
+            new_agent_project_lines(app, *index),
+        ),
         Popup::ProjectPicker { index } => {
             PopupContent::fitting(" Add project ", 60, picker_lines(app, *index))
         }
@@ -1423,26 +1441,74 @@ fn picker_lines(app: &App, index: usize) -> Vec<Line<'static>> {
         .map(|k| k.name.chars().count())
         .max()
         .unwrap_or(0);
-    let rows = std::iter::once("+ new project…".to_string()).chain(
-        candidates
-            .iter()
-            .map(|k| format!("{:<width$}  {}", k.name, app.display_path(&k.path))),
-    );
+    let rows = std::iter::once("+ new project…".to_string())
+        .chain(
+            candidates
+                .iter()
+                .map(|k| format!("{:<width$}  {}", k.name, app.display_path(&k.path))),
+        )
+        .map(Line::from)
+        .collect();
+    menu_lines(rows, index, PICKER_HINT, &app.theme)
+}
+
+/// All projects, each project with its path, and adding a project.
+fn switcher_lines(app: &App, index: usize) -> Vec<Line<'static>> {
+    let width = app
+        .projects
+        .iter()
+        .map(|p| p.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let all = project_line(ALL_PROJECTS.into(), app.attention_anywhere(), &app.theme);
+    let projects = app.projects.iter().map(|p| {
+        let name = format!("{:<width$}  {}", p.name, app.display_path(&p.path));
+        project_line(name, app.attention(p.id), &app.theme)
+    });
+    let add = Line::from("+ add project…");
+    let rows = std::iter::once(all)
+        .chain(projects)
+        .chain(std::iter::once(add))
+        .collect();
+    menu_lines(rows, index, SWITCHER_HINT, &app.theme)
+}
+
+fn new_agent_project_lines(app: &App, index: usize) -> Vec<Line<'static>> {
+    let rows = app
+        .projects
+        .iter()
+        .map(|p| Line::from(p.name.clone()))
+        .collect();
+    menu_lines(rows, index, CHOICE_HINT, &app.theme)
+}
+
+/// `rows` with `index` highlighted and `hint` below; shows at most `PICKER_ROWS` rows,
+/// scrolled so the highlighted one is visible.
+fn menu_lines(
+    rows: Vec<Line<'static>>,
+    index: usize,
+    hint: &'static str,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let start = (index + 1).saturating_sub(PICKER_ROWS);
     let mut lines: Vec<Line> = rows
+        .into_iter()
         .enumerate()
         .skip(start)
         .take(PICKER_ROWS)
-        .map(|(row, text)| {
-            if row == index {
-                Line::from(format!("▸ {text}")).style(selection_style(true, &app.theme))
+        .map(|(row, mut line)| {
+            let selected = row == index;
+            line.spans
+                .insert(0, Span::raw(if selected { "▸ " } else { "  " }));
+            if selected {
+                line.style(selection_style(true, theme))
             } else {
-                Line::from(format!("  {text}"))
+                line
             }
         })
         .collect();
     lines.push(Line::default());
-    lines.push(Line::from(PICKER_HINT).fg(app.theme.dim));
+    lines.push(Line::from(hint).fg(theme.dim));
     lines
 }
 
@@ -1993,7 +2059,7 @@ mod tests {
         assert!(text.contains(" tests · j/k scroll · q close "), "{text}");
         assert!(text.contains("second") && !text.contains("first"), "{text}");
         app.popup = Some(Popup::Help(Help::default()));
-        let (text, _) = render_at(&app, 100, 40);
+        let (text, _) = render_at(&app, 100, 44);
         assert!(text.contains("Commands"), "{text}");
         assert!(text.contains("lazygit"), "{text}");
     }
@@ -2016,7 +2082,7 @@ mod tests {
     fn asking_to_run(script: &str, scroll: usize) -> App {
         let mut app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
         app.popup = Some(Popup::ApproveSetup {
-            form: Default::default(),
+            form: Box::new(NewAgentForm::new(protocol::ProjectId::random(), false)),
             create: Box::new(protocol::CreateAgent {
                 project: protocol::ProjectId::random(),
                 name: "a".into(),
@@ -2297,8 +2363,11 @@ mod tests {
         for hint in ["x stop", "r restart", "R rename", "enter open", "d remove"] {
             assert!(!status.contains(hint), "{hint}: {status}");
         }
-        assert!(status.contains("n new agent"), "{status}");
-        let _ = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(
+            status.contains("enter switch project · n new agent"),
+            "{status}"
+        );
+        app.project_index = 1;
         let status = status_at(&app, 300);
         assert!(status.contains("d remove project"), "{status}");
         app.focus = Focus::Agents;
@@ -2505,6 +2574,64 @@ mod tests {
         assert_eq!(buffer[other].bg, Color::Reset);
     }
 
+    #[test]
+    fn the_projects_box_shows_only_the_current_project() {
+        let (p, q) = (project("alpha-repo"), project("beta-repo"));
+        let agents = vec![agent(&q, "api", Status::NeedsInput)];
+        let (mut app, _) = loaded(vec![p, q], agents);
+        let projects = layout(Rect::new(0, 0, 100, 30), &app).projects;
+        assert_eq!(projects.height, 3);
+        let (text, _) = render(&app);
+        assert!(text.contains("│alpha-repo"), "{text}");
+        assert!(!text.contains("beta-repo"), "{text}");
+        app.view = crate::app::AgentView::All;
+        let (text, _) = render(&app);
+        assert!(text.contains("│All projects ● 1"), "{text}");
+    }
+
+    #[test]
+    fn the_switcher_lists_all_projects_then_each_project_then_adding_one() {
+        let (p, q) = (project("alpha-repo"), project("beta-repo"));
+        let agents = vec![agent(&q, "api", Status::NeedsInput)];
+        let (mut app, _) = loaded(vec![p, q], agents);
+        app.popup = Some(Popup::ProjectSwitcher { index: 2 });
+        let (text, buffer) = render(&app);
+        assert!(text.contains("╭ Projects "), "{text}");
+        let rows: Vec<usize> = [
+            "All projects",
+            "alpha-repo  /p/",
+            "/p/beta-repo ● 1",
+            "+ add project…",
+        ]
+        .iter()
+        .map(|row| {
+            text.lines()
+                .position(|line| line.contains(row))
+                .unwrap_or_else(|| panic!("{row}\n{text}"))
+        })
+        .collect();
+        assert!(rows.windows(2).all(|w| w[0] < w[1]), "{rows:?}\n{text}");
+        assert!(text.contains("enter switch · d remove"), "{text}");
+        let marker = find_text(&buffer, buffer.area, "▸ beta-repo");
+        assert_selected(&buffer[marker], app.theme.selected);
+    }
+
+    #[test]
+    fn the_new_agent_popups_name_the_project() {
+        use crate::app::NewAgentForm;
+        let (p, q) = (project("alpha-repo"), project("beta-repo"));
+        let (mut app, _) = loaded(vec![p, q.clone()], Vec::new());
+        app.popup = Some(Popup::NewAgentProject { index: 1 });
+        let (text, buffer) = render(&app);
+        assert!(text.contains("╭ New agent · project "), "{text}");
+        assert!(text.contains("alpha-repo"), "{text}");
+        let marker = find_text(&buffer, buffer.area, "▸ beta-repo");
+        assert_selected(&buffer[marker], app.theme.selected);
+        app.popup = Some(Popup::NewAgent(NewAgentForm::new(q.id, false)));
+        let (text, _) = render(&app);
+        assert!(text.contains("╭ New agent in beta-repo "), "{text}");
+    }
+
     fn assert_selected(cell: &ratatui::buffer::Cell, bg: Color) {
         assert_eq!(cell.bg, bg, "{cell:?}");
         assert!(cell.modifier.contains(Modifier::BOLD), "{cell:?}");
@@ -2543,14 +2670,10 @@ mod tests {
         let dot = find_text(&buffer, layout.agents, "● a");
         assert_eq!(buffer[dot].fg, IDLE_GREEN);
         assert_selected(&buffer[dot], Color::Blue);
-        let project = find_text(&buffer, layout.projects, "▸ p");
-        assert_eq!(buffer[project].bg, Color::Reset);
-        assert!(buffer[project].modifier.contains(Modifier::BOLD));
         assert_nothing_reversed(&buffer);
 
         app.focus = Focus::Projects;
         let (_, buffer) = render(&app);
-        assert_selected(&buffer[project], Color::Blue);
         assert_eq!(buffer[dot].bg, Color::Reset);
         assert_eq!(buffer[dot].fg, IDLE_GREEN);
     }
@@ -2603,6 +2726,7 @@ mod tests {
     fn new_agent_form_has_a_cursor_only_on_text_fields() {
         let (mut app, _) = loaded(vec![project("p")], Vec::new());
         let mut form = NewAgentForm {
+            project: protocol::ProjectId::random(),
             name: "bot".into(),
             preset: Preset::Claude,
             command: String::new(),
@@ -2635,6 +2759,7 @@ mod tests {
     fn new_agent_form_values_start_in_one_column() {
         let (mut app, _) = loaded(vec![project("p")], Vec::new());
         app.popup = Some(Popup::NewAgent(NewAgentForm {
+            project: protocol::ProjectId::random(),
             name: "bot".into(),
             preset: Preset::Custom,
             command: "make".into(),
@@ -2745,7 +2870,7 @@ mod tests {
             ("n", "new agent"),
             ("x, r", "stop / restart agent"),
             ("c", "custom commands"),
-            ("d", "remove agent (in Projects: the project)"),
+            ("d", "remove agent (in Projects: the current project)"),
             ("R", "rename agent"),
             ("+", "wider pane / full screen / normal"),
             ("a", "add project"),
@@ -2998,7 +3123,7 @@ mod tests {
         app.popup = Some(Popup::NewAgent(NewAgentForm {
             name: "api".into(),
             submission: sending(),
-            ..Default::default()
+            ..NewAgentForm::new(protocol::ProjectId::random(), false)
         }));
         assert_eq!(cursor_of(&app).1, None);
         app.popup = Some(Popup::Rename {
@@ -3022,7 +3147,7 @@ mod tests {
         let (mut app, _) = loaded(vec![project("p")], Vec::new());
         app.popup = Some(Popup::NewAgent(NewAgentForm {
             outside_git: true,
-            ..Default::default()
+            ..NewAgentForm::new(protocol::ProjectId::random(), false)
         }));
         let (_, buffer) = render(&app);
         let at = find_text(&buffer, buffer.area, "Worktree: off (not a git repository)");
@@ -3037,7 +3162,7 @@ mod tests {
         app.popup = Some(Popup::NewAgent(NewAgentForm {
             name: "api".into(),
             submission: Submission::Failed(error.into()),
-            ..Default::default()
+            ..NewAgentForm::new(protocol::ProjectId::random(), false)
         }));
         let (text, buffer) = render(&app);
         assert!(
@@ -3051,7 +3176,7 @@ mod tests {
 
         app.popup = Some(Popup::NewAgent(NewAgentForm {
             submission: Submission::Sending(Box::new(protocol::Request::ListAgents)),
-            ..Default::default()
+            ..NewAgentForm::new(protocol::ProjectId::random(), false)
         }));
         let (text, _) = render(&app);
         assert!(text.contains(SENDING_HINT), "{text}");
@@ -3081,6 +3206,7 @@ mod tests {
         let p = project("p");
         let (mut app, _) = loaded(vec![p], vec![]);
         let form = |preset| NewAgentForm {
+            project: protocol::ProjectId::random(),
             name: "api".into(),
             preset,
             command: "make".into(),
