@@ -1,7 +1,13 @@
+//! The `lazyagents` binary across process boundaries: argument parsing through to exit
+//! codes and output, the daemon it starts, signals, hooks and the status line. The
+//! commands themselves are tested in process, in `src/tests.rs`.
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+
+use protocol::{AgentInfo, AgentKind, CreateAgent, Request, Response, StatePaths};
 
 const BIN: &str = env!("CARGO_BIN_EXE_lazyagents");
 
@@ -19,17 +25,93 @@ fn without_direnv(program: impl AsRef<std::ffi::OsStr>) -> Command {
     command
 }
 
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(future)
+}
+
+/// Sends `request` to the daemon of `paths`, as the CLI would without launching it.
+fn request(paths: &StatePaths, request: Request) -> Response {
+    block_on(async {
+        let mut client = client::Client::connect(paths).await.expect("connect");
+        client.request(request).await.expect("request")
+    })
+}
+
+/// Waits until the daemon of `paths` answers; its socket file appears before it listens.
+fn wait_for_daemon(paths: &StatePaths) {
+    assert!(
+        wait_until(WAIT, || block_on(client::Client::connect(paths)).is_ok()),
+        "daemon never answered"
+    );
+}
+
+/// Starts an agent running `command` in a new project at `project`.
+fn start_agent(
+    paths: &StatePaths,
+    project: &Path,
+    name: &str,
+    kind: AgentKind,
+    command: Vec<String>,
+) -> AgentInfo {
+    let added = match request(
+        paths,
+        Request::AddProject {
+            path: project.to_path_buf(),
+            name: None,
+        },
+    ) {
+        Response::Project(added) => added,
+        other => panic!("unexpected reply to AddProject: {other:?}"),
+    };
+    let create = Request::CreateAgent(CreateAgent {
+        project: added.id,
+        name: name.into(),
+        kind,
+        command,
+        cols: 80,
+        rows: 24,
+        worktree: None,
+        prompt: None,
+        setup: None,
+    });
+    match request(paths, create) {
+        Response::Agent(info) => info,
+        other => panic!("unexpected reply to CreateAgent: {other:?}"),
+    }
+}
+
 struct TestEnv {
-    state: tempfile::TempDir,
+    state_dir: PathBuf,
+    _state: tempfile::TempDir,
     project: tempfile::TempDir,
 }
 
 impl TestEnv {
     fn new() -> Self {
+        let state = tempfile::tempdir().expect("state");
         Self {
-            state: tempfile::tempdir().expect("state"),
+            state_dir: state.path().to_path_buf(),
+            _state: state,
             project: tempfile::tempdir().expect("project"),
         }
+    }
+
+    /// A state dir that does not exist yet.
+    fn without_state_dir() -> Self {
+        let parent = tempfile::tempdir().expect("parent");
+        Self {
+            state_dir: parent.path().join("state"),
+            _state: parent,
+            project: tempfile::tempdir().expect("project"),
+        }
+    }
+
+    fn paths(&self) -> StatePaths {
+        StatePaths::new(&self.state_dir)
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -40,7 +122,7 @@ impl TestEnv {
         without_direnv(BIN)
             .args(args)
             .envs(env.iter().copied())
-            .env("LAZYAGENTS_STATE_DIR", self.state.path())
+            .env("LAZYAGENTS_STATE_DIR", &self.state_dir)
             .current_dir(self.project.path())
             .stdin(Stdio::null())
             .output()
@@ -58,12 +140,11 @@ impl TestEnv {
     }
 
     fn socket(&self) -> PathBuf {
-        self.state.path().join("daemon.sock")
+        self.paths().socket()
     }
 
     fn daemon_pid(&self) -> i32 {
-        let contents =
-            std::fs::read_to_string(self.state.path().join("daemon.lock")).expect("lock file");
+        let contents = std::fs::read_to_string(self.paths().lock_file()).expect("lock file");
         let holder = protocol::lockfile::parse(&contents).expect("pid in lock file");
         assert!(
             protocol::lockfile::is_current(&holder),
@@ -73,9 +154,19 @@ impl TestEnv {
     }
 }
 
+/// Shuts down any daemon the test left running, stopping its agents.
 impl Drop for TestEnv {
     fn drop(&mut self) {
-        let _ = self.run(&["shutdown"]);
+        let paths = self.paths();
+        let asked = block_on(async {
+            match client::Client::connect(&paths).await {
+                Ok(mut client) => client.request(Request::Shutdown).await.is_ok(),
+                Err(_) => false,
+            }
+        });
+        if asked {
+            wait_until(WAIT, || !paths.socket().exists());
+        }
     }
 }
 
@@ -124,35 +215,34 @@ impl Drop for Leaves {
     }
 }
 
-fn start_tree_agents(env: &TestEnv, pidfile: &Path) -> Leaves {
-    let pidfile = pidfile.display();
-    env.ok(&[
-        "new",
-        "nohup",
-        "--",
-        "sh",
-        "-c",
-        &format!("trap '' HUP; echo $$ >> '{pidfile}'; sleep 301"),
-    ]);
-    env.ok(&[
-        "new",
-        "jobs",
-        "--",
-        "sh",
-        "-c",
-        &format!("set -m; sleep 302 & echo $! >> '{pidfile}'; wait"),
-    ]);
-    env.ok(&[
-        "new",
-        "setsid",
-        "--",
-        "sh",
-        "-c",
-        &format!(
-            "perl -MPOSIX -e 'POSIX::setsid(); exec \"sleep\", \"303\"' & echo $! >> '{pidfile}'; wait"
+fn sh(script: String) -> Vec<String> {
+    vec!["sh".into(), "-c".into(), script]
+}
+
+/// Agents that each leave a process a plain stop of the agent would miss: one ignoring
+/// SIGHUP, a job-control background job, and a descendant in a session of its own.
+fn start_tree_agents(paths: &StatePaths, project: &Path) -> Leaves {
+    let pidfile = project.join("pids");
+    let pids = pidfile.display();
+    for (name, script) in [
+        (
+            "nohup",
+            format!("trap '' HUP; echo $$ >> '{pids}'; sleep 301"),
         ),
-    ]);
-    Leaves::read(Path::new(&pidfile.to_string()), 3)
+        (
+            "jobs",
+            format!("set -m; sleep 302 & echo $! >> '{pids}'; wait"),
+        ),
+        (
+            "setsid",
+            format!(
+                "perl -MPOSIX -e 'POSIX::setsid(); exec \"sleep\", \"303\"' & echo $! >> '{pids}'; wait"
+            ),
+        ),
+    ] {
+        start_agent(paths, project, name, AgentKind::Generic, sh(script));
+    }
+    Leaves::read(&pidfile, 3)
 }
 
 fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
@@ -166,602 +256,49 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
     condition()
 }
 
-fn wait_for_file(path: &Path) -> String {
+/// What a test agent wrote to `path`, once it ends with `end`.
+fn wait_for_file_ending(path: &Path, end: &str) -> String {
     let mut text = String::new();
     assert!(
         wait_until(WAIT, || {
             text = std::fs::read_to_string(path).unwrap_or_default();
-            !text.is_empty()
+            text.ends_with(end)
         }),
-        "{} never appeared",
+        "{} was never written",
         path.display()
     );
     text
 }
 
-#[test]
-fn prints_version() {
-    let out = Command::new(BIN)
-        .arg("--version")
-        .output()
-        .expect("binary runs");
-    assert!(out.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        format!("lazyagents {}", env!("CARGO_PKG_VERSION"))
-    );
-}
-
-#[test]
-fn new_types_the_prompt_into_a_generic_agent() {
-    let env = TestEnv::new();
-    let typed = env.project.path().join("typed");
-    let script = format!(
-        "printf 'ready> '; read line; echo \"$line\" > '{0}.tmp'; mv '{0}.tmp' '{0}'; sleep 30",
-        typed.display()
-    );
-    env.ok(&[
-        "new",
-        "asker",
-        "--prompt",
-        "hello there",
-        "--",
-        "sh",
-        "-c",
-        &script,
-    ]);
-    assert_eq!(wait_for_file(&typed).trim(), "hello there");
-    env.ok(&["shutdown"]);
-}
-
-#[test]
-fn the_status_line_shows_the_users_and_reports_to_the_daemon() {
-    let env = TestEnv::new();
-    let claude_config = tempfile::tempdir().expect("claude config");
-    std::fs::write(
-        claude_config.path().join("settings.json"),
-        r#"{"statusLine": {"type": "command", "command": "printf 'mine:'; head -c 11; exit 3"}}"#,
-    )
-    .expect("settings");
-    env.ok(&[
-        "new",
-        "c",
-        "--kind",
-        "claude",
-        "--",
-        "sh",
-        "-c",
-        "exec sleep 30",
-    ]);
-    let state = std::fs::read_to_string(env.state.path().join("state.toml")).expect("state");
-    let id = state
-        .lines()
-        .skip_while(|line| line.trim() != "[[agents]]")
-        .find_map(|line| line.strip_prefix("id = \""))
-        .and_then(|rest| rest.strip_suffix('"'))
-        .filter(|id| id.len() == 36)
-        .expect("agent id");
-    let payload =
-        r#"{"model":{"display_name":"Opus"},"cost":{"total_cost_usd":0.42},"cwd":"/nowhere"}"#;
-    let mut child = Command::new(BIN)
-        .arg("statusline")
-        .env("CLAUDE_CONFIG_DIR", claude_config.path())
-        .env("LAZYAGENTS_AGENT_ID", id)
-        .env("LAZYAGENTS_SOCKET", env.socket())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("statusline");
-    use std::io::Write;
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(payload.as_bytes())
-        .expect("write");
-    let out = child.wait_with_output().expect("wait");
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "mine:{\"model\":{\"");
-    assert_eq!(out.status.code(), Some(3));
-    assert!(
-        wait_until(WAIT, || env.ok(&["ls"]).contains("(Opus · $0.42)")),
-        "{}",
-        env.ok(&["ls"])
-    );
-}
-
-#[test]
-fn send_types_a_line_into_an_agent() {
-    let env = TestEnv::new();
-    let typed = env.project.path().join("typed");
-    let script = format!(
-        "read line; echo \"$line\" > '{0}.tmp'; mv '{0}.tmp' '{0}'; sleep 30",
-        typed.display()
-    );
-    env.ok(&["new", "listener", "--", "sh", "-c", &script]);
-    assert!(
-        env.ok(&["send", "listener", "use pnpm"])
-            .contains("sent to listener")
-    );
-    assert_eq!(wait_for_file(&typed).trim(), "use pnpm");
-    env.ok(&["shutdown"]);
-}
-
-#[test]
-fn lifecycle_through_the_cli() {
-    let env = TestEnv::new();
-    assert!(env.ok(&["ls"]).contains("no projects yet"));
-    assert!(
-        env.ok(&["new", "demo", "--", "sh", "-c", "echo hi; sleep 30"])
-            .contains("started demo")
-    );
-    let ls = env.ok(&["ls"]);
-    let project_name = env
-        .project
-        .path()
-        .file_name()
-        .expect("name")
-        .to_string_lossy()
-        .into_owned();
-    assert!(ls.contains(&project_name), "{ls}");
-    assert!(ls.contains("demo"), "{ls}");
-    assert!(env.ok(&["kill", "demo"]).contains("stopped demo"));
-    assert!(env.ok(&["ls"]).contains("stopped"));
-    assert!(env.ok(&["restart", "demo"]).contains("restarted demo"));
-    assert!(
-        env.ok(&["rename", "demo", "demo2"])
-            .contains("renamed demo to demo2")
-    );
-    assert!(
-        env.ok(&["rm", &format!("{project_name}/demo2")])
-            .contains("removed demo2")
-    );
-    assert!(!env.ok(&["ls"]).contains("demo2"));
-    assert!(env.ok(&["shutdown"]).contains("daemon stopped"));
-    assert!(!env.socket().exists());
-    assert!(env.ok(&["shutdown"]).contains("daemon is not running"));
-}
-
-#[test]
-fn errors_go_to_stderr_with_exit_code_one() {
-    let env = TestEnv::new();
-    let out = env.run(&["kill", "nope"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&out.stderr).starts_with("lazyagents: "),
-        "{out:?}"
-    );
-    assert!(out.stdout.is_empty());
-}
-
-#[test]
-fn shutdown_leaves_no_agent_processes() {
-    let env = TestEnv::new();
-    let leaves = start_tree_agents(&env, &env.project.path().join("pids"));
-    assert!(env.ok(&["shutdown"]).contains("daemon stopped"));
-    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived shutdown");
-}
-
-struct FakeClaude {
-    args_file: PathBuf,
-    agent_id: String,
-    session: String,
-}
-
-impl FakeClaude {
-    fn start(env: &TestEnv) -> Self {
-        let args_file = env.project.path().join("args");
-        let fake = env.project.path().join("claude");
-        std::fs::write(
-            &fake,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec sleep 30\n",
-                args_file.display()
-            ),
-        )
-        .expect("fake claude");
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .expect("chmod");
-
-        env.ok(&[
-            "new",
-            "c",
-            "--kind",
-            "claude",
-            "--",
-            fake.to_str().expect("utf8"),
-        ]);
-        let args = wait_for_file(&args_file);
-        let lines: Vec<&str> = args.lines().collect();
-        assert_eq!(lines[0], "--session-id");
-        let session = lines[1].to_string();
-        let settings = PathBuf::from(lines[3]);
-        let agent_id = settings
-            .file_stem()
-            .expect("stem")
-            .to_string_lossy()
-            .into_owned();
-        let settings_json = std::fs::read_to_string(&settings).expect("settings");
-        assert!(
-            settings_json.contains(&format!("'{BIN}' hook UserPromptSubmit")),
-            "{settings_json}"
-        );
-        Self {
-            args_file,
-            agent_id,
-            session,
-        }
-    }
-
-    fn hook(&self, env: &TestEnv, event: &str, payload: &str) {
-        let mut child = Command::new(BIN)
-            .args(["hook", event])
-            .env("LAZYAGENTS_AGENT_ID", &self.agent_id)
-            .env("LAZYAGENTS_SOCKET", env.socket())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("hook");
-        use std::io::Write;
-        child
-            .stdin
-            .take()
-            .expect("stdin")
-            .write_all(payload.as_bytes())
-            .expect("payload");
-        let out = child.wait_with_output().expect("hook output");
-        assert!(
-            out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
-            "{out:?}"
-        );
-    }
-}
-
-#[test]
-fn claude_agent_hooks_drive_status_and_restart_resumes() {
-    let env = TestEnv::new();
-    let claude = FakeClaude::start(&env);
-    let args_file = &claude.args_file;
-    let session = claude.session.clone();
-    let hook = |event: &str, payload: &str| claude.hook(&env, event, payload);
-    let payload = format!("{{\"session_id\":\"{session}\"}}");
-    hook("UserPromptSubmit", &payload);
-    assert!(wait_until(WAIT, || env.ok(&["ls"]).contains("working")));
-    hook("Notification", &payload);
-    assert!(wait_until(WAIT, || env.ok(&["ls"]).contains("needs input")));
-
-    std::fs::remove_file(args_file).expect("reset");
-    env.ok(&["restart", "c"]);
-    let resumed = wait_for_file(args_file);
-    assert_eq!(
-        resumed.lines().take(2).collect::<Vec<_>>(),
-        ["--resume", session.as_str()]
-    );
-
-    let other = "6f1c2b9e-1d2a-4c3b-9e8f-0a1b2c3d4e5f";
-    hook(
-        "SessionStart",
-        &format!("{{\"session_id\":\"{other}\",\"source\":\"resume\"}}"),
-    );
-    std::fs::remove_file(args_file).expect("reset");
-    env.ok(&["restart", "c"]);
-    let resumed = wait_for_file(args_file);
-    assert_eq!(
-        resumed.lines().take(2).collect::<Vec<_>>(),
-        ["--resume", other]
-    );
-}
-
-#[test]
-fn idle_notification_marks_a_claude_agent_idle() {
-    let env = TestEnv::new();
-    let claude = FakeClaude::start(&env);
-    let session = &claude.session;
-    claude.hook(
-        &env,
-        "UserPromptSubmit",
-        &format!("{{\"session_id\":\"{session}\"}}"),
-    );
-    assert!(wait_until(WAIT, || env.ok(&["ls"]).contains("working")));
-    claude.hook(
-        &env,
-        "Notification",
-        &format!(
-            "{{\"session_id\":\"{session}\",\"notification_type\":\"idle_prompt\",\"message\":\"Claude is waiting for your input\"}}"
-        ),
-    );
-    assert!(wait_until(WAIT, || env.ok(&["ls"]).contains("idle")));
-    assert!(!env.ok(&["ls"]).contains("needs input"));
-}
-
-#[test]
-fn a_claude_agent_stays_working_while_a_background_subagent_runs() {
-    let env = TestEnv::new();
-    let claude = FakeClaude::start(&env);
-    let session = &claude.session;
-    let main = format!("{{\"session_id\":\"{session}\"}}");
-    let sub = format!(
-        "{{\"session_id\":\"{session}\",\"agent_id\":\"a853c9dd5f0c291b7\",\"agent_type\":\"general-purpose\"}}"
-    );
-    claude.hook(&env, "UserPromptSubmit", &main);
-    claude.hook(&env, "SubagentStart", &sub);
-    claude.hook(&env, "Stop", &main);
-    assert!(wait_until(Duration::from_secs(5), || env
-        .ok(&["ls"])
-        .contains("working")));
-    claude.hook(&env, "SubagentStop", &sub);
-    claude.hook(&env, "Stop", &main);
-    assert!(wait_until(Duration::from_secs(5), || env
-        .ok(&["ls"])
-        .contains("idle")));
-}
-
-/// Runs the binary once, so a timed run measures it rather than the first exec of a
-/// newly linked binary, which macOS holds up for its code-signature assessment.
-fn warm_up() {
-    let out = Command::new(BIN)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .expect("run lazyagents --version");
-    assert!(out.status.success(), "{out:?}");
-}
-
-#[test]
-fn hook_is_silent_and_returns_without_daemon() {
-    warm_up();
-    let start = Instant::now();
-    let out = Command::new(BIN)
-        .args(["hook", "Stop"])
-        .env(
-            "LAZYAGENTS_AGENT_ID",
-            "00000000-0000-4000-8000-000000000000",
-        )
-        .env("LAZYAGENTS_SOCKET", "/nonexistent/lazyagents.sock")
-        .stdin(Stdio::null())
-        .output()
-        .expect("hook");
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "took {:?}",
-        start.elapsed()
-    );
-    assert!(out.status.success());
-    assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
-}
-
-#[test]
-fn cli_recovers_from_a_stale_socket() {
-    let env = TestEnv::new();
-    drop(std::os::unix::net::UnixListener::bind(env.socket()).expect("stale socket"));
-    assert!(env.ok(&["ls"]).contains("no projects yet"));
-}
-
-#[test]
-fn project_add_relative_path_uses_the_callers_cwd() {
-    let env = TestEnv::new();
-    assert!(env.ok(&["ls"]).contains("no projects yet"));
-    let other = tempfile::tempdir().expect("other");
-    std::fs::create_dir(other.path().join("sub")).expect("sub");
-    let out = Command::new(BIN)
-        .args(["project", "add", "sub"])
-        .env("LAZYAGENTS_STATE_DIR", env.state.path())
-        .current_dir(other.path())
-        .stdin(Stdio::null())
-        .output()
-        .expect("run lazyagents");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let expected = other.path().canonicalize().expect("canonical").join("sub");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains(&expected.display().to_string()), "{stdout}");
-}
-
-#[test]
-fn daemon_startup_errors_are_logged() {
-    let state = tempfile::tempdir().expect("state");
-    std::fs::write(state.path().join("state.toml"), "[[[ not toml").expect("corrupt");
-    let mut child = Command::new(BIN)
-        .arg("daemon")
-        .env("LAZYAGENTS_STATE_DIR", state.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon");
-    let mut status = None;
-    let exited = wait_until(WAIT, || {
-        status = child.try_wait().expect("try_wait");
-        status.is_some()
-    });
-    if !exited {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    assert!(exited, "daemon did not exit");
-    assert!(!status.expect("status").success());
-    let log = std::fs::read_to_string(state.path().join("daemon.log")).unwrap_or_default();
-    assert!(log.contains("state.toml"), "{log}");
-}
-
-#[test]
-fn hook_does_not_wait_on_an_open_stdin() {
-    let dir = tempfile::tempdir().expect("dir");
-    warm_up();
-    let mut child = Command::new(BIN)
-        .args(["hook", "Stop"])
-        .env(
-            "LAZYAGENTS_AGENT_ID",
-            "00000000-0000-4000-8000-000000000000",
-        )
-        .env("LAZYAGENTS_SOCKET", dir.path().join("missing.sock"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("hook");
-    let _stdin = child.stdin.take();
-    let mut status = None;
-    let exited = wait_until(WAIT, || {
-        status = child.try_wait().expect("try_wait");
-        status.is_some()
-    });
-    if !exited {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    assert!(exited, "hook blocked on stdin");
-    assert!(status.expect("status").success());
-}
-
-#[test]
-fn idle_exit_is_configured_from_the_environment() {
-    let env = TestEnv::new();
-    let out = env.run_with_env(&["ls"], &[("LAZYAGENTS_IDLE_EXIT_SECS", "1")]);
-    assert!(out.status.success(), "{out:?}");
-    assert!(
-        wait_until(WAIT, || !env.socket().exists()),
-        "idle daemon kept running"
-    );
-}
-
-#[test]
-fn auto_started_daemon_creates_a_private_state_dir() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let parent = tempfile::tempdir().expect("parent");
-    let state = parent.path().join("state");
-    let run = |args: &[&str]| {
-        Command::new(BIN)
-            .args(args)
-            .env("LAZYAGENTS_STATE_DIR", &state)
-            .stdin(Stdio::null())
-            .output()
-            .expect("run lazyagents")
-    };
-    let listed = run(&["ls"]);
-    let mode = std::fs::metadata(&state).map(|m| m.permissions().mode());
-    let stopped = run(&["shutdown"]);
-    assert!(listed.status.success(), "{listed:?}");
-    assert!(stopped.status.success(), "{stopped:?}");
-    assert_eq!(mode.expect("state dir") & 0o777, 0o700);
-}
-
-#[test]
-fn sigterm_stops_the_daemon_and_its_agents() {
-    let env = TestEnv::new();
-    let leaves = start_tree_agents(&env, &env.project.path().join("pids"));
-    let daemon = rustix::process::Pid::from_raw(env.daemon_pid()).expect("pid");
-    rustix::process::kill_process(daemon, rustix::process::Signal::TERM).expect("SIGTERM");
-    assert!(
-        wait_until(WAIT, || !env.socket().exists()),
-        "socket survived SIGTERM"
-    );
-    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived SIGTERM");
-}
-
-fn serve_foreign_protocol(socket: PathBuf) {
-    let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind");
-    listener.set_nonblocking(true).expect("nonblocking");
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        runtime.block_on(async move {
-            let listener = tokio::net::UnixListener::from_std(listener).expect("listener");
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let welcome = protocol::ServerMessage::Welcome {
-                    protocol_version: 999,
-                    daemon_version: "9.9.9".into(),
-                };
-                let _ = protocol::write_message(&mut stream, &welcome).await;
-            }
-        });
-    });
-}
-
-/// A stand-in for a daemon of another protocol: `sleep` holds its pid and the test holds
-/// the lock for it; once `sleep` exits the socket goes and the lock is released, as a real
-/// daemon's would. SIGKILLed on drop if it is still running, so a failing test leaks nothing.
-struct ForeignDaemon(Arc<Mutex<std::process::Child>>);
-
-impl ForeignDaemon {
-    fn start(env: &TestEnv) -> Self {
-        serve_foreign_protocol(env.socket());
-        let sleeper = Command::new("sleep")
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("sleep");
-        let lock = env.state.path().join("daemon.lock");
-        std::fs::write(&lock, sleeper.id().to_string()).expect("lock file");
-        let held = std::fs::File::open(&lock).expect("open lock file");
-        held.lock().expect("hold the lock");
-        let fake = ForeignDaemon(Arc::new(Mutex::new(sleeper)));
-        let watched = Arc::clone(&fake.0);
-        let socket = env.socket();
-        std::thread::spawn(move || {
-            while !exited(&watched) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let _ = std::fs::remove_file(socket);
-            drop(held);
-        });
-        fake
-    }
-}
-
-fn exited(child: &Mutex<std::process::Child>) -> bool {
-    let mut child = child.lock().unwrap_or_else(PoisonError::into_inner);
-    !matches!(child.try_wait(), Ok(None))
-}
-
-impl Drop for ForeignDaemon {
-    fn drop(&mut self) {
-        let mut child = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if matches!(child.try_wait(), Ok(None)) {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-#[test]
-fn shutdown_stops_a_mismatched_daemon() {
-    let env = TestEnv::new();
-    let fake = ForeignDaemon::start(&env);
-    let out = env.run(&["shutdown"]);
-    assert!(out.status.success(), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("daemon stopped"),
-        "{out:?}"
-    );
-    assert!(exited(&fake.0), "shutdown did not stop it");
-}
-
-#[test]
-fn shutdown_refuses_a_daemon_that_answers_without_the_lock() {
-    let env = TestEnv::new();
-    serve_foreign_protocol(env.socket());
-    let out = env.run(&["shutdown"]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{out:?}");
-    assert!(
-        !String::from_utf8_lossy(&out.stdout).contains("daemon stopped"),
-        "{out:?}"
-    );
-    assert!(stderr.contains("9.9.9"), "{stderr}");
-    assert!(stderr.contains("stop it by hand"), "{stderr}");
+/// A line a test agent wrote to `path`, once it is complete.
+fn wait_for_line(path: &Path) -> String {
+    wait_for_file_ending(path, "\n").trim().to_string()
 }
 
 /// A `lazyagents daemon` child, SIGKILLed by its pid on drop if it is still running.
 struct DaemonChild(std::process::Child);
+
+impl DaemonChild {
+    fn start(env: &TestEnv, vars: &[(&str, &str)]) -> Self {
+        let daemon = DaemonChild(
+            without_direnv(BIN)
+                .arg("daemon")
+                .env("LAZYAGENTS_STATE_DIR", &env.state_dir)
+                .envs(vars.iter().copied())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("start daemon"),
+        );
+        wait_for_daemon(&env.paths());
+        daemon
+    }
+
+    fn exited(&mut self) -> bool {
+        matches!(self.0.try_wait(), Ok(Some(_)))
+    }
+}
 
 impl Drop for DaemonChild {
     fn drop(&mut self) {
@@ -773,109 +310,111 @@ impl Drop for DaemonChild {
 }
 
 #[test]
-fn stop_daemon_stops_a_running_daemon() {
+fn the_cli_starts_a_daemon_that_runs_agents_as_itself_and_stops_it() {
     let env = TestEnv::new();
-    let mut daemon = DaemonChild(
-        Command::new(BIN)
-            .arg("daemon")
-            .env("LAZYAGENTS_STATE_DIR", env.state.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start daemon"),
-    );
-    assert!(
-        wait_until(WAIT, || env.socket().exists()),
-        "daemon never listened"
-    );
-    let paths = protocol::StatePaths::new(env.state.path());
-    client::stop_daemon(&paths, Duration::from_secs(5)).expect("stop");
-    assert!(!env.socket().exists(), "socket survived stop_daemon");
-    assert!(
-        wait_until(WAIT, || matches!(daemon.0.try_wait(), Ok(Some(_)))),
-        "daemon still running"
-    );
-}
-
-#[test]
-fn a_daemon_started_in_another_locale_and_time_zone_can_be_stopped() {
-    let env = TestEnv::new();
-    let mut daemon = DaemonChild(
-        Command::new(BIN)
-            .arg("daemon")
-            .env("LAZYAGENTS_STATE_DIR", env.state.path())
-            .env("TZ", "Asia/Tokyo")
-            .env("LC_ALL", "ja_JP.UTF-8")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start daemon"),
-    );
-    assert!(
-        wait_until(WAIT, || env.socket().exists()),
-        "daemon never listened"
-    );
-    let paths = protocol::StatePaths::new(env.state.path());
-    client::stop_daemon(&paths, Duration::from_secs(20)).expect("stop");
-    assert!(
-        wait_until(WAIT, || matches!(daemon.0.try_wait(), Ok(Some(_)))),
-        "daemon still running"
-    );
-}
-
-#[test]
-fn daemon_that_dies_at_startup_fails_fast() {
-    let state = tempfile::tempdir().expect("state");
-    let state = state.path();
-    std::fs::write(state.join("state.toml"), "[[[ not toml").expect("corrupt");
-    warm_up();
-    let started = Instant::now();
-    let out = Command::new(BIN)
-        .arg("ls")
-        .env("LAZYAGENTS_STATE_DIR", state)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run lazyagents");
-    let took = started.elapsed();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{out:?}");
-    assert!(
-        stderr.contains(&format!(
-            "daemon exited during startup; see {}",
-            state.join("daemon.log").display()
-        )),
-        "{stderr}"
-    );
-    assert!(took < Duration::from_secs(10), "took {took:?}");
-}
-
-#[test]
-fn daemon_does_not_inherit_claude_code_variables() {
-    let env = TestEnv::new();
+    drop(std::os::unix::net::UnixListener::bind(env.socket()).expect("stale socket"));
     let dump = env.project.path().join("env");
-    env.run_with_env(
+    let out = env.run_with_env(
         &[
             "new",
             "dump",
+            "--kind",
+            "claude",
             "--",
             "sh",
             "-c",
-            &format!(
-                "env > '{}.tmp'; mv '{0}.tmp' '{0}'; sleep 30",
-                dump.display()
-            ),
+            &format!("{{ env; echo EOF; }} > '{}'", dump.display()),
         ],
         &[("CLAUDECODE", "1"), ("CLAUDE_CODE_ENTRYPOINT", "cli")],
     );
-    let vars = wait_for_file(&dump);
-    assert!(vars.contains("LAZYAGENTS_AGENT_ID="), "{vars}");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "started dump\n");
+
+    let vars = wait_for_file_ending(&dump, "EOF\n");
     let leaked: Vec<&str> = vars
         .lines()
         .filter(|line| line.starts_with("CLAUDECODE=") || line.starts_with("CLAUDE_CODE_"))
         .collect();
     assert!(leaked.is_empty(), "{leaked:?}");
+    let id: uuid::Uuid = vars
+        .lines()
+        .find_map(|line| line.strip_prefix("LAZYAGENTS_AGENT_ID="))
+        .unwrap_or_else(|| panic!("no agent id in {vars}"))
+        .parse()
+        .expect("agent id");
+    let settings = std::fs::read_to_string(env.paths().hook_settings(protocol::AgentId(id)))
+        .expect("hook settings");
+    assert!(
+        settings.contains(&format!("'{BIN}' hook UserPromptSubmit")),
+        "{settings}"
+    );
+
+    assert!(env.ok(&["shutdown"]).contains("daemon stopped"));
+    assert!(!env.socket().exists());
+    assert!(env.ok(&["shutdown"]).contains("daemon is not running"));
+}
+
+#[test]
+fn an_auto_started_daemon_gets_a_private_state_dir_and_its_idle_exit_from_the_environment() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::without_state_dir();
+    let out = env.run_with_env(&["ls"], &[("LAZYAGENTS_IDLE_EXIT_SECS", "1")]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("no projects yet"),
+        "{out:?}"
+    );
+    let mode = std::fs::metadata(&env.state_dir).map(|m| m.permissions().mode());
+    assert_eq!(mode.expect("state dir") & 0o777, 0o700);
+    assert!(
+        wait_until(WAIT, || !env.socket().exists()),
+        "idle daemon kept running"
+    );
+}
+
+/// The client notices the daemon exit before its 5 s startup wait runs out; the message
+/// says so.
+#[test]
+fn a_daemon_that_dies_at_startup_fails_fast_and_logs_why() {
+    let env = TestEnv::new();
+    std::fs::write(env.paths().state_file(), "[[[ not toml").expect("corrupt");
+    let out = env.run(&["ls"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr.contains(&format!(
+            "daemon exited during startup; see {}",
+            env.paths().log_file().display()
+        )),
+        "{stderr}"
+    );
+    let log = std::fs::read_to_string(env.paths().log_file()).unwrap_or_default();
+    assert!(log.contains("state.toml"), "{log}");
+}
+
+#[test]
+fn sigterm_stops_the_daemon_and_its_agents() {
+    let env = TestEnv::new();
+    let mut daemon = DaemonChild::start(&env, &[]);
+    let leaves = start_tree_agents(&env.paths(), env.project.path());
+    let pid = rustix::process::Pid::from_child(&daemon.0);
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).expect("SIGTERM");
+    assert!(
+        wait_until(WAIT, || !env.socket().exists()),
+        "socket survived SIGTERM"
+    );
+    assert_eq!(leaves.alive(), Vec::<u32>::new(), "survived SIGTERM");
+    assert!(wait_until(WAIT, || daemon.exited()), "daemon still running");
+}
+
+#[test]
+fn stop_daemon_stops_a_daemon_started_in_another_locale_and_time_zone() {
+    let env = TestEnv::new();
+    let mut daemon = DaemonChild::start(&env, &[("TZ", "Asia/Tokyo"), ("LC_ALL", "ja_JP.UTF-8")]);
+    client::stop_daemon(&env.paths(), Duration::from_secs(20)).expect("stop");
+    assert!(!env.socket().exists(), "socket survived stop_daemon");
+    assert!(wait_until(WAIT, || daemon.exited()), "daemon still running");
 }
 
 #[test]
@@ -885,15 +424,150 @@ fn no_subcommand_without_a_terminal_fails_cleanly() {
     let out = env.run(&[]);
     assert!(started.elapsed() < WAIT, "{out:?}");
     assert_eq!(out.status.code(), Some(1), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("needs an interactive terminal"),
-        "{out:?}"
-    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with("lazyagents: "), "{out:?}");
+    assert!(stderr.contains("needs an interactive terminal"), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
     assert!(!env.socket().exists(), "a daemon started");
-    assert!(
-        !env.state.path().join("daemon.lock").exists(),
-        "a daemon started"
+    assert!(!env.paths().lock_file().exists(), "a daemon started");
+}
+
+#[test]
+fn hook_is_silent_and_does_not_wait_on_an_open_stdin() {
+    let dir = tempfile::tempdir().expect("dir");
+    let mut child = Command::new(BIN)
+        .args(["hook", "Stop"])
+        .env(
+            "LAZYAGENTS_AGENT_ID",
+            "00000000-0000-4000-8000-000000000000",
+        )
+        .env("LAZYAGENTS_SOCKET", dir.path().join("missing.sock"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("hook");
+    let _stdin = child.stdin.take();
+    let pid = rustix::process::Pid::from_child(&child);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sender.send(child.wait_with_output()));
+    let Ok(out) = receiver.recv_timeout(WAIT) else {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        panic!("hook blocked on stdin");
+    };
+    let out = out.expect("hook output");
+    assert!(out.status.success(), "{out:?}");
+    assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
+}
+
+/// A daemon on a runtime of the test process, shut down on drop.
+struct InProcessDaemon {
+    state: tempfile::TempDir,
+    runtime: tokio::runtime::Runtime,
+    task: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+}
+
+impl InProcessDaemon {
+    fn start() -> Self {
+        let state = tempfile::tempdir().expect("state");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let task = runtime.spawn(daemon::run(daemon::Config {
+            paths: StatePaths::new(state.path()),
+            exe: PathBuf::from(BIN),
+            idle_exit: None,
+            direnv: None,
+            claude_config: None,
+        }));
+        wait_for_daemon(&StatePaths::new(state.path()));
+        Self {
+            state,
+            runtime,
+            task: Some(task),
+        }
+    }
+
+    fn paths(&self) -> StatePaths {
+        StatePaths::new(self.state.path())
+    }
+
+    fn agents(&self) -> Vec<AgentInfo> {
+        match request(&self.paths(), Request::ListAgents) {
+            Response::Agents(agents) => agents,
+            other => panic!("unexpected reply to ListAgents: {other:?}"),
+        }
+    }
+}
+
+impl Drop for InProcessDaemon {
+    fn drop(&mut self) {
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        let paths = self.paths();
+        self.runtime.block_on(async {
+            if let Ok(mut client) = client::Client::connect(&paths).await {
+                let _ = client.request(Request::Shutdown).await;
+            }
+            let _ = tokio::time::timeout(WAIT, task).await;
+        });
+    }
+}
+
+/// The status line gives up reporting after a short budget, as Claude runs it again
+/// soon; under load a report can miss it, so the test runs it a few times too.
+#[test]
+fn the_status_line_shows_the_users_and_reports_to_the_daemon() {
+    let daemon = InProcessDaemon::start();
+    let project = tempfile::tempdir().expect("project");
+    let agent = start_agent(
+        &daemon.paths(),
+        project.path(),
+        "c",
+        AgentKind::Claude,
+        sh("read _".into()),
     );
+    let claude_config = tempfile::tempdir().expect("claude config");
+    std::fs::write(
+        claude_config.path().join("settings.json"),
+        r#"{"statusLine": {"type": "command", "command": "printf 'mine:'; head -c 11; exit 3"}}"#,
+    )
+    .expect("settings");
+    let payload =
+        r#"{"model":{"display_name":"Opus"},"cost":{"total_cost_usd":0.42},"cwd":"/nowhere"}"#;
+    let reported = |daemon: &InProcessDaemon| {
+        daemon.agents().iter().any(|a| {
+            a.id == agent.id
+                && a.usage.as_ref().map(|usage| usage.summary()) == Some("Opus · $0.42".into())
+        })
+    };
+    let mut attempts = 0;
+    while attempts < 5 && !reported(&daemon) {
+        attempts += 1;
+        let mut child = Command::new(BIN)
+            .arg("statusline")
+            .env("CLAUDE_CONFIG_DIR", claude_config.path())
+            .env("LAZYAGENTS_AGENT_ID", agent.id.to_string())
+            .env("LAZYAGENTS_SOCKET", daemon.paths().socket())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("statusline");
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(payload.as_bytes())
+            .expect("write");
+        let out = child.wait_with_output().expect("wait");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "mine:{\"model\":{\"");
+        assert_eq!(out.status.code(), Some(3));
+        wait_until(Duration::from_secs(2), || reported(&daemon));
+    }
+    assert!(reported(&daemon), "{:?}", daemon.agents());
 }
 
 /// direnv's home, data, config and cache dirs inside `root`, so the user's allow list and
@@ -960,12 +634,12 @@ fn agents_do_not_inherit_the_direnv_environment_the_daemon_started_in() {
         .collect();
     let seen = env.project.path().join("seen");
     let script = format!(
-        "echo \"${{LAZYAGENTS_TEST_LEAK-unset}} ${{LAZYAGENTS_TEST_ORIG-unset}}\" > '{0}.tmp'; mv '{0}.tmp' '{0}'",
+        "echo \"${{LAZYAGENTS_TEST_LEAK-unset}} ${{LAZYAGENTS_TEST_ORIG-unset}}\" > '{}'",
         seen.display()
     );
     let out = env.run_with_env(&["new", "seer", "--", "sh", "-c", &script], &shell);
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(wait_for_file(&seen).trim(), "unset original");
+    assert_eq!(wait_for_line(&seen), "unset original");
 }
 
 #[test]
@@ -976,13 +650,79 @@ fn an_unreadable_direnv_diff_still_starts_agents() {
     let mut shell: Vec<(&str, &str)> = base.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     shell.extend([("DIRENV_DIFF", "garbage"), ("DIRENV_DIR", "-/nowhere")]);
     let started = env.project.path().join("started");
-    let script = format!(
-        "echo started > '{0}.tmp'; mv '{0}.tmp' '{0}'",
-        started.display()
-    );
+    let script = format!("echo started > '{}'", started.display());
     let out = env.run_with_env(&["new", "starter", "--", "sh", "-c", &script], &shell);
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(wait_for_file(&started).trim(), "started");
+    assert_eq!(wait_for_line(&started), "started");
+}
+
+fn serve_foreign_protocol(socket: PathBuf) {
+    let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind");
+    listener.set_nonblocking(true).expect("nonblocking");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let listener = tokio::net::UnixListener::from_std(listener).expect("listener");
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let welcome = protocol::ServerMessage::Welcome {
+                    protocol_version: 999,
+                    daemon_version: "9.9.9".into(),
+                };
+                let _ = protocol::write_message(&mut stream, &welcome).await;
+            }
+        });
+    });
+}
+
+/// A stand-in for a daemon of another protocol: `sleep` holds its pid and the test holds
+/// the lock for it; once `sleep` exits the socket goes and the lock is released, as a real
+/// daemon's would. SIGKILLed on drop if it is still running, so a failing test leaks nothing.
+struct ForeignDaemon(Arc<Mutex<std::process::Child>>);
+
+impl ForeignDaemon {
+    fn start(env: &TestEnv) -> Self {
+        serve_foreign_protocol(env.socket());
+        let sleeper = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep");
+        let lock = env.paths().lock_file();
+        std::fs::write(&lock, sleeper.id().to_string()).expect("lock file");
+        let held = std::fs::File::open(&lock).expect("open lock file");
+        held.lock().expect("hold the lock");
+        let fake = ForeignDaemon(Arc::new(Mutex::new(sleeper)));
+        let watched = Arc::clone(&fake.0);
+        let socket = env.socket();
+        std::thread::spawn(move || {
+            while !exited(&watched) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = std::fs::remove_file(socket);
+            drop(held);
+        });
+        fake
+    }
+}
+
+fn exited(child: &Mutex<std::process::Child>) -> bool {
+    let mut child = child.lock().unwrap_or_else(PoisonError::into_inner);
+    !matches!(child.try_wait(), Ok(None))
+}
+
+impl Drop for ForeignDaemon {
+    fn drop(&mut self) {
+        let mut child = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 /// The TUI in a detached session of `scripts/tmux-harness.sh`, on a tmux server whose
@@ -995,7 +735,7 @@ impl Tui {
     const SESSION: &str = "tui";
 
     fn start(env: &TestEnv, config: &str) -> Self {
-        let config_file = env.state.path().join("tui-config.toml");
+        let config_file = env.state_dir.join("tui-config.toml");
         std::fs::write(&config_file, config).expect("tui config");
         let tui = Tui {
             sockets: tempfile::tempdir().expect("tmux socket dir"),
@@ -1003,7 +743,7 @@ impl Tui {
         let command = format!(
             "cd '{}' && exec env LAZYAGENTS_STATE_DIR='{}' LAZYAGENTS_CONFIG='{}' SHELL=/bin/sh '{BIN}'",
             env.project.path().display(),
-            env.state.path().display(),
+            env.state_dir.display(),
             config_file.display(),
         );
         tui.harness(&[
@@ -1074,7 +814,10 @@ fn the_tui_restarts_a_daemon_of_another_protocol_when_asked() {
     tui.wait_for("press a to add a project");
     assert!(exited(&fake.0), "the old daemon still runs");
     env.daemon_pid();
-    assert!(env.ok(&["ls"]).contains("no projects yet"));
+    assert_eq!(
+        request(&env.paths(), Request::ListProjects),
+        Response::Projects(Vec::new())
+    );
 }
 
 #[test]
@@ -1087,7 +830,7 @@ fn a_terminal_command_gets_the_keyboard_until_it_exits() {
 key = "T"
 description = "ask"
 context = "project"
-command = '''printf 'answer? '; until [ -e '{typed}' ]; do sleep 0.05; done; sleep 0.5; read line; echo "got:$line" > '{answer}.tmp'; mv '{answer}.tmp' '{answer}'; exit 4'''
+command = '''printf 'answer? '; until [ -e '{typed}' ]; do sleep 0.05; done; sleep 0.5; read line; echo "got:$line" > '{answer}'; exit 4'''
 "#,
         typed = typed.display(),
         answer = answer.display()
@@ -1103,52 +846,8 @@ command = '''printf 'answer? '; until [ -e '{typed}' ]; do sleep 0.05; done; sle
     tui.type_text("hello");
     tui.keys(&["Enter"]);
     std::fs::write(&typed, "").expect("typed marker");
-    assert_eq!(wait_for_file(&answer).trim(), "got:hello");
+    assert_eq!(wait_for_line(&answer), "got:hello");
     tui.wait_for("ask exited with 4");
     tui.keys(&["n"]);
     tui.wait_for(" New agent ");
-}
-
-#[test]
-fn help_says_how_agents_are_named_and_what_bare_lazyagents_does() {
-    let env = TestEnv::new();
-    let top = env.ok(&["--help"]);
-    assert!(top.contains("no command opens the TUI"), "{top}");
-    for command in ["kill", "restart", "rm", "rename", "send"] {
-        let help = env.ok(&[command, "--help"]);
-        assert!(help.contains("<project>/<name>"), "{command}: {help}");
-        assert!(help.contains("4 hex"), "{command}: {help}");
-    }
-}
-
-#[test]
-fn a_command_that_cannot_start_leaves_a_kept_agent_that_ls_explains() {
-    let env = TestEnv::new();
-    let out = env.run(&["new", "ghost", "--", "/nonexistent/lazyagents-cmd"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("failed to start"), "{stderr}");
-    assert!(stderr.contains("agent ghost was kept"), "{stderr}");
-    assert!(stderr.contains("lazyagents restart"), "{stderr}");
-    assert!(stderr.contains("lazyagents rm"), "{stderr}");
-    let ls = env.ok(&["ls"]);
-    assert!(
-        ls.contains("last error: failed to start `/nonexistent/lazyagents-cmd`"),
-        "{ls}"
-    );
-}
-
-#[test]
-fn a_state_dir_too_long_for_a_socket_is_named_as_the_problem() {
-    let parent = tempfile::tempdir().expect("parent");
-    let state = parent.path().join("s".repeat(110));
-    let out = Command::new(BIN)
-        .arg("ls")
-        .env("LAZYAGENTS_STATE_DIR", &state)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run lazyagents");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{out:?}");
-    assert!(stderr.contains("too long for a unix socket"), "{stderr}");
 }

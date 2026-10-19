@@ -2,6 +2,8 @@ mod commands;
 mod daemon_cmd;
 mod hook;
 mod statusline;
+#[cfg(test)]
+mod tests;
 
 use std::io::Write;
 use std::path::PathBuf;
