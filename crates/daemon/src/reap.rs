@@ -2,7 +2,6 @@
 //! process group or session.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use protocol::process::{self, Process, Start};
@@ -12,15 +11,6 @@ use rustix::process::{
 
 const POLL: Duration = Duration::from_millis(25);
 const KILL_WAIT: Duration = Duration::from_millis(500);
-
-static READINGS: AtomicU64 = AtomicU64::new(0);
-
-/// How many process tables this process has read successfully, so tests can wait for
-/// readings in place of sleeping.
-#[doc(hidden)]
-pub fn readings() -> u64 {
-    READINGS.load(Ordering::SeqCst)
-}
 
 /// A process identified by its pid and start time, so a recycled pid is never mistaken
 /// for it.
@@ -39,9 +29,7 @@ impl ProcessTable {
     /// `None` when the table cannot be read or lists nothing, so a bad reading is never
     /// taken to mean that every process is gone.
     pub fn read() -> Option<Self> {
-        Self::from_processes(process::all()).inspect(|_| {
-            READINGS.fetch_add(1, Ordering::SeqCst);
-        })
+        Self::from_processes(process::all())
     }
 
     fn from_processes(processes: Option<Vec<Process>>) -> Option<Self> {
@@ -390,13 +378,6 @@ mod tests {
         let table = ProcessTable::read().expect("a process table");
         assert_eq!(table.start(pid), protocol::process::start(pid));
         assert!(table.start(pid).is_some());
-    }
-
-    #[test]
-    fn readings_count_successful_tables() {
-        let before = readings();
-        assert!(ProcessTable::read().is_some());
-        assert!(readings() > before);
     }
 
     #[test]
