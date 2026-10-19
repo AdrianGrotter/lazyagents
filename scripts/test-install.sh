@@ -17,11 +17,13 @@ failures=0
 # shellcheck source=SCRIPTDIR/install-linux.sh
 source "$root/scripts/install-linux.sh"
 
+# The output of the last command run through expect, for `says` in the next one.
+out=""
 expect() {
   local want=$1 desc=$2 got
   shift 2
-  if "$@" >"$tmp/out.new" 2>&1; then got=0; else got=$?; fi
-  mv "$tmp/out.new" "$tmp/out"
+  if "$@" >"$tmp/out" 2>&1; then got=0; else got=$?; fi
+  out=$(<"$tmp/out")
   if [[ $got == "$want" ]]; then
     echo "ok   $desc"
   else
@@ -31,11 +33,12 @@ expect() {
   fi
 }
 
-same() { diff <(printf '%s\n' "$2") <(printf '%s\n' "$1"); }
+same() { [[ $1 == "$2" ]] || diff <(printf '%s\n' "$2") <(printf '%s\n' "$1"); }
 says() {
   local text
-  for text in "$@"; do grep -qF "$text" "$tmp/out" || return 1; done
+  for text in "$@"; do [[ $out == *"$text"* ]] || return 1; done
 }
+says_line() { [[ $'\n'$out$'\n' == *$'\n'"$1"$'\n'* ]]; }
 links_of() { nix_store_links <"$fixtures/$1"; }
 
 expect 0 "finds the interpreter and every runpath entry in the nix store" same "$(links_of nix-x86_64.txt)" \
@@ -69,12 +72,13 @@ stubs="$tmp/stubs"
 mkdir -p "$stubs"
 cat >"$stubs/readelf" <<'EOF'
 #!/usr/bin/env bash
-if [[ -e $STUB_STATE/patched ]]; then cat "$STUB_FIXTURES/system-x86_64.txt"; else cat "$STUB_FIXTURES/$STUB_ELF"; fi
+if [[ -e $STUB_STATE/patched ]]; then fixture=system-x86_64.txt; else fixture=$STUB_ELF; fi
+printf '%s\n' "$(<"$STUB_FIXTURES/$fixture")"
 EOF
 cat >"$stubs/patchelf" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >>"$STUB_STATE/patchelf.log"
-touch "$STUB_STATE/patched"
+: >"$STUB_STATE/patched"
 EOF
 cat >"$stubs/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -99,7 +103,7 @@ chmod +x "$stubs"/*
 export STUB_FIXTURES=$fixtures STUB_TMP=$tmp
 fresh() {
   export STUB_STATE="$tmp/state-$1" STUB_ELF=$2
-  rm -rf "$STUB_STATE"
+  if [[ -e $STUB_STATE ]]; then rm -rf "$STUB_STATE"; fi
   mkdir -p "$STUB_STATE/root/bin" "$STUB_STATE/build/bin"
   printf '#!/usr/bin/env bash\necho "lazyagents old"\n' >"$STUB_STATE/root/bin/lazyagents"
   printf '#!/usr/bin/env bash\n[[ -e $STUB_STATE/broken ]] && exit 1\necho "lazyagents built"\n' >"$STUB_STATE/build/bin/lazyagents"
@@ -115,7 +119,7 @@ installed() { same "$("$STUB_STATE/root/bin/lazyagents")" "$1"; }
 
 fresh relink nix-x86_64.txt
 expect 0 "relinks a nix-linked binary to the system loader" relink "$tmp/sys/lib64" "$tmp/sys/lib"
-expect 0 "patchelf sets the system loader and drops the runpath" same "$(cat "$STUB_STATE/patchelf.log")" \
+expect 0 "patchelf sets the system loader and drops the runpath" same "$(<"$STUB_STATE/patchelf.log")" \
   "--set-interpreter $tmp/sys/lib64/ld-linux-x86-64.so.2 --remove-rpath $STUB_STATE/build/bin/lazyagents"
 expect 0 "installs the relinked binary" installed "lazyagents built"
 
@@ -126,13 +130,13 @@ expect 0 "installs the system-linked binary" installed "lazyagents built"
 
 fresh noloader nix-aarch64.txt
 expect 1 "fails when the system has no loader for it" relink "$tmp/sys/lib64"
-expect 0 "says which loader it looked for" grep -q "ld-linux-aarch64.so.1" "$tmp/out"
+expect 0 "says which loader it looked for" says "ld-linux-aarch64.so.1"
 expect 0 "keeps the installed binary when it has no loader" installed "lazyagents old"
 
 fresh broken nix-x86_64.txt
-touch "$STUB_STATE/broken"
+: >"$STUB_STATE/broken"
 expect 1 "fails when the relinked binary does not run" relink "$tmp/sys/lib64"
-expect 0 "shows why it does not run" grep -q "does not run" "$tmp/out"
+expect 0 "shows why it does not run" says "does not run"
 expect 0 "keeps the installed binary when the relinked one does not run" installed "lazyagents old"
 
 bare="$tmp/bare"
@@ -144,7 +148,7 @@ expect 0 "names the missing readelf and gives the rustup advice" \
   says "readelf is not on PATH" "cargo install --locked"
 ln -s "$stubs/readelf" "$bare/readelf"
 expect 1 "fails without patchelf" relink_with "$bare" "$tmp/sys/lib64"
-expect 0 "names the missing patchelf" grep -q "patchelf is not on PATH" "$tmp/out"
+expect 0 "names the missing patchelf" says "patchelf is not on PATH"
 expect 0 "keeps the installed binary when a tool is missing" installed "lazyagents old"
 
 # The full run: only with uname and cargo resolving to the stubs and the install root in $tmp.
@@ -162,7 +166,7 @@ script() {
   (cd "$root" && HOME="$tmp/home" TMPDIR="$tmp" PATH="$stubs:$PATH" LAZYAGENTS_INSTALL_ROOT="$dest" scripts/install.sh)
 }
 expect 0 "install.sh on Linux installs into LAZYAGENTS_INSTALL_ROOT" script
-expect 0 "install.sh runs the installed binary" grep -qx "lazyagents built" "$tmp/out"
+expect 0 "install.sh runs the installed binary" says_line "lazyagents built"
 expect 0 "install.sh installs the binary it built" test -x "$dest/bin/lazyagents"
 
 if [[ $failures -gt 0 ]]; then

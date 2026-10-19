@@ -24,6 +24,8 @@ expect() {
 msg() { printf '%s\n' "$1" >"$tmp/msg"; "$root/.githooks/commit-msg" "$tmp/msg"; }
 expect 0 "commit-msg accepts typed scoped subject" msg "feat(daemon): spawn agents in a pty"
 expect 0 "commit-msg accepts unscoped subject" msg "docs: describe status detection"
+bare_msg() { printf '%s' "$1" >"$tmp/msg"; "$root/.githooks/commit-msg" "$tmp/msg"; }
+expect 0 "commit-msg accepts a subject without a trailing newline" bare_msg "docs: describe status detection"
 expect 0 "commit-msg accepts breaking marker" msg "feat(protocol)!: version the handshake"
 expect 0 "commit-msg accepts merge commits" msg "Merge branch 'x'"
 expect 0 "commit-msg accepts merged pull requests" msg "Merge pull request #1 from a/b"
@@ -67,7 +69,13 @@ printf 'pub fn a() {}\n' >"$stub_repo/lib.rs"
 git -C "$stub_repo" add lib.rs
 git -C "$stub_repo" -c user.name=t -c user.email=t@t commit -qm init
 stub_stop() { PATH="$tmp/bin:$PATH" CARGO_STUB_EXIT=${1:-0} stop_hook_in "$stub_repo"; }
-clippy_runs() { [[ $(wc -l <"$CARGO_STUB_LOG" 2>/dev/null || echo 0) -eq $1 ]]; }
+clippy_runs() {
+  local runs=0 line
+  if [[ -f $CARGO_STUB_LOG ]]; then
+    while IFS= read -r line; do runs=$((runs + 1)); done <"$CARGO_STUB_LOG"
+  fi
+  ((runs == $1))
+}
 
 printf 'pub fn a() { }\n' >"$stub_repo/lib.rs"
 expect 0 "clippy stop hook runs clippy on a changed file" stub_stop

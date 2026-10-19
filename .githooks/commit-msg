@@ -2,7 +2,7 @@
 # Conventional Commits gate; the rules live in .claude/skills/committing/SKILL.md.
 set -euo pipefail
 
-subject=$(head -n1 "$1")
+IFS= read -r subject <"$1" || true
 types='feat|fix|docs|refactor|test|chore|build|ci|perf'
 scopes='protocol|daemon|tui|cli|client|docs|nix|repo'
 pattern="^($types)(\(($scopes)\))?!?: [^ ].*$"

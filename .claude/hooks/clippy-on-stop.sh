@@ -2,7 +2,7 @@
 # Stop: keep Claude working while clippy fails on uncommitted Rust changes.
 set -euo pipefail
 
-input=$(cat)
+input=$(</dev/stdin)
 [[ $(jq -r '.stop_hook_active // false' <<<"$input") == true ]] && exit 0
 cd "${CLAUDE_PROJECT_DIR:-.}"
 paths=('*.rs' '*Cargo.toml' 'Cargo.lock')
