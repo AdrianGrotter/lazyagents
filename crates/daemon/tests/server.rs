@@ -1699,12 +1699,15 @@ async fn exited_agent_leaves_no_group_members() {
     let mut conn = Conn::open(daemon.path()).await;
     let (project, dir) = add_project(&mut conn).await;
     let pidfile = dir.path().join("pids");
+    let released = dir.path().join("release");
     let script = format!(
-        "(nohup sleep 311 >/dev/null 2>&1 & echo $! > '{}'); sleep 2; exit 0",
-        pidfile.display()
+        "(nohup sleep 311 >/dev/null 2>&1 & echo $! > '{}'); {}; exit 0",
+        pidfile.display(),
+        wait_for_release(&released)
     );
     let agent = create_owned(&mut conn, &project, "member", &sh(&script)).await;
     let leaves = Leaves::read(&pidfile, 1).await;
+    daemon.release(&released).await;
     conn.wait_status(agent.id, Status::Exited(0)).await;
     assert_eq!(
         gone_within(&leaves, WAIT).await,
@@ -1719,12 +1722,15 @@ async fn exit_reaping_does_not_block_requests() {
     let mut conn = Conn::open(daemon.path()).await;
     let (project, dir) = add_project(&mut conn).await;
     let pidfile = dir.path().join("pids");
+    let released = dir.path().join("release");
     let script = format!(
-        "(nohup sh -c \"trap '' TERM HUP; echo \\$\\$ > '{}'; exec sleep 315\" </dev/null >/dev/null 2>&1 &); sleep 1; exit 0",
-        pidfile.display()
+        "(nohup sh -c \"trap '' TERM HUP; echo \\$\\$ > '{}'; exec sleep 315\" </dev/null >/dev/null 2>&1 &); {}; exit 0",
+        pidfile.display(),
+        wait_for_release(&released)
     );
     let agent = create_owned(&mut conn, &project, "stubborn", &sh(&script)).await;
     let leaves = Leaves::read(&pidfile, 1).await;
+    daemon.release(&released).await;
     let deadline = tokio::time::Instant::now() + WAIT;
     let mut slowest = Duration::ZERO;
     loop {
