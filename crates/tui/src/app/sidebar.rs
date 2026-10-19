@@ -781,6 +781,22 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_alt_j_and_k_move_to_active_agents_as_tmux_sends_ctrl_cmd() {
+        let p = project("p");
+        let a = agent(&p, "a", Status::Working);
+        let b = agent(&p, "b", Status::Idle);
+        let c = agent(&p, "c", Status::Working);
+        let (mut app, _) = loaded(vec![p], vec![a.clone(), b, c.clone()]);
+        app.select_agent(a.id);
+        let ctrl_alt =
+            |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let _ = app.on_key(ctrl_alt('j'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(c.id));
+        let _ = app.on_key(ctrl_alt('k'));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+    }
+
+    #[test]
     fn ctrl_cmd_j_says_when_no_other_agent_is_active() {
         let p = project("p");
         let a = agent(&p, "a", Status::Idle);

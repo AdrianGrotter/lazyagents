@@ -2855,17 +2855,21 @@ mod tests {
     }
 
     #[test]
-    fn help_lists_every_binding_at_100x40() {
+    fn help_lists_every_binding_at_100x42() {
         let mut app = App::new("/w".into(), "/bin/sh".into(), None, Config::default());
         app.popup = Some(Popup::Help(Help::default()));
-        let (text, _) = render_at(&app, 100, 40);
+        let (text, _) = render_at(&app, 100, 42);
         assert!(!text.contains("more below"), "{text}");
         for (key, action) in [
             ("j/down, k/up", "move down / up in the focused box"),
             ("ctrl-j, ctrl-k", "next / previous agent, from either box"),
             (
                 "ctrl-cmd-j, ctrl-cmd-k",
-                "next / previous active agent (starting, working, needs input)",
+                "next / previous active agent, from either box",
+            ),
+            (
+                "ctrl-alt-j, ctrl-alt-k",
+                "next / previous active agent, from either box",
             ),
             ("h/left/backtab/1, l/right/2", "focus Projects / Agents"),
             ("tab", "switch between Projects and Agents"),
@@ -2897,6 +2901,7 @@ mod tests {
             ("ctrl-j, ctrl-k", "next / previous agent"),
             ("ctrl-q J, ctrl-q K", "next / previous active agent"),
             ("ctrl-cmd-j, ctrl-cmd-k", "next / previous active agent"),
+            ("ctrl-alt-j, ctrl-alt-k", "next / previous active agent"),
             ("s", "scroll the agent's history"),
             ("ctrl-q s", "scroll the agent's history"),
             ("ctrl-q ctrl-q", "send ctrl-q to the agent"),
@@ -2941,7 +2946,7 @@ mod tests {
         let p = project("p");
         let (mut app, _) = loaded_with(config, vec![p.clone()], vec![agent(&p, "a", Status::Idle)]);
         app.popup = Some(Popup::Help(Help::default()));
-        let (text, _) = render_at(&app, 100, 40);
+        let (text, _) = render_at(&app, 100, 42);
         for (key, action) in [
             ("M/ctrl-n", "new agent"),
             ("ctrl-x, Q", "quit (agents keep running)"),
@@ -2995,7 +3000,7 @@ mod tests {
         let config = configured("[keys.pane]\nleave = [\"q\", \"esc\", \"ctrl-alt-backspace\"]\n");
         let mut app = App::new("/w".into(), "/bin/sh".into(), None, config);
         app.popup = Some(Popup::Help(Help::default()));
-        let (text, _) = render_at(&app, 100, 40);
+        let (text, _) = render_at(&app, 100, 42);
         let widest = line_with(&text, "ctrl-q q/esc/ctrl-alt-backspace");
         let start = column(widest, "back to the sidebar");
         assert_eq!(

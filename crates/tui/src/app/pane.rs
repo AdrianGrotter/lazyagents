@@ -477,6 +477,27 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_alt_j_and_k_switch_to_active_agents_and_never_reach_the_agent() {
+        let p = project("p");
+        let a = agent(&p, "a", Status::Working);
+        let b = agent(&p, "b", Status::Idle);
+        let c = agent(&p, "c", Status::Working);
+        let (mut app, _) = loaded(vec![p], vec![a.clone(), b, c.clone()]);
+        let _ = app.on_key(code(KeyCode::Enter));
+        let ctrl_alt =
+            |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        assert_eq!(
+            app.on_key(ctrl_alt('j')),
+            vec![Effect::Send(Request::Subscribe { id: c.id })]
+        );
+        assert_eq!(
+            app.on_key(ctrl_alt('k')),
+            vec![Effect::Send(Request::Subscribe { id: a.id })]
+        );
+        assert_eq!(app.focus, Focus::Pane);
+    }
+
+    #[test]
     fn ctrl_cmd_j_and_prefix_big_j_switch_to_active_agents_in_the_pane() {
         let p = project("p");
         let a = agent(&p, "a", Status::Working);

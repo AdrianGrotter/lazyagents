@@ -22,7 +22,7 @@ Two input modes:
 |---|---|
 | `j`/`k`, `↑`/`↓` | move within the Agents box |
 | `ctrl-j`/`ctrl-k` | next / previous agent in the Agents box, from either box; focuses Agents |
-| `ctrl-cmd-j`/`ctrl-cmd-k` | next / previous active agent in the Agents box: one that is starting, working or needs input, skipping idle, `done`, exited and stopped ones. From either box; focuses Agents. Needs a terminal that reports `cmd` (kitty keyboard protocol) |
+| `ctrl-cmd-j`/`ctrl-cmd-k`, `ctrl-alt-j`/`ctrl-alt-k` | next / previous active agent in the Agents box: one that is starting, working or needs input, skipping idle, `done`, exited and stopped ones. From either box; focuses Agents. `ctrl-cmd-j` needs a terminal that reports `cmd` (kitty keyboard protocol); tmux has no `cmd` and delivers it as `ctrl-alt-j`, which is why both are bound |
 | `h`/`l`, `←`/`→`, `tab`/`shift-tab` | switch between Projects and Agents |
 | `1`/`2` | focus Projects / Agents; each box's title starts with the first plain digit key bound to focus it (`[1] Projects`, `[2] Agents`), or no number when none is |
 | `enter` | focus main pane (pane mode); on a stopped or exited agent, start it (Claude: resume session) and focus the pane once it runs. With Projects focused: open the project switcher |
@@ -252,14 +252,17 @@ Direct keys act without the prefix:
 | `ctrl-j` | next agent in the Agents panel, staying in the pane |
 | `ctrl-k` | previous agent in the Agents panel, staying in the pane |
 | `ctrl-cmd-j`, `ctrl-cmd-k` | next / previous active agent, staying in the pane |
+| `ctrl-alt-j`, `ctrl-alt-k` | the same; tmux delivers `ctrl-cmd-j`/`ctrl-cmd-k` as these |
 | `ctrl-h`, `ctrl-]` | back to the sidebar; legacy terminals report `ctrl-]` as `ctrl-5`, which works too |
 
 These keys never reach the agent, so in Claude Code `ctrl-j` no longer inserts a newline,
 `ctrl-k` no longer deletes to the end of the line and `ctrl-h` no longer deletes a
 character (`backspace` still does). A terminal that sends `ctrl-h` for `backspace`, as
 some Linux setups do, leaves the pane on every `backspace`; macOS terminals send DEL
-instead. `ctrl-l` still reaches the agent. To get any of these keys back, rebind or empty
-`direct_next`, `direct_previous` and `direct_leave` in `[keys.pane]`
+instead. `ctrl-alt-j`, which Claude Code also reads as a newline, no longer reaches it
+either. `ctrl-l` still reaches the agent. To get any of these keys back, rebind or empty
+`direct_next`, `direct_previous`, `direct_next_active`, `direct_previous_active` and
+`direct_leave` in `[keys.pane]`
 ([configuration.md](configuration.md#keyspane)). `alt-[` and `alt-]` are not bound: they
 reach the agent like any other key.
 

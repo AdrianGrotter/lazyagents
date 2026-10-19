@@ -18,7 +18,7 @@ const SIDEBAR_HELP: [(&[Action], &str); 23] = [
     ),
     (
         &[Action::NextActive, Action::PreviousActive],
-        "next / previous active agent (starting, working, needs input)",
+        "next / previous active agent, from either box",
     ),
     (
         &[Action::FocusProjects, Action::FocusAgents],
@@ -72,6 +72,36 @@ const SIDEBAR_HELP: [(&[Action], &str); 23] = [
 /// Descriptions never wrap narrower than this.
 const MIN_TEXT: usize = 16;
 
+/// A row's keys wider than this split into one row per key, so one action with many keys
+/// does not widen the key column for every row.
+const SPLIT_KEYS: usize = 27;
+
+/// The key column of one entry: each action's keys joined by `/`, the actions by `, `.
+/// When that is wider than `SPLIT_KEYS` and every action has the same number of keys,
+/// one row per key position instead (`ctrl-cmd-j, ctrl-cmd-k` then `ctrl-alt-j, ctrl-alt-k`).
+fn key_rows(keys: &[Vec<String>]) -> Vec<String> {
+    let joined = keys
+        .iter()
+        .map(|keys| match keys.is_empty() {
+            true => "unbound".to_string(),
+            false => keys.join("/"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let count = keys.first().map_or(0, Vec::len);
+    if text_width(&joined) <= SPLIT_KEYS || count < 2 || keys.iter().any(|k| k.len() != count) {
+        return vec![joined];
+    }
+    (0..count)
+        .map(|i| {
+            keys.iter()
+                .map(|k| k[i].as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .collect()
+}
+
 /// A row of the help popup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
@@ -100,12 +130,15 @@ impl Row {
 /// fit `width` cells.
 pub fn rows(app: &App, filter: &str, width: usize) -> Vec<Row> {
     let keymap = &app.keymap;
+    let spelled = |keys: Vec<keymap::KeySpec>| keys.iter().map(ToString::to_string).collect();
     let sidebar: Vec<(String, String, bool)> = SIDEBAR_HELP
         .iter()
-        .map(|(actions, text)| {
-            let keys: Vec<String> = actions.iter().map(|a| keymap.describe(*a)).collect();
+        .flat_map(|(actions, text)| {
+            let keys: Vec<Vec<String>> = actions.iter().map(|a| spelled(keymap.keys(*a))).collect();
             let applies = actions.iter().any(|a| app.unavailable(*a).is_none());
-            (keys.join(", "), text.to_string(), applies)
+            key_rows(&keys)
+                .into_iter()
+                .map(move |keys| (keys, text.to_string(), applies))
         })
         .collect();
     let mut pane = Vec::new();
@@ -123,14 +156,13 @@ pub fn rows(app: &App, filter: &str, width: usize) -> Vec<Row> {
         let keys: Vec<String> = actions.iter().map(|a| keymap.describe(*a)).collect();
         pane.push((keys.join(", "), text.to_string(), true));
         if actions.iter().any(|a| !keymap.direct_keys(*a).is_empty()) {
-            let direct: Vec<String> = actions
+            let direct: Vec<Vec<String>> = actions
                 .iter()
-                .map(|a| match keymap.direct_keys(*a) {
-                    keys if keys.is_empty() => "unbound".to_string(),
-                    keys => keymap::join(&keys),
-                })
+                .map(|a| spelled(keymap.direct_keys(*a)))
                 .collect();
-            pane.push((direct.join(", "), text.to_string(), true));
+            for keys in key_rows(&direct) {
+                pane.push((keys, text.to_string(), true));
+            }
         }
     }
     pane.extend([

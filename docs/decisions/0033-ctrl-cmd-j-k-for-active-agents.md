@@ -21,6 +21,11 @@ prefix, `J`/`K` do the same for terminals that cannot report `cmd`. Key strings 
 `cmd-` modifier (alias `super-`), matched exactly, so `ctrl-j` no longer fires on
 `ctrl-cmd-j`.
 
+`ctrl-alt-j`/`ctrl-alt-k` are bound to the same actions. tmux has no super modifier: it
+reads kitty's `ESC [106;13u` for ctrl+cmd+j as ctrl+meta+j and hands the pane `ESC ^J`,
+which lazyagents sees as `ctrl-alt-j`. Without that binding the key reached Claude Code,
+which reads `ESC ^J` as a newline.
+
 ## Alternatives
 
 - `alt-j`/`alt-k`: kitty on macOS sends Option as alt only with `macos_option_as_alt` set,
@@ -33,7 +38,7 @@ prefix, `J`/`K` do the same for terminals that cannot report `cmd`. Key strings 
 
 ## Consequences
 
-The motion is a modifier on the keys it filters, and no agent loses a key. `ctrl-cmd-j`
-only works in terminals that speak the kitty keyboard protocol and pass the chord through;
-elsewhere only `ctrl-q J`/`K` reach it. The pane's next and previous rows in the help popup
-are paired so the popup still fits 100×40.
+The motion is a modifier on the keys it filters. `ctrl+cmd+j` works directly in kitty and
+through tmux; elsewhere `ctrl-alt-j` or `ctrl-q J`/`K` reach it. Agents lose `ctrl-alt-j`
+and `ctrl-alt-k`, a rarely typed second newline key in Claude Code. The help popup splits a
+row whose keys are too wide into one row per key, and its complete list now needs 100×42.

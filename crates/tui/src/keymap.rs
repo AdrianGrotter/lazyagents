@@ -269,7 +269,9 @@ impl Keymap {
                 ("ctrl-j", NextAgent),
                 ("ctrl-k", PreviousAgent),
                 ("ctrl-cmd-j", NextActive),
+                ("ctrl-alt-j", NextActive),
                 ("ctrl-cmd-k", PreviousActive),
+                ("ctrl-alt-k", PreviousActive),
                 ("h", FocusProjects),
                 ("left", FocusProjects),
                 ("backtab", FocusProjects),
@@ -321,7 +323,9 @@ impl Keymap {
                 ("ctrl-j", PaneNext),
                 ("ctrl-k", PanePrevious),
                 ("ctrl-cmd-j", PaneNextActive),
+                ("ctrl-alt-j", PaneNextActive),
                 ("ctrl-cmd-k", PanePreviousActive),
+                ("ctrl-alt-k", PanePreviousActive),
             ]),
         }
     }

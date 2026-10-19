@@ -71,7 +71,8 @@ Key strings: a single character (`q`, `?`, `]`), `space`, `enter`, `esc`, `tab`,
 name for `cmd-`. Write a shifted letter as the letter itself (`R`, not `shift-r`). A bare
 character matches whether or not the terminal reports SHIFT; with `ctrl` or `alt`, SHIFT
 counts, so `ctrl-Q` is not `ctrl-q`. Only terminals that speak the kitty keyboard protocol
-report `cmd` (as the super modifier); elsewhere a `cmd-` key never fires.
+report `cmd` (as the super modifier); elsewhere a `cmd-` key never fires. tmux has no
+`cmd` and passes it on as `alt`, so under tmux `ctrl-cmd-j` arrives as `ctrl-alt-j`.
 
 ### `[keys.sidebar]`
 
@@ -84,8 +85,8 @@ report `cmd` (as the super modifier); elsewhere a `cmd-` key never fires.
 | `up` | `k`, `up` |
 | `next_agent` | `ctrl-j` |
 | `previous_agent` | `ctrl-k` |
-| `next_active` | `ctrl-cmd-j` |
-| `previous_active` | `ctrl-cmd-k` |
+| `next_active` | `ctrl-cmd-j`, `ctrl-alt-j` |
+| `previous_active` | `ctrl-cmd-k`, `ctrl-alt-k` |
 | `focus_projects` | `h`, `left`, `backtab`, `1` |
 | `focus_agents` | `l`, `right`, `2` |
 | `toggle_focus` | `tab` |
@@ -131,8 +132,8 @@ its own.
 | `direct_leave` | `ctrl-]`, `ctrl-5`, `ctrl-h` | leave without the prefix |
 | `direct_next` | `ctrl-j` | next agent without the prefix, staying in the pane |
 | `direct_previous` | `ctrl-k` | previous agent without the prefix, staying in the pane |
-| `direct_next_active` | `ctrl-cmd-j` | next active agent without the prefix, staying in the pane |
-| `direct_previous_active` | `ctrl-cmd-k` | previous active agent without the prefix, staying in the pane |
+| `direct_next_active` | `ctrl-cmd-j`, `ctrl-alt-j` | next active agent without the prefix, staying in the pane |
+| `direct_previous_active` | `ctrl-cmd-k`, `ctrl-alt-k` | previous active agent without the prefix, staying in the pane |
 
 Setting `prefix` also makes pressing it twice send it to the agent, unless `send_prefix`
 is set too. The direct keys may not contain the prefix.
