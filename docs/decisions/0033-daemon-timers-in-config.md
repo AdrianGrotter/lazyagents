@@ -20,8 +20,9 @@ grace period, snapshot wait and drain. `Timings::default()` holds the production
 and the binary always uses it; nothing in the environment or the config file changes
 them. The daemon's integration tests run with one shorter profile (`TIMINGS` in
 `tests/server.rs`). `Timings::shutdown_fits` states how shutdown's timers relate, and a
-test checks it for both profiles. Timers no test waits on (the Claude silences, the stop
-grace, the tick) stay constants.
+test checks it for both profiles. Timers that cost the tests little stay constants: the
+Claude silences and the tick, which no test waits on, and the 1 s stop grace, which a few
+kill and exit-reaping tests wait out once each when a child ignores the hangup.
 
 ## Alternatives
 
