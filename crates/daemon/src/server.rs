@@ -28,7 +28,7 @@ use crate::lock::InstanceLock;
 use crate::outbox::{self, Outbox, Outgoing};
 use crate::reap::{self, ProcessTable, Tracked};
 use crate::spawn::{Launch, SpawnContext, blocked_envrc_hint, hook_settings, spawn_spec};
-use crate::status::{awaits_trust, on_hook, settle, trust_keys};
+use crate::status::{GenericWindows, Times, awaits_trust, on_hook, settle, trust_keys};
 use crate::store::{self, AgentRecord, PendingWorktree, StoredState};
 use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent, session_title};
 use crate::{direnv, git};
@@ -46,6 +46,50 @@ pub struct Config {
     /// Claude Code's user config directory, whose `settings.json` may hold the user's status
     /// line; `None` reads no user settings.
     pub claude_config: Option<PathBuf>,
+    pub timings: Timings,
+}
+
+/// How often the daemon looks at things and how long it waits for them. The default is
+/// what it runs with; shorter timings let tests wait less for the behaviour they check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timings {
+    /// How often the socket is checked and the idle exit considered.
+    pub housekeeping: Duration,
+    /// How often the process table is read for the agents' descendants.
+    pub snapshot: Duration,
+    pub generic: GenericWindows,
+    /// How long agents get to exit after the hangup at shutdown before they are killed.
+    pub shutdown_grace: Duration,
+    /// How long shutdown waits for a process table reading still running.
+    pub shutdown_snapshot_wait: Duration,
+    /// How long after it began shutdown waits for the requests in flight.
+    pub shutdown_drain: Duration,
+}
+
+impl Default for Timings {
+    fn default() -> Self {
+        Self {
+            housekeeping: HOUSEKEEPING,
+            snapshot: SNAPSHOT,
+            generic: GenericWindows::default(),
+            shutdown_grace: SHUTDOWN_GRACE,
+            shutdown_snapshot_wait: SHUTDOWN_SNAPSHOT_WAIT,
+            shutdown_drain: SHUTDOWN_DRAIN,
+        }
+    }
+}
+
+impl Timings {
+    /// Shutdown stops every agent (a snapshot wait, the grace period and a table reading),
+    /// waits for the requests in flight until `shutdown_drain` after it began, then stops
+    /// what turned up meanwhile (the grace period and a reading again), all within the
+    /// client's `protocol::SHUTDOWN_WAIT` with time to spare.
+    pub fn shutdown_fits(&self) -> bool {
+        let first_stop = self.shutdown_snapshot_wait + self.shutdown_grace + self.snapshot;
+        first_stop <= self.shutdown_drain
+            && self.shutdown_drain + self.shutdown_grace + Duration::from_secs(5)
+                <= protocol::SHUTDOWN_WAIT
+    }
 }
 
 type ClientId = u64;
@@ -94,7 +138,6 @@ const HOUSEKEEPING: Duration = Duration::from_secs(1);
 const SNAPSHOT: Duration = Duration::from_secs(1);
 const SNAPSHOT_WAIT: Duration = Duration::from_secs(2);
 const SHUTDOWN_SNAPSHOT_WAIT: Duration = Duration::from_secs(10);
-/// How long after it began shutdown waits for the requests in flight.
 const SHUTDOWN_DRAIN: Duration = Duration::from_secs(13);
 const WHEEL_LINES: i32 = 3;
 
@@ -137,12 +180,13 @@ pub async fn run_with_readings(config: Config, readings: Arc<AtomicU64>) -> anyh
     let mut daemon = Daemon::new(paths.clone(), config.exe, config.direnv, state, events_tx);
     daemon.claude_config = config.claude_config;
     daemon.readings = readings;
+    daemon.timings = config.timings;
     daemon.revert_direnv = daemon.direnv.as_deref().is_some_and(inherits_direnv_env);
     daemon.discard_leftovers();
     let mut next_client: ClientId = 1;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut housekeeping = tokio::time::interval(HOUSEKEEPING);
+    let mut housekeeping = tokio::time::interval(config.timings.housekeeping);
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut busy_at = Instant::now();
 
@@ -376,13 +420,16 @@ impl Agent {
     }
 
     /// Moves the agent to the status its output timing calls for, returning whether it moved.
-    fn settle(&mut self, now: Instant) -> bool {
+    fn settle(&mut self, windows: GenericWindows, now: Instant) -> bool {
         let Some(status) = settle(
+            windows,
             self.record.kind,
             self.status,
-            self.started,
-            self.status_since,
-            self.last_output,
+            Times {
+                started: self.started,
+                status_since: self.status_since,
+                last_output: self.last_output,
+            },
             !self.subagents.is_empty(),
             now,
         ) else {
@@ -453,6 +500,7 @@ struct Daemon {
     shutdown_began: Option<Instant>,
     /// How many process tables this daemon has read for its agents' descendants.
     readings: Arc<AtomicU64>,
+    timings: Timings,
 }
 
 /// A worktree create's name, and the request that waits for it.
@@ -512,6 +560,7 @@ impl Daemon {
             shutting_down: false,
             shutdown_began: None,
             readings: Arc::default(),
+            timings: Timings::default(),
         }
     }
 
@@ -1431,10 +1480,10 @@ impl Daemon {
         let began = *self.shutdown_began.get_or_insert_with(Instant::now);
         self.finish_snapshot(None);
         let ids = self.stoppable();
-        self.stop(&ids, SHUTDOWN_GRACE);
-        if self.drain_jobs(began + SHUTDOWN_DRAIN) {
+        self.stop(&ids, self.timings.shutdown_grace);
+        if self.drain_jobs(began + self.timings.shutdown_drain) {
             let ids = self.stoppable();
-            self.stop(&ids, SHUTDOWN_GRACE);
+            self.stop(&ids, self.timings.shutdown_grace);
         }
         if !self.leftovers.is_empty() {
             let pids: Vec<(u32, Start)> = self
@@ -1508,7 +1557,7 @@ impl Daemon {
         let wait = if covering.is_some() {
             SNAPSHOT_WAIT
         } else {
-            SHUTDOWN_SNAPSHOT_WAIT
+            self.timings.shutdown_snapshot_wait
         };
         match pending.rx.recv_timeout(wait) {
             Ok(results) => self.snapshot_finished(pending.waiters, results),
@@ -1947,7 +1996,7 @@ impl Daemon {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.snapshot = None,
             }
         }
-        if now.duration_since(self.last_snapshot) < SNAPSHOT {
+        if now.duration_since(self.last_snapshot) < self.timings.snapshot {
             return;
         }
         self.last_snapshot = now;
@@ -2061,7 +2110,7 @@ impl Daemon {
         if self.leftovers.is_empty()
             || self
                 .leftovers_retried
-                .is_some_and(|at| now.duration_since(at) < SNAPSHOT)
+                .is_some_and(|at| now.duration_since(at) < self.timings.snapshot)
         {
             return;
         }
@@ -2083,11 +2132,12 @@ impl Daemon {
         self.retry_leftovers(now);
         self.refresh_tracked(now);
         let mut changed = Vec::new();
+        let windows = self.timings.generic;
         for (id, agent) in &mut self.agents {
             if agent.terminal.is_none() {
                 continue;
             }
-            if agent.settle(now) {
+            if agent.settle(windows, now) {
                 changed.push(*id);
             }
         }
@@ -2414,16 +2464,9 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(10);
 
-    /// Shutdown stops every agent (a snapshot wait, the grace period and table readings),
-    /// waits for the requests in flight until `SHUTDOWN_DRAIN` after it began, then stops
-    /// what turned up meanwhile (the grace period and readings again).
     #[test]
     fn shutdown_fits_in_the_clients_wait() {
-        let readings = Duration::from_secs(1);
-        assert!(SHUTDOWN_SNAPSHOT_WAIT + SHUTDOWN_GRACE + readings <= SHUTDOWN_DRAIN);
-        assert!(
-            SHUTDOWN_DRAIN + SHUTDOWN_GRACE + Duration::from_secs(5) <= protocol::SHUTDOWN_WAIT
-        );
+        assert!(Timings::default().shutdown_fits());
     }
 
     #[test]
@@ -2878,11 +2921,14 @@ mod tests {
         let after_first_silence = started + CLAUDE_SILENCE + Duration::from_secs(1);
         assert_eq!(
             settle(
+                GenericWindows::default(),
                 agent.record.kind,
                 agent.status,
-                agent.started,
-                agent.status_since,
-                agent.last_output,
+                Times {
+                    started: agent.started,
+                    status_since: agent.status_since,
+                    last_output: agent.last_output,
+                },
                 false,
                 after_first_silence,
             ),
@@ -2890,11 +2936,14 @@ mod tests {
         );
         assert_eq!(
             settle(
+                GenericWindows::default(),
                 agent.record.kind,
                 agent.status,
-                agent.started,
-                agent.status_since,
-                agent.last_output,
+                Times {
+                    started: agent.started,
+                    status_since: agent.status_since,
+                    last_output: agent.last_output,
+                },
                 false,
                 again + CLAUDE_SILENCE,
             ),
@@ -2965,8 +3014,8 @@ mod tests {
         let mut agent = claude_agent();
         let now = agent.started;
         agent.hooked(HookKind::SubagentStart, subagent("a1"), None, now);
-        assert!(!agent.settle(now + CLAUDE_SILENCE));
-        assert!(agent.settle(now + CLAUDE_SUBAGENT_SILENCE));
+        assert!(!agent.settle(GenericWindows::default(), now + CLAUDE_SILENCE));
+        assert!(agent.settle(GenericWindows::default(), now + CLAUDE_SUBAGENT_SILENCE));
         assert_eq!(agent.status, Status::Idle);
         agent.hooked(HookKind::UserPromptSubmit, None, None, now);
         agent.hooked(HookKind::Stop, None, None, now);

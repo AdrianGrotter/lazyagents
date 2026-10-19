@@ -143,6 +143,11 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   still the socket it bound; if it was deleted or replaced, it shuts down.
 - **Idle exit.** With no client connected, no agent running and no request in flight for
   `LAZYAGENTS_IDLE_EXIT_SECS` seconds (default 600; 0 disables it), it shuts down.
+- **Timers.** The intervals and waits above (housekeeping, process table readings, the
+  generic status windows, shutdown's grace, snapshot wait and drain) come from
+  `daemon::Timings` in the daemon's `Config`. The binary always runs with
+  `Timings::default()`, the values this document gives; the daemon's integration tests run
+  with shorter ones so they wait less for the behaviour they check (ADR 0033).
 
 ### Nothing slow runs on the event loop
 

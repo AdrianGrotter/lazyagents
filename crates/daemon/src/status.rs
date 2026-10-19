@@ -67,32 +67,65 @@ fn trust_option(line: &str) -> Option<(bool, &str)> {
     (label.starts_with("Yes,") || label.starts_with("No,")).then_some((selected, label))
 }
 
-pub fn generic_status(last_output: Option<Instant>, now: Instant) -> Status {
+/// How long output timing takes to move a generic agent's status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GenericWindows {
+    /// Output within this long keeps the agent `working`.
+    pub activity: Duration,
+    /// An agent that has printed nothing is `idle` this long after it started.
+    pub settle_after: Duration,
+}
+
+impl Default for GenericWindows {
+    fn default() -> Self {
+        Self {
+            activity: ACTIVITY_WINDOW,
+            settle_after: SETTLE_AFTER,
+        }
+    }
+}
+
+pub fn generic_status(
+    windows: GenericWindows,
+    last_output: Option<Instant>,
+    now: Instant,
+) -> Status {
     match last_output {
-        Some(at) if now.duration_since(at) < ACTIVITY_WINDOW => Status::Working,
+        Some(at) if now.duration_since(at) < windows.activity => Status::Working,
         _ => Status::Idle,
     }
 }
 
+/// When things happened to a running agent, as its output timing reads them.
+#[derive(Clone, Copy, Debug)]
+pub struct Times {
+    pub started: Instant,
+    /// When the agent entered its status or, for a Claude agent, last reported a hook.
+    pub status_since: Instant,
+    pub last_output: Option<Instant>,
+}
+
 /// The status a running agent moves to from output timing alone, or `None` to keep it.
-/// `status_since` is when the agent entered `status` or, for a Claude agent, last
-/// reported a hook.
 pub fn settle(
+    windows: GenericWindows,
     kind: AgentKind,
     status: Status,
-    started: Instant,
-    status_since: Instant,
-    last_output: Option<Instant>,
+    times: Times,
     subagents_running: bool,
     now: Instant,
 ) -> Option<Status> {
+    let Times {
+        started,
+        status_since,
+        last_output,
+    } = times;
     if !status.is_running() {
         return None;
     }
     let next = match kind {
-        AgentKind::Generic if last_output.is_some() => generic_status(last_output, now),
+        AgentKind::Generic if last_output.is_some() => generic_status(windows, last_output, now),
         AgentKind::Generic => {
-            if status == Status::Starting && now.duration_since(started) >= SETTLE_AFTER {
+            if status == Status::Starting && now.duration_since(started) >= windows.settle_after {
                 Status::Idle
             } else {
                 status
@@ -149,11 +182,45 @@ mod tests {
     #[test]
     fn generic_agents_work_while_output_is_recent() {
         let now = Instant::now();
-        assert_eq!(generic_status(None, now), Status::Idle);
-        assert_eq!(generic_status(Some(now), now), Status::Working);
         assert_eq!(
-            generic_status(Some(now - Duration::from_secs(3)), now),
+            generic_status(GenericWindows::default(), None, now),
             Status::Idle
+        );
+        assert_eq!(
+            generic_status(GenericWindows::default(), Some(now), now),
+            Status::Working
+        );
+        assert_eq!(
+            generic_status(
+                GenericWindows::default(),
+                Some(now - Duration::from_secs(3)),
+                now
+            ),
+            Status::Idle
+        );
+        let short = GenericWindows {
+            activity: Duration::from_millis(100),
+            settle_after: Duration::from_millis(100),
+        };
+        let recent = now - Duration::from_millis(50);
+        assert_eq!(generic_status(short, Some(recent), now), Status::Working);
+        let older = now - Duration::from_millis(150);
+        assert_eq!(generic_status(short, Some(older), now), Status::Idle);
+        let started = Times {
+            started: older,
+            status_since: older,
+            last_output: None,
+        };
+        assert_eq!(
+            settle(
+                short,
+                AgentKind::Generic,
+                Status::Starting,
+                started,
+                false,
+                now
+            ),
+            Some(Status::Idle)
         );
     }
 
@@ -164,11 +231,14 @@ mod tests {
         let after = started + SETTLE_AFTER;
         let settle_at = |now| {
             settle(
+                GenericWindows::default(),
                 AgentKind::Generic,
                 Status::Starting,
-                started,
-                started,
-                None,
+                Times {
+                    started,
+                    status_since: started,
+                    last_output: None,
+                },
                 false,
                 now,
             )
@@ -177,13 +247,16 @@ mod tests {
         assert_eq!(settle_at(after), Some(Status::Idle));
         assert_eq!(
             settle(
+                GenericWindows::default(),
                 AgentKind::Generic,
                 Status::Idle,
-                started,
-                started,
-                None,
+                Times {
+                    started,
+                    status_since: started,
+                    last_output: None,
+                },
                 false,
-                after
+                after,
             ),
             None
         );
@@ -197,11 +270,14 @@ mod tests {
         let later = output + ACTIVITY_WINDOW;
         let generic = |status, now| {
             settle(
+                GenericWindows::default(),
                 AgentKind::Generic,
                 status,
-                started,
-                started,
-                Some(output),
+                Times {
+                    started,
+                    status_since: started,
+                    last_output: Some(output),
+                },
                 false,
                 now,
             )
@@ -218,11 +294,14 @@ mod tests {
         let started = Instant::now();
         let claude = |last_output, now| {
             settle(
+                GenericWindows::default(),
                 AgentKind::Claude,
                 Status::Working,
-                started,
-                started,
-                last_output,
+                Times {
+                    started,
+                    status_since: started,
+                    last_output,
+                },
                 false,
                 now,
             )
@@ -247,11 +326,14 @@ mod tests {
         let prompt = started + Duration::from_secs(60);
         let claude = |now| {
             settle(
+                GenericWindows::default(),
                 AgentKind::Claude,
                 Status::Working,
-                started,
-                prompt,
-                Some(output),
+                Times {
+                    started,
+                    status_since: prompt,
+                    last_output: Some(output),
+                },
                 false,
                 now,
             )
@@ -269,11 +351,14 @@ mod tests {
         let started = Instant::now();
         let claude = |now| {
             settle(
+                GenericWindows::default(),
                 AgentKind::Claude,
                 Status::Working,
-                started,
-                started,
-                None,
+                Times {
+                    started,
+                    status_since: started,
+                    last_output: None,
+                },
                 true,
                 now,
             )
@@ -296,25 +381,31 @@ mod tests {
         for status in [Status::NeedsInput, Status::Idle] {
             assert_eq!(
                 settle(
+                    GenericWindows::default(),
                     AgentKind::Claude,
                     status,
-                    started,
-                    started,
-                    None,
+                    Times {
+                        started,
+                        status_since: started,
+                        last_output: None,
+                    },
                     false,
-                    late
+                    late,
                 ),
                 None
             );
             assert_eq!(
                 settle(
+                    GenericWindows::default(),
                     AgentKind::Claude,
                     status,
-                    started,
-                    started,
-                    Some(started),
+                    Times {
+                        started,
+                        status_since: started,
+                        last_output: Some(started),
+                    },
                     false,
-                    late
+                    late,
                 ),
                 None
             );
@@ -326,11 +417,14 @@ mod tests {
         let started = Instant::now();
         let claude = |last_output, now| {
             settle(
+                GenericWindows::default(),
                 AgentKind::Claude,
                 Status::Starting,
-                started,
-                started,
-                last_output,
+                Times {
+                    started,
+                    status_since: started,
+                    last_output,
+                },
                 false,
                 now,
             )
@@ -361,11 +455,33 @@ mod tests {
         for kind in [AgentKind::Generic, AgentKind::Claude] {
             for status in [Status::Stopped, Status::Exited(0), Status::Exited(137)] {
                 assert_eq!(
-                    settle(kind, status, started, started, None, false, late),
+                    settle(
+                        GenericWindows::default(),
+                        kind,
+                        status,
+                        Times {
+                            started,
+                            status_since: started,
+                            last_output: None,
+                        },
+                        false,
+                        late,
+                    ),
                     None
                 );
                 assert_eq!(
-                    settle(kind, status, started, started, Some(late), false, late),
+                    settle(
+                        GenericWindows::default(),
+                        kind,
+                        status,
+                        Times {
+                            started,
+                            status_since: started,
+                            last_output: Some(late),
+                        },
+                        false,
+                        late,
+                    ),
                     None
                 );
             }

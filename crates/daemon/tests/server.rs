@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use daemon::{Config, run, run_with_readings};
+use daemon::status::GenericWindows;
+use daemon::{Config, Timings, run, run_with_readings};
 use protocol::{
     AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, Failure, HookKind, InputEvent, Key,
     KeyCode, Modifiers, PROTOCOL_VERSION, Project, Request, Response, Screen, ServerMessage,
@@ -19,6 +20,20 @@ use tokio::task::JoinHandle;
 /// parallel each spawned process (every git command) can take seconds, so a request
 /// that runs several, such as creating a worktree agent, needs well over 10 s.
 const WAIT: Duration = Duration::from_secs(30);
+
+/// The daemon's timers, short enough that a test waits little for what it checks and long
+/// enough that four test daemons on a busy machine still keep to them.
+const TIMINGS: Timings = Timings {
+    housekeeping: Duration::from_millis(100),
+    snapshot: Duration::from_millis(100),
+    generic: GenericWindows {
+        activity: Duration::from_millis(500),
+        settle_after: Duration::from_millis(500),
+    },
+    shutdown_grace: Duration::from_millis(500),
+    shutdown_snapshot_wait: Duration::from_secs(1),
+    shutdown_drain: Duration::from_secs(2),
+};
 
 struct TestDaemon {
     dir: tempfile::TempDir,
@@ -125,6 +140,7 @@ fn config(dir: &Path) -> Config {
         idle_exit: None,
         direnv: None,
         claude_config: None,
+        timings: TIMINGS,
     }
 }
 
@@ -566,7 +582,7 @@ async fn generic_status_follows_output() {
     let working = tokio::time::Instant::now();
     conn.wait_status(agent.id, Status::Idle).await;
     assert!(
-        working.elapsed() >= Duration::from_millis(1500),
+        working.elapsed() >= TIMINGS.generic.activity * 3 / 4,
         "went idle {:?} after working",
         working.elapsed()
     );
@@ -1944,21 +1960,21 @@ async fn removing_the_socket_stops_the_daemon_and_its_agents() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_daemon_exits() {
-    let mut daemon = TestDaemon::start_with(Some(Duration::from_secs(1))).await;
+    let mut daemon = TestDaemon::start_with(Some(Duration::from_millis(300))).await;
     daemon.exits_within(Duration::from_secs(4)).await;
     assert!(!daemon.socket().exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_exit_waits_for_running_agents() {
-    let mut daemon = TestDaemon::start_with(Some(Duration::from_secs(1))).await;
+    let mut daemon = TestDaemon::start_with(Some(Duration::from_millis(300))).await;
     let mut conn = Conn::open(daemon.path()).await;
     let (project, dir) = add_project(&mut conn).await;
     let pidfile = dir.path().join("pids");
     let agent = create_owned(&mut conn, &project, "busy", &ignores_sighup(&pidfile)).await;
     let leaves = Leaves::read(&pidfile, 1).await;
     drop(conn);
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         !daemon.task.as_ref().expect("task").is_finished(),
         "exited while an agent ran"
@@ -2102,7 +2118,7 @@ async fn silent_generic_agent_becomes_idle() {
     .await
     .expect("create");
     let idle = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_millis(1500),
         conn.wait_status(agent.id, Status::Idle),
     )
     .await;
@@ -4103,4 +4119,9 @@ async fn a_pending_worktree_of_a_project_no_longer_a_repo_is_dropped_at_the_next
     conn.request(Request::RemoveProject { id: project.id })
         .await
         .expect("the project can be removed");
+}
+
+#[test]
+fn the_test_timings_leave_shutdown_its_order() {
+    assert!(TIMINGS.shutdown_fits());
 }

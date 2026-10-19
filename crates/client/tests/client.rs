@@ -15,6 +15,7 @@ async fn start_daemon(dir: &std::path::Path) -> tokio::task::JoinHandle<anyhow::
         idle_exit: None,
         direnv: None,
         claude_config: None,
+        timings: daemon::Timings::default(),
     }));
     let paths = StatePaths::new(dir);
     for _ in 0..250 {

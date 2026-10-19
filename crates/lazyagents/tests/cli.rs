@@ -480,6 +480,7 @@ impl InProcessDaemon {
             idle_exit: None,
             direnv: None,
             claude_config: None,
+            timings: daemon::Timings::default(),
         }));
         wait_for_daemon(&StatePaths::new(state.path()));
         Self {

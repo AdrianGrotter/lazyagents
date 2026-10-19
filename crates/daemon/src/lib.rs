@@ -13,5 +13,5 @@ pub mod status;
 pub mod store;
 pub mod terminal;
 
-pub use server::{Config, run, run_with_readings};
+pub use server::{Config, Timings, run, run_with_readings};
 pub use spawn::find_in_path;

@@ -33,6 +33,7 @@ impl Daemon {
             idle_exit: None,
             direnv: None,
             claude_config: None,
+            timings: daemon::Timings::default(),
         }));
         let paths = StatePaths::new(state.path());
         let started = tokio::time::Instant::now();

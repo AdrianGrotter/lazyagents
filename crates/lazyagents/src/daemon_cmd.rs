@@ -48,6 +48,7 @@ fn start(paths: StatePaths) -> anyhow::Result<()> {
             idle_exit,
             direnv: daemon::find_in_path("direnv"),
             claude_config: daemon::claude_settings::config_dir(),
+            timings: daemon::Timings::default(),
         }))
 }
 
