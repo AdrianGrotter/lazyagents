@@ -99,9 +99,12 @@ The add project picker lists `+ new project…` and then every known project tha
 the sidebar, most recently added first. `j`/`k` (or `↓`/`↑`) move, `enter` adds the
 highlighted project with its old name or opens the new project form, `x` forgets the
 highlighted project, and `esc`/`q` closes. A project removed with `d` stays known. The new
-project form has Path (starts at the cwd; relative paths resolve against the cwd, a
-leading `~` is the home directory) and Name (empty means the directory name); `tab` moves
-between them, `enter` adds and `esc` cancels.
+project form has Path (starts empty, or at `[projects] default_path`, see
+[configuration.md](configuration.md); relative paths and an empty path resolve against the
+cwd, a leading `~` is the home directory) and Name (empty means the part of the typed path
+after its last `/`, trailing slashes ignored, so `~/git/app/` is `app`; for a path ending
+in `~`, `.` or `..`, or an empty path, the name of the directory it resolves to); `tab`
+moves between them, `enter` adds and `esc` cancels.
 
 The worktree setup approval popup wraps long script lines and shows control characters
 escaped (`\r`, `\t`, `\u{1b}`, and `\u{200b}` for zero-width and direction-changing

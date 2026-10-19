@@ -180,6 +180,17 @@ command = ["claude", "--model", "opus"]
 | `command` | program and arguments; required, non-empty |
 | `kind` | `generic` (default) or `claude`; `claude` agents report status through hooks |
 
+## Projects
+
+```toml
+[projects]
+default_path = "~/git/"
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `default_path` | empty | text the add project form's Path field starts with; a leading `~` is the home directory, and a relative path resolves against the cwd |
+
 ## Theme
 
 ```toml

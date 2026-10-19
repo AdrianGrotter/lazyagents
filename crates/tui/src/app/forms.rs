@@ -91,6 +91,14 @@ pub struct NewAgentForm {
     pub outside_git: bool,
 }
 
+/// The part of a typed project path after its last `/`, ignoring trailing slashes; `None` when
+/// that part names no directory of its own (`~`, `.`, `..`), leaving the daemon to name the
+/// project from its resolved path.
+fn project_name_from_path(path: &str) -> Option<&str> {
+    let last = path.trim_end_matches('/').rsplit('/').next()?;
+    (!matches!(last, "" | "~" | "." | "..")).then_some(last)
+}
+
 /// A run of whitespace, with any dashes touching it, becomes one dash; dashes typed without
 /// whitespace stay as typed. Leading and trailing dashes are dropped.
 pub(super) fn normalize_name(input: &str) -> String {
@@ -192,7 +200,7 @@ impl App {
 
     pub(super) fn project_form(&self) -> Popup {
         Popup::AddProject(ProjectForm {
-            path: self.cwd.display().to_string(),
+            path: self.project_path.clone(),
             name: String::new(),
             field: ProjectField::Path,
             submission: Submission::Editing,
@@ -250,10 +258,13 @@ impl App {
             }
             _ => match edit(form.focused(), key) {
                 Edit::Submit => {
-                    let name = form.name.trim();
+                    let (path, name) = (form.path.trim(), form.name.trim());
                     let request = Request::AddProject {
-                        path: self.project_path(form.path.trim()),
-                        name: (!name.is_empty()).then(|| name.to_string()),
+                        path: self.resolve_project_path(path),
+                        name: Some(name)
+                            .filter(|name| !name.is_empty())
+                            .or_else(|| project_name_from_path(path))
+                            .map(String::from),
                     };
                     form.submission = Submission::Sending(Box::new(request.clone()));
                     self.popup = Some(Popup::AddProject(form));
@@ -267,7 +278,7 @@ impl App {
         Vec::new()
     }
 
-    fn project_path(&self, input: &str) -> PathBuf {
+    fn resolve_project_path(&self, input: &str) -> PathBuf {
         let home = self.home.as_ref();
         match (input, input.strip_prefix("~/"), home) {
             ("~", _, Some(home)) => home.clone(),
@@ -524,18 +535,18 @@ mod tests {
             app.on_key(code(KeyCode::Enter)),
             vec![Effect::Send(Request::AddProject {
                 path: "/work/repo".into(),
-                name: None
+                name: Some("repo".into())
             })]
         );
     }
 
     #[test]
     fn add_project_expands_a_leading_tilde() {
-        for (typed, expected) in [
-            ("~", "/home/u"),
-            ("~/repo", "/home/u/repo"),
-            ("x~", "/work/x~"),
-            ("~other/repo", "/work/~other/repo"),
+        for (typed, expected, name) in [
+            ("~", "/home/u", None),
+            ("~/repo", "/home/u/repo", Some("repo")),
+            ("x~", "/work/x~", Some("x~")),
+            ("~other/repo", "/work/~other/repo", Some("repo")),
         ] {
             let (mut app, _, _) = two_agents();
             let _ = app.on_key(key('a'));
@@ -545,11 +556,77 @@ mod tests {
                 app.on_key(code(KeyCode::Enter)),
                 vec![Effect::Send(Request::AddProject {
                     path: expected.into(),
-                    name: None
+                    name: name.map(String::from)
                 })],
                 "{typed}"
             );
         }
+    }
+
+    #[test]
+    fn an_empty_name_is_the_last_part_of_the_typed_path() {
+        for (typed, name) in [
+            ("~/git/transvoice", Some("transvoice")),
+            ("~/git/transvoice/", Some("transvoice")),
+            ("~/git/transvoice//", Some("transvoice")),
+            ("~/legeforeningen-2.0", Some("legeforeningen-2.0")),
+            ("/abs/repo/ ", Some("repo")),
+            ("repo", Some("repo")),
+            ("", None),
+            ("/", None),
+            ("~/", None),
+            (".", None),
+            ("repo/..", None),
+        ] {
+            let (mut app, _, _) = two_agents();
+            let _ = app.on_key(key('a'));
+            type_text(&mut app, typed);
+            let effects = app.on_key(code(KeyCode::Enter));
+            assert!(
+                matches!(
+                    &effects[..],
+                    [Effect::Send(Request::AddProject { name: sent, .. })]
+                        if sent.as_deref() == name
+                ),
+                "{typed:?}: {effects:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_typed_name_wins_over_the_path() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('a'));
+        type_text(&mut app, "~/git/transvoice");
+        let _ = app.on_key(code(KeyCode::Tab));
+        type_text(&mut app, "tv");
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            vec![Effect::Send(Request::AddProject {
+                path: "/home/u/git/transvoice".into(),
+                name: Some("tv".into()),
+            })]
+        );
+    }
+
+    #[test]
+    fn the_form_starts_at_the_configured_default_path() {
+        let config = configured("[projects]\ndefault_path = \"~/git/\"\n");
+        let (mut app, _) = loaded_with(config, vec![project("p")], Vec::new());
+        let _ = app.on_key(key('a'));
+        assert!(
+            matches!(&app.popup, Some(Popup::AddProject(form)) if form.path == "~/git/"),
+            "{:?}",
+            app.popup
+        );
+        type_text(&mut app, "transvoice");
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            vec![Effect::Send(Request::AddProject {
+                path: "/home/u/git/transvoice".into(),
+                name: Some("transvoice".into()),
+            })]
+        );
     }
 
     #[test]
@@ -559,7 +636,7 @@ mod tests {
         assert_eq!(
             app.popup,
             Some(Popup::AddProject(ProjectForm {
-                path: "/work".into(),
+                path: String::new(),
                 name: String::new(),
                 field: ProjectField::Path,
                 submission: Submission::Editing,
@@ -575,7 +652,7 @@ mod tests {
         assert_eq!(app.project_candidates(), vec![&old]);
         let _ = app.on_key(code(KeyCode::Enter));
         assert!(
-            matches!(&app.popup, Some(Popup::AddProject(form)) if form.path == "/work"),
+            matches!(&app.popup, Some(Popup::AddProject(form)) if form.path.is_empty()),
             "{:?}",
             app.popup
         );

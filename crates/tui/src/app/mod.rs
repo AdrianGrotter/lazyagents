@@ -311,6 +311,7 @@ pub struct App {
     pub theme: Theme,
     /// Decides whether the new agent form offers a worktree for a project's path.
     pub is_git_repo: fn(&Path) -> bool,
+    project_path: String,
     cwd: PathBuf,
     home: Option<PathBuf>,
     shell: String,
@@ -370,6 +371,7 @@ impl App {
             approved_setups: Vec::new(),
             theme: config.theme,
             is_git_repo: in_git_repo,
+            project_path: config.project_path,
             cwd,
             home,
             shell,

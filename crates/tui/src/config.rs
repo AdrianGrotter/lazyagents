@@ -15,6 +15,8 @@ pub struct Config {
     pub theme: Theme,
     pub notifications: Notifications,
     pub commands: Vec<CustomCommand>,
+    /// The text the add project form's path field starts with.
+    pub project_path: String,
     pub warnings: Vec<String>,
 }
 
@@ -168,7 +170,8 @@ pub fn parse(text: &str) -> Result<Config, String> {
             }
             ("theme", Value::Table(table)) => config.apply_theme(table),
             ("notifications", Value::Table(table)) => config.apply_notifications(table),
-            ("keys" | "theme" | "notifications", _) => {
+            ("projects", Value::Table(table)) => config.apply_projects(table),
+            ("keys" | "theme" | "notifications" | "projects", _) => {
                 config.warn(format!("{name}: expected a table"))
             }
             ("commands", Value::Array(items)) => {
@@ -428,6 +431,16 @@ impl Config {
                 ("title", Value::Boolean(on)) => self.notifications.title = on,
                 ("title", _) => self.warn("notifications.title: expected true or false"),
                 (_, value) => self.warn(unknown(&format!("notifications.{name}"), &value)),
+            }
+        }
+    }
+
+    fn apply_projects(&mut self, table: Table) {
+        for (name, value) in table {
+            match (name.as_str(), value) {
+                ("default_path", Value::String(path)) => self.project_path = path,
+                ("default_path", _) => self.warn("projects.default_path: expected a string"),
+                (_, value) => self.warn(unknown(&format!("projects.{name}"), &value)),
             }
         }
     }
@@ -905,6 +918,26 @@ mod tests {
             let config = load_text(&format!("[notifications]\nmethod = \"{method}\""));
             assert_eq!(config.notifications.method, parsed);
         }
+    }
+
+    #[test]
+    fn projects_default_path_prefills_the_add_project_form() {
+        assert_eq!(Config::default().project_path, "");
+        let config = load_text("[projects]\ndefault_path = \"~/git/\"");
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.project_path, "~/git/");
+
+        let config = load_text("[projects]\ndefault_path = 3\ncolour = \"red\"");
+        assert_eq!(config.project_path, "");
+        assert_eq!(
+            config.warnings,
+            vec![
+                "projects.default_path: expected a string",
+                "unknown setting projects.colour"
+            ]
+        );
+        let config = load_text("projects = \"~/git\"");
+        assert_eq!(config.warnings, vec!["projects: expected a table"]);
     }
 
     #[test]
