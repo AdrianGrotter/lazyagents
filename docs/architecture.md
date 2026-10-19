@@ -450,7 +450,9 @@ daemon last told it.
   (projects, agents, session ids and titles, worktree info, worktrees being created),
   `daemon.sock`, `daemon.lock`, `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`, and
   `known-projects.toml`, which only the TUI writes: every project it has seen, kept after
-  removal for the add picker (`known.rs`, ADR 0009).
+  removal for the add picker (`known.rs`, ADR 0009), and `current-project.toml`, also
+  written only by the TUI: the current project's path and whether all agents are listed,
+  so the next TUI starts there (`current.rs`, ADR 0032).
 - Config: `$LAZYAGENTS_CONFIG`, else `$XDG_CONFIG_HOME/lazyagents/config.toml`, else
   `~/.config/lazyagents/config.toml`: keybindings, agent presets, theme colours,
   notifications, custom commands. A missing file gives the built-in defaults; anything

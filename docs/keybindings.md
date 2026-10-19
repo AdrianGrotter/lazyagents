@@ -100,7 +100,9 @@ project is listed, when `g` or a new agent lands in another project. `enter` on 
 a click on it) opens the switcher: `All projects`, then every project with its path and
 waiting count, then `+ add project…`. `j`/`k` (or `↓`/`↑`) move, `enter` switches (or
 opens the add project picker), `d` removes the highlighted project (confirm; refused while
-it has agents) and `esc`/`q` closes. Switching focuses the Agents box.
+it has agents) and `esc`/`q` closes. Switching focuses the Agents box. The next TUI starts
+in the same view: the current project, or all agents, is kept in `current-project.toml` in
+the state directory.
 
 Before the first project is added, the Projects box, the Agents box and the pane all point
 at `a` (add a project), since `n` needs a project to put the agent in.

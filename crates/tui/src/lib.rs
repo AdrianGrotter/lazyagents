@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod commands;
 pub mod config;
 pub mod connection;
+pub mod current;
 pub mod fixed_keys;
 pub mod help;
 pub mod keymap;

@@ -21,7 +21,9 @@ project happens there too. Only the user changes the current project: switching,
 project, `A`, or `g`/a new agent landing in another project while one project is listed.
 Selecting an agent in the all-agents view leaves it alone. `n` always opens a list of
 projects first, starting at the current project (in the all-agents view, at the project last
-picked for a new agent), then the new agent form.
+picked for a new agent), then the new agent form. The TUI keeps the current project, by
+path, and whether all agents are listed in `current-project.toml`, so the next TUI starts
+where the last one left off.
 
 ## Alternatives
 

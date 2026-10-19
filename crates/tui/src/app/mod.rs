@@ -20,6 +20,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::commands::CustomCommand;
 use crate::config::{Config, PresetDef, Theme};
+use crate::current::CurrentView;
 use crate::keymap::{Action, Keymap};
 use crate::known::{self, KnownProject};
 use crate::review::{Comment, Location};
@@ -221,6 +222,7 @@ pub enum Effect {
         show: bool,
     },
     RememberProjects(Vec<KnownProject>),
+    SaveCurrentView(CurrentView),
     ForgetProject(PathBuf),
     Quit,
     StopDaemonAndQuit,
@@ -275,6 +277,9 @@ pub struct App {
     pub project_index: usize,
     /// The project last picked for a new agent, where the list starts in the all-agents view.
     new_agent_project: Option<ProjectId>,
+    restored_view: Option<CurrentView>,
+    /// The view as last saved; `None` until the first projects arrive.
+    saved_view: Option<CurrentView>,
     /// Kept among `visible_agents()` by `settle_selection` whenever any agent is listed.
     pub selected: Option<AgentId>,
     /// The selected agent's row when the selection last settled; the agent that comes to
@@ -350,6 +355,8 @@ impl App {
             popup,
             project_index: 0,
             new_agent_project: None,
+            restored_view: None,
+            saved_view: None,
             selected: None,
             settled_row: 0,
             subscribed: None,
@@ -845,6 +852,18 @@ impl App {
         if let Some(index) = current.and_then(|id| self.projects.iter().position(|p| p.id == id)) {
             self.project_index = index;
         }
+        if self.saved_view.is_none() {
+            if let Some(view) = self.restored_view.take() {
+                let saved = view
+                    .project
+                    .and_then(|path| self.projects.iter().position(|p| p.path == path));
+                self.project_index = saved.unwrap_or(0);
+                if view.all {
+                    self.view = AgentView::All;
+                }
+            }
+            self.saved_view = Some(self.current_view());
+        }
     }
 
     /// Returns the notification for an agent out of view that starts needing input or
@@ -992,7 +1011,31 @@ impl App {
         self.clamp();
         let mut effects = self.release_peek();
         effects.extend(self.follow_selection());
+        effects.extend(self.save_view());
         effects
+    }
+
+    /// Nothing is saved before the first projects arrive, which settle the view to save.
+    fn save_view(&mut self) -> Option<Effect> {
+        let view = self.current_view();
+        let saved = self.saved_view.as_mut()?;
+        if *saved == view {
+            return None;
+        }
+        *saved = view.clone();
+        Some(Effect::SaveCurrentView(view))
+    }
+
+    fn current_view(&self) -> CurrentView {
+        CurrentView {
+            all: self.view == AgentView::All,
+            project: self.selected_project().map(|p| p.path.clone()),
+        }
+    }
+
+    /// The view the first projects to arrive start in; a project no longer added is skipped.
+    pub fn restore_view(&mut self, view: CurrentView) {
+        self.restored_view = Some(view);
     }
 
     /// A pane scrolled from the sidebar goes back to the bottom once the selection
@@ -1213,6 +1256,74 @@ pub(crate) mod tests {
         let mut effects = app.apply_response(Response::Projects(projects));
         effects.extend(app.apply_response(Response::Agents(agents)));
         (app, effects)
+    }
+
+    fn restored(view: CurrentView, projects: Vec<Project>, agents: Vec<AgentInfo>) -> App {
+        let mut app = App::new("/work".into(), "/bin/sh".into(), None, Config::default());
+        app.restore_view(view);
+        let _ = app.apply_response(Response::Projects(projects));
+        let _ = app.apply_response(Response::Agents(agents));
+        app
+    }
+
+    #[test]
+    fn the_saved_project_is_current_at_start() {
+        let (p, q) = (project("p"), project("q"));
+        let b = agent(&q, "b", Status::Idle);
+        let saved = CurrentView {
+            all: false,
+            project: Some(q.path.clone()),
+        };
+        let app = restored(saved, vec![p.clone(), q.clone()], vec![b.clone()]);
+        assert_eq!(app.view, AgentView::Project);
+        assert_eq!(app.selected_project().map(|x| x.id), Some(q.id));
+        assert_eq!(app.selected_agent().map(|x| x.id), Some(b.id));
+
+        let saved = CurrentView {
+            all: true,
+            project: Some(q.path.clone()),
+        };
+        let app = restored(saved, vec![p.clone(), q.clone()], vec![]);
+        assert_eq!(app.view, AgentView::All);
+        assert_eq!(app.selected_project().map(|x| x.id), Some(q.id));
+
+        let gone = CurrentView {
+            all: false,
+            project: Some("/p/gone".into()),
+        };
+        let app = restored(gone, vec![p.clone(), q], vec![]);
+        assert_eq!(app.selected_project().map(|x| x.id), Some(p.id));
+    }
+
+    #[test]
+    fn changing_the_current_project_saves_it() {
+        let (p, q) = (project("p"), project("q"));
+        let (mut app, effects) = loaded(vec![p, q.clone()], vec![]);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SaveCurrentView(_))),
+            "{effects:?}"
+        );
+        let _ = app.on_key(key('1'));
+        let _ = app.on_key(code(KeyCode::Enter));
+        let _ = app.on_key(key('j'));
+        let effects = app.on_key(code(KeyCode::Enter));
+        let saved = CurrentView {
+            all: false,
+            project: Some(q.path.clone()),
+        };
+        assert!(
+            effects.contains(&Effect::SaveCurrentView(saved)),
+            "{effects:?}"
+        );
+        let effects = app.on_key(key('A'));
+        let saved = CurrentView {
+            all: true,
+            project: Some(q.path.clone()),
+        };
+        assert_eq!(effects, vec![Effect::SaveCurrentView(saved)]);
+        assert!(app.on_key(key('j')).is_empty());
     }
 
     #[test]
@@ -2198,8 +2309,12 @@ pub(crate) mod tests {
             projects[1].clone(),
         ]));
         assert_eq!(app.selected_project().map(|x| x.id), Some(projects[1].id));
+        let saved = CurrentView {
+            all: true,
+            project: Some(projects[1].path.clone()),
+        };
+        assert_eq!(effects, vec![Effect::SaveCurrentView(saved)]);
         assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
-        assert!(effects.is_empty(), "{effects:?}");
     }
 
     #[test]

@@ -25,6 +25,7 @@ use crate::approved;
 use crate::clipboard;
 use crate::config;
 use crate::connection::{self, Incoming};
+use crate::current;
 use crate::known::{self, KnownProject};
 use crate::notify;
 use crate::ui::{self, Mismatch};
@@ -200,6 +201,11 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
         Ok(list) => app.known = list,
         Err(error) => app.fail(format!("{error:#}")),
     }
+    let current_file = paths.current_project();
+    match current::load(&current_file) {
+        Ok(view) => app.restore_view(view),
+        Err(error) => app.fail(format!("{error:#}")),
+    }
 
     let mut layout = crate::layout::areas(Rect::default(), 0, 0);
     let mut redraw = true;
@@ -276,6 +282,7 @@ pub async fn run(paths: StatePaths, exe: PathBuf) -> anyhow::Result<()> {
             finished: &finished_tx,
             notify_method,
             known_file: &known_file,
+            current_file: &current_file,
             approved_file: &approved_file,
         };
         for effect in effects {
@@ -360,6 +367,7 @@ struct EffectContext<'a> {
     finished: &'a UnboundedSender<Finished>,
     notify_method: Option<notify::Method>,
     known_file: &'a Path,
+    current_file: &'a Path,
     approved_file: &'a Path,
 }
 
@@ -417,6 +425,11 @@ async fn apply_effect(
             }) {
                 Ok(list) => ctx.app.approved_setups = list,
                 Err(error) => ctx.app.fail(format!("{error:#}")),
+            }
+        }
+        Effect::SaveCurrentView(view) => {
+            if let Err(error) = current::save(ctx.current_file, &view) {
+                ctx.app.fail(format!("{error:#}"));
             }
         }
         Effect::ForgetProject(path) => {
