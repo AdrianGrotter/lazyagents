@@ -6,14 +6,15 @@ set -euo pipefail
 unset "${!DIRENV_@}"
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-h="$root/scripts/tmux-harness.sh"
+# shellcheck source=SCRIPTDIR/tmux-harness.sh
+source "$root/scripts/tmux-harness.sh"
 work=$(mktemp -d)
 state="$work/state"
 repo="$work/wt-smoke-repo"
 name="wt-smoke-$$"
 bin="$root/target/debug/lazyagents"
 cleanup() {
-  "$h" stop "$name"
+  harness stop "$name"
   LAZYAGENTS_STATE_DIR="$state" "$bin" shutdown >/dev/null 2>&1 || true
   rm -rf "$work"
 }
@@ -24,58 +25,57 @@ cargo build --locked -q -p lazyagents --manifest-path "$root/Cargo.toml"
 # Git, here and in the daemon and agent below, ignores the global and system config.
 own_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"; }
 own_git init -q -b main "$repo"
-own_git -C "$repo" config user.name smoke
-own_git -C "$repo" config user.email smoke@example.com
+printf '[user]\n\tname = smoke\n\temail = smoke@example.com\n' >>"$repo/.git/config"
 own_git -C "$repo" commit -q --allow-empty -m init
 
-"$h" start "$name" 120 32 -- sh -c "cd '$repo' && exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 LAZYAGENTS_STATE_DIR='$state' LAZYAGENTS_CONFIG='$work/config.toml' SHELL=/bin/sh '$bin'"
-"$h" wait-for "$name" 'press a to add a project' 20
-"$h" keys "$name" a
-"$h" wait-for "$name" ' Add project ' 5
-"$h" keys "$name" Enter
-"$h" wait-for "$name" '▸ wt-smoke-repo' 5
+harness start "$name" 120 32 -- sh -c "cd '$repo' && exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 LAZYAGENTS_STATE_DIR='$state' LAZYAGENTS_CONFIG='$work/config.toml' SHELL=/bin/sh '$bin'"
+harness wait-for "$name" 'press a to add a project' 20
+harness keys "$name" a
+harness wait-for "$name" ' Add project ' 5
+harness keys "$name" Enter
+harness wait-for "$name" '▸ wt-smoke-repo' 5
 
-"$h" keys "$name" n
-"$h" wait-for "$name" ' New agent ' 5
-"$h" type "$name" wt
-"$h" keys "$name" Tab Right
-"$h" wait-for "$name" '‹ shell ›' 5
-"$h" keys "$name" Tab Space
-"$h" keys "$name" Enter
-"$h" wait-for "$name" ' wt · generic ' 10
-"$h" wait-for "$name" '$' 10
+harness keys "$name" n
+harness wait-for "$name" ' New agent ' 5
+harness type "$name" wt
+harness keys "$name" Tab Right
+harness wait-for "$name" '‹ shell ›' 5
+harness keys "$name" Tab Space
+harness keys "$name" Enter
+harness wait-for "$name" ' wt · generic ' 10
+harness wait-for "$name" '$' 10
 
-"$h" type "$name" pwd
-"$h" keys "$name" Enter
-"$h" wait-for "$name" '/worktrees/' 10
-"$h" type "$name" 'echo hi > f.txt && git add f.txt'
-"$h" keys "$name" Enter
+harness type "$name" pwd Enter
+harness wait-for "$name" '/worktrees/' 10
+harness type "$name" 'echo hi > f.txt && git add f.txt' Enter
 
-"$h" keys "$name" C-q q
-"$h" wait-for "$name" 'n new agent · x stop' 5
-"$h" wait-for "$name" 'branch  lazyagents/wt' 15
-"$h" wait-for "$name" '1 uncommitted' 15
+harness keys "$name" C-q q
+harness wait-for "$name" 'n new agent · x stop' 5
+harness wait-for "$name" 'branch  lazyagents/wt' 15
+harness wait-for "$name" '1 uncommitted' 15
 
-"$h" keys "$name" D
-"$h" wait-for "$name" '+hi' 10
-"$h" keys "$name" q
+harness keys "$name" D
+harness wait-for "$name" '+hi' 10
+harness keys "$name" q
 
-"$h" keys "$name" d
-"$h" wait-for "$name" 'y: agent + worktree' 5
-"$h" keys "$name" y
-"$h" wait-for "$name" 'Worktree has uncommitted changes' 10
-"$h" keys "$name" y
-"$h" wait-for "$name" 'no agents — press n' 10
+harness keys "$name" d
+harness wait-for "$name" 'y: agent + worktree' 5
+harness keys "$name" y
+harness wait-for "$name" 'Worktree has uncommitted changes' 10
+harness keys "$name" y
+harness wait-for "$name" 'no agents — press n' 10
 
-if [[ -n $(find "$state/worktrees" -mindepth 2 -maxdepth 2 -name wt) ]]; then
-  echo "worktree directory still exists" >&2
-  exit 1
-fi
+for dir in "$state"/worktrees/*/wt; do
+  if [[ -e $dir ]]; then
+    echo "worktree directory still exists" >&2
+    exit 1
+  fi
+done
 if [[ $(own_git -C "$repo" branch --list lazyagents/wt) != *lazyagents/wt* ]]; then
   echo "branch lazyagents/wt was deleted" >&2
   exit 1
 fi
 
-"$h" keys "$name" q
+harness keys "$name" q
 LAZYAGENTS_STATE_DIR="$state" "$bin" shutdown >/dev/null
 echo "worktree smoke passed"

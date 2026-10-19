@@ -8,7 +8,8 @@ set -euo pipefail
 unset "${!DIRENV_@}"
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-h="$root/scripts/tmux-harness.sh"
+# shellcheck source=SCRIPTDIR/tmux-harness.sh
+source "$root/scripts/tmux-harness.sh"
 bin="$root/target/debug/lazyagents"
 work=$(mktemp -d)
 state="$work/state"
@@ -19,7 +20,7 @@ block="use POSIX; sigprocmask(SIG_BLOCK, POSIX::SigSet->new(SIGHUP, SIGTERM, SIG
 tui_pid=""
 
 cleanup() {
-  "$h" stop "$name"
+  harness stop "$name"
   if [[ -n $tui_pid ]] && kill -0 "$tui_pid" 2>/dev/null; then kill -9 "$tui_pid" 2>/dev/null || true; fi
   LAZYAGENTS_STATE_DIR="$state" "$bin" shutdown >/dev/null 2>&1 || true
   rm -rf "$work"
@@ -31,24 +32,24 @@ mkdir -p "$project"
 ln -s "$bin" "$link"
 
 scenario() {
-  local label=$1 wrapper=$2
+  local label=$1 wrapper=$2 i
   rm -f "$work/status"
-  "$h" start "$name" 100 30 -- sh -c \
+  harness start "$name" 100 30 -- sh -c \
     "trap '' HUP; cd '$project' && env LAZYAGENTS_STATE_DIR='$state' LAZYAGENTS_CONFIG='$work/config.toml' SHELL=/bin/sh $wrapper '$link'; echo \$? > '$work/status'"
-  "$h" wait-for "$name" "press a to add a project" 10
+  harness wait-for "$name" "press a to add a project" 10
   tui_pid=$(pgrep -fx "$link")
-  "$h" stop "$name"
+  harness stop "$name"
 
-  for _ in $(seq 25); do
+  for ((i = 0; i < 25; i++)); do
     if ! kill -0 "$tui_pid" 2>/dev/null && [[ -s "$work/status" ]]; then break; fi
-    sleep 0.2
+    harness_sleep 0.2
   done
   if kill -0 "$tui_pid" 2>/dev/null; then
     echo "$label: the TUI kept running after its terminal closed" >&2
     exit 1
   fi
-  local status
-  status=$(cat "$work/status" 2>/dev/null || echo missing)
+  local status=missing
+  [[ -f "$work/status" ]] && status=$(<"$work/status")
   if [[ $status != 0 ]]; then
     echo "$label: the TUI exited with status $status" >&2
     exit 1
