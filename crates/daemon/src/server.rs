@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -97,6 +98,13 @@ const SHUTDOWN_DRAIN: Duration = Duration::from_secs(13);
 const WHEEL_LINES: i32 = 3;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
+    run_with_readings(config, Arc::default()).await
+}
+
+/// [`run`], adding one to `readings` for each process table the daemon reads for its
+/// agents' descendants, so a test can wait for readings in place of sleeping.
+#[doc(hidden)]
+pub async fn run_with_readings(config: Config, readings: Arc<AtomicU64>) -> anyhow::Result<()> {
     let paths = config.paths;
     paths
         .create_dir()
@@ -127,6 +135,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let mut writers = JoinSet::new();
     let mut daemon = Daemon::new(paths.clone(), config.exe, config.direnv, state, events_tx);
     daemon.claude_config = config.claude_config;
+    daemon.readings = readings;
     daemon.revert_direnv = daemon.direnv.as_deref().is_some_and(inherits_direnv_env);
     daemon.discard_leftovers();
     let mut next_client: ClientId = 1;
@@ -441,6 +450,8 @@ struct Daemon {
     stopping: Vec<(AgentId, Arc<[Tracked]>)>,
     shutting_down: bool,
     shutdown_began: Option<Instant>,
+    /// How many process tables this daemon has read for its agents' descendants.
+    readings: Arc<AtomicU64>,
 }
 
 /// A worktree create's name, and the request that waits for it.
@@ -499,6 +510,7 @@ impl Daemon {
             stopping: Vec::new(),
             shutting_down: false,
             shutdown_began: None,
+            readings: Arc::default(),
         }
     }
 
@@ -1962,10 +1974,11 @@ impl Daemon {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let job = requests.clone();
+        let readings = Arc::clone(&self.readings);
         let spawned = std::thread::Builder::new()
             .name("snapshot".into())
             .spawn(move || {
-                let _ = tx.send(take_snapshot(ProcessTable::read(), job));
+                let _ = tx.send(take_snapshot(read_counted(&readings), job));
             });
         match spawned {
             Ok(_) => {
@@ -1977,7 +1990,7 @@ impl Daemon {
             }
             Err(e) => {
                 tracing::error!(error = %e, "spawning the snapshot thread failed; reading inline");
-                self.apply_snapshot(take_snapshot(ProcessTable::read(), requests));
+                self.apply_snapshot(take_snapshot(read_counted(&self.readings), requests));
             }
         }
     }
@@ -2368,6 +2381,12 @@ fn fit_in_a_message(response: Response) -> Result<Response, String> {
         )),
         _ => Ok(response),
     }
+}
+
+fn read_counted(readings: &AtomicU64) -> Option<ProcessTable> {
+    ProcessTable::read().inspect(|_| {
+        readings.fetch_add(1, Ordering::SeqCst);
+    })
 }
 
 /// Without a reading every agent keeps its previous list.

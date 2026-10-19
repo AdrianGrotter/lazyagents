@@ -1,9 +1,11 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use daemon::{Config, run};
+use daemon::{Config, run, run_with_readings};
 use protocol::{
     AgentId, AgentInfo, AgentKind, ClientMessage, CreateAgent, Failure, HookKind, InputEvent, Key,
     KeyCode, Modifiers, PROTOCOL_VERSION, Project, Request, Response, Screen, ServerMessage,
@@ -21,6 +23,7 @@ const WAIT: Duration = Duration::from_secs(30);
 struct TestDaemon {
     dir: tempfile::TempDir,
     task: Option<JoinHandle<anyhow::Result<()>>>,
+    readings: Arc<AtomicU64>,
 }
 
 impl TestDaemon {
@@ -46,8 +49,35 @@ impl TestDaemon {
 
     async fn start_configured(configure: impl FnOnce(Config) -> Config) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let task = Some(spawn_configured(configure(config(dir.path()))).await);
-        Self { dir, task }
+        let readings = Arc::new(AtomicU64::new(0));
+        let task = Some(spawn_counted(configure(config(dir.path())), Arc::clone(&readings)).await);
+        Self {
+            dir,
+            task,
+            readings,
+        }
+    }
+
+    /// Waits until the daemon has finished two process-table readings after the call, so
+    /// at least one of them started after whatever the test did before it.
+    async fn two_more_readings(&self) {
+        let from = self.readings.load(Ordering::SeqCst);
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while self.readings.load(Ordering::SeqCst) < from + 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the daemon finished no two process-table readings"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Lets an agent's parent shell exit once the daemon has finished two process-table
+    /// readings after the call, so at least one of them started after the agent's
+    /// descendants existed and links them, however slow a reading is.
+    async fn release(&self, release: &Path) {
+        self.two_more_readings().await;
+        std::fs::write(release, "").expect("release");
     }
 
     fn socket(&self) -> PathBuf {
@@ -99,13 +129,13 @@ fn config(dir: &Path) -> Config {
 }
 
 async fn spawn_daemon(dir: &Path) -> JoinHandle<anyhow::Result<()>> {
-    spawn_configured(config(dir)).await
+    spawn_counted(config(dir), Arc::default()).await
 }
 
-async fn spawn_configured(config: Config) -> JoinHandle<anyhow::Result<()>> {
+async fn spawn_counted(config: Config, readings: Arc<AtomicU64>) -> JoinHandle<anyhow::Result<()>> {
     let socket = config.paths.socket();
     let started = tokio::time::Instant::now();
-    let task = tokio::spawn(run(config));
+    let task = tokio::spawn(run_with_readings(config, readings));
     while UnixStream::connect(&socket).await.is_err() {
         if task.is_finished() {
             panic!("daemon stopped before listening: {:?}", task.await);
@@ -1590,28 +1620,6 @@ fn wait_for_release(release: &Path) -> String {
     format!("until [ -e '{}' ]; do sleep 0.05; done", release.display())
 }
 
-/// Lets an agent's parent shell exit once the daemon has finished two process-table
-/// readings after the call, so at least one of them started after the agent's
-/// descendants existed and links them, however slow `ps` is.
-async fn release(release: &Path) {
-    two_more_readings().await;
-    std::fs::write(release, "").expect("release");
-}
-
-/// Waits until the daemon has finished two process-table readings after the call, so at
-/// least one of them started after whatever the test did before it.
-async fn two_more_readings() {
-    let from = daemon::reap::readings();
-    let deadline = tokio::time::Instant::now() + WAIT;
-    while daemon::reap::readings() < from + 2 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the daemon finished no two process-table readings"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 async fn gone_within(leaves: &Leaves, limit: Duration) -> Vec<u32> {
     let deadline = tokio::time::Instant::now() + limit;
     loop {
@@ -1660,7 +1668,7 @@ async fn exited_agent_leaves_no_detached_descendants() {
     );
     let agent = create_owned(&mut conn, &project, "detach", &sh(&script)).await;
     let leaves = Leaves::read(&pidfile, 1).await;
-    release(&released).await;
+    daemon.release(&released).await;
     conn.wait_status(agent.id, Status::Exited(0)).await;
     assert_eq!(
         gone_within(&leaves, WAIT).await,
@@ -1751,7 +1759,7 @@ async fn shutdown_during_an_exit_reap_leaves_nothing() {
     )
     .await;
     let leaves = Leaves::read(&pidfile, 1).await;
-    release(&released).await;
+    daemon.release(&released).await;
     conn.wait_status(agent.id, Status::Exited(0)).await;
     assert_eq!(leaves.alive(), leaves.0, "descendant never ran");
     conn.request(Request::Shutdown).await.expect("shutdown");
@@ -1778,7 +1786,7 @@ async fn kill_during_an_exit_reap_covers_its_descendants() {
     )
     .await;
     let leaves = Leaves::read(&pidfile, 1).await;
-    release(&released).await;
+    daemon.release(&released).await;
     conn.wait_status(agent.id, Status::Exited(0)).await;
     assert_eq!(leaves.alive(), leaves.0, "descendant never ran");
     conn.request(Request::KillAgent { id: agent.id })
@@ -1807,9 +1815,9 @@ async fn kill_stops_a_detached_descendant_whose_parent_exited() {
     );
     let agent = create_owned(&mut conn, &project, "reparent", &sh(&script)).await;
     let leaves = Leaves::read(&pidfile, 1).await;
-    release(&released).await;
+    daemon.release(&released).await;
     wait_for_file(&parent_gone).await;
-    two_more_readings().await;
+    daemon.two_more_readings().await;
     assert_eq!(leaves.alive(), leaves.0, "descendant never ran");
     conn.request(Request::KillAgent { id: agent.id })
         .await
