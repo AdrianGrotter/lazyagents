@@ -2722,7 +2722,7 @@ mod tests {
         );
         app.popup = Some(Popup::Help(Help::default()));
         let (text, _) = render(&app);
-        assert!(text.contains(" Help ") && text.contains("ctrl-]"), "{text}");
+        assert!(text.contains(" Help ") && text.contains("ctrl-l"), "{text}");
     }
 
     fn help_row(key: &str, action: &str) -> String {
@@ -2737,9 +2737,11 @@ mod tests {
         assert!(!text.contains("more below"), "{text}");
         for (key, action) in [
             ("j/down, k/up", "move down / up in the focused box"),
+            ("ctrl-j, ctrl-k", "next / previous agent, from either box"),
             ("h/left/backtab/1, l/right/2", "focus Projects / Agents"),
             ("tab", "switch between Projects and Agents"),
             ("enter", "open the agent's pane"),
+            ("ctrl-l", "open the agent's pane, from either box"),
             ("n", "new agent"),
             ("x, r", "stop / restart agent"),
             ("c", "custom commands"),
@@ -2761,9 +2763,11 @@ mod tests {
             ),
             ("y, N, i", "approve / deny / reply to the agent"),
             ("ctrl-q q/esc", "back to the sidebar"),
-            ("ctrl-]/ctrl-5", "back to the sidebar"),
+            ("ctrl-]/ctrl-5/ctrl-h", "back to the sidebar"),
             ("ctrl-q j", "next agent"),
+            ("ctrl-j", "next agent"),
             ("ctrl-q k", "previous agent"),
+            ("ctrl-k", "previous agent"),
             ("s", "scroll the agent's history"),
             ("ctrl-q s", "scroll the agent's history"),
             ("ctrl-q ctrl-q", "send ctrl-q to the agent"),

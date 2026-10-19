@@ -342,19 +342,19 @@ daemon last told it.
   `app/commands.rs` (custom commands) and `finish.rs` (the finish menu). Test helpers more
   than one area uses live in `app::tests`.
 - **Focus rule**: keys reach an agent only while the pane has focus, and focus moves into
-  the pane only on an explicit user action: `enter` on a running agent, a click in the
+  the pane only on an explicit user action: `enter` or `ctrl-l` on a running agent, a click in the
   pane on a running agent (a click on an Agents row only selects), or a successful create
   from the new agent form, provided no key was pressed and no popup opened between
   submitting and the daemon's answer; a kept filter that hides the new agent is then
-  cleared. `ctrl-q j`/`k` switch agents from inside the pane
+  cleared. `ctrl-j`/`ctrl-k` and `ctrl-q j`/`k` switch agents from inside the pane
   and keep focus there only when the new agent is running. A failed request clears the
   pending create. Focus returns to the sidebar when the selected agent stops running or
   when the selection changes for any reason other than a key (the agent was removed by
   another client, the agent list was replaced).
 - **Keys and config** (`keymap.rs`, `config.rs`): a `Keymap` maps key events to `Action`s
   in three scopes: the sidebar, the keys after the pane prefix (`ctrl-q`), and the direct
-  keys, which act without the prefix: `direct_leave` (`ctrl-]`, `ctrl-5`) and
-  `direct_next` and `direct_previous`, which are unbound by default. Key strings such as
+  keys, which act without the prefix: `direct_leave` (`ctrl-]`, `ctrl-5`, `ctrl-h`),
+  `direct_next` (`ctrl-j`) and `direct_previous` (`ctrl-k`). Key strings such as
   `ctrl-q`, `shift-tab` or `A` parse into `KeySpec`s, and `describe` renders an action's
   keys for the help popup and the hints. The pane prefix state lives in `App` and is
   cleared whenever focus leaves the pane. `config::load` reads the config file once at

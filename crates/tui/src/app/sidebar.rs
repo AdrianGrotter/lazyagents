@@ -33,6 +33,10 @@ impl App {
             Action::Help => self.popup = Some(Popup::Help(Help::default())),
             Action::Down => self.step(1),
             Action::Up => self.step(-1),
+            Action::NextAgent | Action::PreviousAgent => {
+                self.focus = Focus::Agents;
+                self.move_agent(if action == Action::NextAgent { 1 } else { -1 });
+            }
             Action::FocusProjects => self.focus = Focus::Projects,
             Action::FocusAgents => self.focus = Focus::Agents,
             Action::ToggleFocus => {
@@ -42,8 +46,8 @@ impl App {
                     Focus::Projects
                 };
             }
-            Action::Open => match (&self.focus, self.selected_agent()) {
-                (Focus::Projects, _) => self.focus = Focus::Agents,
+            Action::Open | Action::FocusPane => match (&self.focus, self.selected_agent()) {
+                (Focus::Projects, _) if action == Action::Open => self.focus = Focus::Agents,
                 (_, Some(agent)) if agent.status.is_running() => self.focus = Focus::Pane,
                 (_, Some(agent)) => {
                     let id = agent.id;
@@ -281,7 +285,8 @@ impl App {
         let on_project = self.focus == Focus::Projects;
         let needs_agent = match action {
             Action::Open | Action::Remove => !on_project,
-            Action::Stop
+            Action::FocusPane
+            | Action::Stop
             | Action::Restart
             | Action::Rename
             | Action::Diff
@@ -322,7 +327,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::tests::{
-        agent, code, created, finish_turn, key, loaded, project, two_agents, type_text, update,
+        agent, code, created, ctrl, finish_turn, key, loaded, project, two_agents, type_text,
+        update,
     };
     use protocol::ServerMessage;
     use std::time::Instant;
@@ -337,6 +343,51 @@ mod tests {
         assert_eq!(
             app.on_key(key('k')),
             vec![Effect::Send(Request::Subscribe { id: a.id })]
+        );
+    }
+
+    #[test]
+    fn ctrl_j_and_ctrl_k_move_agents_from_the_projects_box() {
+        let p = project("p");
+        let q = project("q");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Idle);
+        let (mut app, _) = loaded(vec![p, q], vec![a.clone(), b.clone()]);
+        let _ = app.on_key(key('h'));
+        assert_eq!(
+            app.on_key(ctrl('j')),
+            vec![Effect::Send(Request::Subscribe { id: b.id })]
+        );
+        assert_eq!(app.focus, Focus::Agents);
+        let _ = app.on_key(key('h'));
+        assert_eq!(app.focus, Focus::Projects);
+        assert_eq!(
+            app.on_key(ctrl('k')),
+            vec![Effect::Send(Request::Subscribe { id: a.id })]
+        );
+        assert_eq!(app.focus, Focus::Agents);
+    }
+
+    #[test]
+    fn ctrl_l_opens_the_pane_from_either_box() {
+        let (mut app, _, _) = two_agents();
+        let _ = app.on_key(key('h'));
+        let _ = app.on_key(ctrl('l'));
+        assert_eq!(app.focus, Focus::Pane);
+        let _ = app.on_key(ctrl('h'));
+        assert_eq!(app.focus, Focus::Agents);
+        let _ = app.on_key(ctrl('l'));
+        assert_eq!(app.focus, Focus::Pane);
+    }
+
+    #[test]
+    fn ctrl_l_without_an_agent_says_so() {
+        let (mut app, _) = loaded(vec![project("p")], Vec::new());
+        assert!(app.on_key(ctrl('l')).is_empty());
+        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            Some("no agent selected")
         );
     }
 

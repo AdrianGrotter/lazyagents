@@ -1,7 +1,7 @@
 # 0007. Leave the pane with a ctrl-q prefix
 
 Date: 2026-10-16
-Status: Accepted
+Status: Accepted; amended by 0029
 
 ## Context
 

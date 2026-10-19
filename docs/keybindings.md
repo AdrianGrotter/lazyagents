@@ -21,9 +21,11 @@ Two input modes:
 | Key | Action |
 |---|---|
 | `j`/`k`, `↑`/`↓` | move within the focused box |
+| `ctrl-j`/`ctrl-k` | next / previous agent in the Agents box, from either box; focuses Agents |
 | `h`/`l`, `←`/`→`, `tab`/`shift-tab` | switch between Projects and Agents |
 | `1`/`2` | focus Projects / Agents; each box's title starts with the first plain digit key bound to focus it (`[1] Projects`, `[2] Agents`), or no number when none is |
 | `enter` | focus main pane (pane mode); on a stopped or exited agent, start it (Claude: resume session) and focus the pane once it runs |
+| `ctrl-l` | like `enter`, but from the Projects box too: opens the selected agent's pane |
 | `n` | new agent popup: name (optional), preset (`claude`, `shell`, custom command), worktree toggle, base branch and first prompt |
 | `x` | stop agent (confirm) |
 | `r` | restart agent (confirm while it is running; Claude: resume session) |
@@ -203,8 +205,8 @@ Review comments on your changes. Address each one:
 
 The comment popup shows the line it is about; `enter` saves, `esc` cancels.
 
-**Pane mode**: all input goes to the agent except the `ctrl-q` prefix and `ctrl-]`.
-After `ctrl-q`, one more key picks a pane action:
+**Pane mode**: all input goes to the agent except the `ctrl-q` prefix and the direct keys
+below. After `ctrl-q`, one more key picks a pane action:
 
 | Keys | Action |
 |---|---|
@@ -222,13 +224,22 @@ onto an agent that is not running returns focus to the sidebar. A
 pending prefix is dropped whenever focus leaves the pane, and when a paste arrives; the
 paste still reaches the agent.
 
-`ctrl-]` is an alias that goes straight back to the sidebar; legacy terminals report it as
-`ctrl-5`, which works too. `alt-[` and `alt-]` are not bound: they reach the agent like
-any other key.
+Direct keys act without the prefix:
 
-Switching agents without the prefix is opt-in: `direct_next` and `direct_previous` in
-`[keys.pane]` bind keys that switch in one chord, staying in the pane (none by default;
-see [configuration.md](configuration.md#keyspane)). Those keys no longer reach the agent.
+| Keys | Action |
+|---|---|
+| `ctrl-j` | next agent in the Agents panel, staying in the pane |
+| `ctrl-k` | previous agent in the Agents panel, staying in the pane |
+| `ctrl-h`, `ctrl-]` | back to the sidebar; legacy terminals report `ctrl-]` as `ctrl-5`, which works too |
+
+These keys never reach the agent, so in Claude Code `ctrl-j` no longer inserts a newline,
+`ctrl-k` no longer deletes to the end of the line and `ctrl-h` no longer deletes a
+character (`backspace` still does). A terminal that sends `ctrl-h` for `backspace`, as
+some Linux setups do, leaves the pane on every `backspace`; macOS terminals send DEL
+instead. `ctrl-l` still reaches the agent. To get any of these keys back, rebind or empty
+`direct_next`, `direct_previous` and `direct_leave` in `[keys.pane]`
+([configuration.md](configuration.md#keyspane)). `alt-[` and `alt-]` are not bound: they
+reach the agent like any other key.
 
 The mouse works in the pane too; see **Mouse** below.
 

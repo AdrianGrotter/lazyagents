@@ -709,7 +709,7 @@ mod tests {
     fn click_outside_popup_closes_it() {
         let (mut app, _, _) = two_agents();
         let _ = app.on_key(key('?'));
-        let areas = screen_areas(&app);
+        let areas = crate::ui::layout(ratatui::layout::Rect::new(0, 0, 140, 30), &app);
         let popup = areas.popup.expect("popup area");
         let inside = (popup.x + 1, popup.y + 1);
         assert!(

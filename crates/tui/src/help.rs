@@ -7,10 +7,14 @@ use crate::fixed_keys;
 use crate::keymap::{self, Action};
 use crate::layout::{text_width, wrap_words};
 
-const SIDEBAR_HELP: [(&[Action], &str); 20] = [
+const SIDEBAR_HELP: [(&[Action], &str); 22] = [
     (
         &[Action::Down, Action::Up],
         "move down / up in the focused box",
+    ),
+    (
+        &[Action::NextAgent, Action::PreviousAgent],
+        "next / previous agent, from either box",
     ),
     (
         &[Action::FocusProjects, Action::FocusAgents],
@@ -20,6 +24,10 @@ const SIDEBAR_HELP: [(&[Action], &str); 20] = [
     (
         &[Action::Open],
         "open the agent's pane, restarting it if it is not running",
+    ),
+    (
+        &[Action::FocusPane],
+        "open the agent's pane, from either box",
     ),
     (&[Action::NewAgent], "new agent"),
     (&[Action::Stop, Action::Restart], "stop / restart agent"),

@@ -556,12 +556,29 @@ mod tests {
     }
 
     #[test]
-    fn direct_next_and_previous_are_unbound_by_default() {
-        let keymap = Keymap::defaults();
-        assert!(keymap.direct_keys(Action::PaneNext).is_empty());
-        assert!(keymap.direct_keys(Action::PanePrevious).is_empty());
-        assert_eq!(keymap.direct(&ctrl('j')), None);
-        assert_eq!(keymap.direct(&ctrl('k')), None);
+    fn empty_lists_unbind_the_default_ctrl_navigation() {
+        let config = load_text(
+            r#"
+            [keys.sidebar]
+            next_agent = []
+            previous_agent = []
+            focus_pane = []
+
+            [keys.pane]
+            direct_next = []
+            direct_previous = []
+            direct_leave = ["ctrl-]"]
+            "#,
+        );
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let keymap = &config.keymap;
+        for c in ['j', 'k', 'h'] {
+            assert_eq!(keymap.direct(&ctrl(c)), None, "ctrl-{c}");
+        }
+        for c in ['j', 'k', 'l'] {
+            assert_eq!(keymap.sidebar(&ctrl(c)), None, "ctrl-{c}");
+        }
+        assert_eq!(keymap.direct(&ctrl(']')), Some(Action::PaneLeave));
     }
 
     #[test]

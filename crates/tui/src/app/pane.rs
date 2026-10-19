@@ -444,15 +444,56 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_j_and_ctrl_k_reach_the_agent_by_default() {
+    fn ctrl_j_and_ctrl_k_switch_agents_and_ctrl_h_leaves_by_default() {
+        let (mut app, a, b) = two_agents();
+        let _ = app.on_key(code(KeyCode::Enter));
+        assert_eq!(
+            app.on_key(ctrl('j')),
+            vec![Effect::Send(Request::Subscribe { id: b.id })]
+        );
+        assert_eq!(app.focus, Focus::Pane);
+        assert_eq!(
+            app.on_key(ctrl('k')),
+            vec![Effect::Send(Request::Subscribe { id: a.id })]
+        );
+        assert_eq!(app.focus, Focus::Pane);
+        assert!(app.on_key(ctrl('h')).is_empty());
+        assert_eq!(app.focus, Focus::Agents);
+    }
+
+    #[test]
+    fn ctrl_l_reaches_the_agent() {
         let (mut app, a, _) = two_agents();
         let _ = app.on_key(code(KeyCode::Enter));
-        for c in ['j', 'k'] {
+        assert_eq!(
+            app.on_key(ctrl('l')),
+            vec![char_input(a.id, 'l', protocol::Modifiers::CTRL)]
+        );
+        assert_eq!(app.focus, Focus::Pane);
+    }
+
+    #[test]
+    fn unbound_direct_keys_reach_the_agent() {
+        let config = configured(
+            r#"
+            [keys.pane]
+            direct_next = []
+            direct_previous = []
+            direct_leave = []
+            "#,
+        );
+        let p = project("p");
+        let a = agent(&p, "alpha", Status::Idle);
+        let b = agent(&p, "beta", Status::Idle);
+        let (mut app, _) = loaded_with(config, vec![p], vec![a.clone(), b]);
+        let _ = app.on_key(code(KeyCode::Enter));
+        for c in ['j', 'k', 'h'] {
             assert_eq!(
                 app.on_key(ctrl(c)),
                 vec![char_input(a.id, c, protocol::Modifiers::CTRL)]
             );
             assert_eq!(app.selected_agent().map(|x| x.id), Some(a.id));
+            assert_eq!(app.focus, Focus::Pane);
         }
     }
 

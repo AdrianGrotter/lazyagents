@@ -10,8 +10,11 @@ pub enum Action {
     Help,
     Down,
     Up,
+    NextAgent,
+    PreviousAgent,
     FocusProjects,
     FocusAgents,
+    FocusPane,
     ToggleFocus,
     Open,
     NewAgent,
@@ -251,6 +254,8 @@ impl Keymap {
                 ("down", Down),
                 ("k", Up),
                 ("up", Up),
+                ("ctrl-j", NextAgent),
+                ("ctrl-k", PreviousAgent),
                 ("h", FocusProjects),
                 ("left", FocusProjects),
                 ("backtab", FocusProjects),
@@ -258,6 +263,7 @@ impl Keymap {
                 ("l", FocusAgents),
                 ("right", FocusAgents),
                 ("2", FocusAgents),
+                ("ctrl-l", FocusPane),
                 ("tab", ToggleFocus),
                 ("enter", Open),
                 ("n", NewAgent),
@@ -292,7 +298,13 @@ impl Keymap {
                 ("ctrl-q", PaneSendPrefix),
                 ("+", PaneScreenMode),
             ]),
-            direct: bindings(&[("ctrl-]", PaneLeave), ("ctrl-5", PaneLeave)]),
+            direct: bindings(&[
+                ("ctrl-]", PaneLeave),
+                ("ctrl-5", PaneLeave),
+                ("ctrl-h", PaneLeave),
+                ("ctrl-j", PaneNext),
+                ("ctrl-k", PanePrevious),
+            ]),
         }
     }
 
@@ -688,6 +700,42 @@ mod tests {
             keymap.direct(&ev(KeyCode::Char(']'), KeyModifiers::NONE)),
             None
         );
+    }
+
+    #[test]
+    fn ctrl_h_j_k_act_directly_in_the_pane() {
+        let keymap = Keymap::defaults();
+        for (c, expected) in [
+            ('j', Action::PaneNext),
+            ('k', Action::PanePrevious),
+            ('h', Action::PaneLeave),
+        ] {
+            assert_eq!(
+                keymap.direct(&ev(KeyCode::Char(c), KeyModifiers::CONTROL)),
+                Some(expected),
+                "ctrl-{c}"
+            );
+        }
+        assert_eq!(
+            keymap.direct(&ev(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+            None
+        );
+    }
+
+    #[test]
+    fn ctrl_h_j_k_l_navigate_from_the_sidebar() {
+        let keymap = Keymap::defaults();
+        for (c, expected) in [
+            ('j', Action::NextAgent),
+            ('k', Action::PreviousAgent),
+            ('l', Action::FocusPane),
+        ] {
+            assert_eq!(
+                keymap.sidebar(&ev(KeyCode::Char(c), KeyModifiers::CONTROL)),
+                Some(expected),
+                "ctrl-{c}"
+            );
+        }
     }
 
     #[test]

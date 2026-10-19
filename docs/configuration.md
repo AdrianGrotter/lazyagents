@@ -80,10 +80,13 @@ SHIFT; with `ctrl` or `alt`, SHIFT counts, so `ctrl-Q` is not `ctrl-q`.
 | `help` | `?` |
 | `down` | `j`, `down` |
 | `up` | `k`, `up` |
+| `next_agent` | `ctrl-j` |
+| `previous_agent` | `ctrl-k` |
 | `focus_projects` | `h`, `left`, `backtab`, `1` |
 | `focus_agents` | `l`, `right`, `2` |
 | `toggle_focus` | `tab` |
 | `open` | `enter` |
+| `focus_pane` | `ctrl-l` |
 | `new_agent` | `n` |
 | `add_project` | `a` |
 | `stop` | `x` |
@@ -119,12 +122,21 @@ its own.
 | `scroll` | `s` | scroll mode |
 | `send_prefix` | the prefix | send one prefix key to the agent |
 | `screen` | `+` | next screen mode, staying in the pane |
-| `direct_leave` | `ctrl-]`, `ctrl-5` | leave without the prefix |
-| `direct_next` | none | next agent without the prefix, staying in the pane |
-| `direct_previous` | none | previous agent without the prefix, staying in the pane |
+| `direct_leave` | `ctrl-]`, `ctrl-5`, `ctrl-h` | leave without the prefix |
+| `direct_next` | `ctrl-j` | next agent without the prefix, staying in the pane |
+| `direct_previous` | `ctrl-k` | previous agent without the prefix, staying in the pane |
 
 Setting `prefix` also makes pressing it twice send it to the agent, unless `send_prefix`
 is set too. The direct keys may not contain the prefix.
+
+The direct keys never reach the agent. To hand `ctrl-h`, `ctrl-j` and `ctrl-k` back to it:
+
+```toml
+[keys.pane]
+direct_next = []
+direct_previous = []
+direct_leave = ["ctrl-]", "ctrl-5"]
+```
 
 A direct key never reaches the agent. `direct_next` and `direct_previous` are unbound by
 default because the obvious choices are keys agents use: Claude Code inserts a newline on
