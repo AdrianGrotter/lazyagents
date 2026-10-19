@@ -133,7 +133,21 @@ impl Drop for TestDaemon {
     }
 }
 
+/// Sends the daemon's log to the running test's captured output, so a failing test prints
+/// what its daemon logged. The daemons share this process, and libtest keeps each test's
+/// output apart, including that of the runtime and threads the test started.
+fn capture_daemon_logs() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_ansi(false)
+            .init();
+    });
+}
+
 fn config(dir: &Path) -> Config {
+    capture_daemon_logs();
     Config {
         paths: StatePaths::new(dir),
         exe: PathBuf::from("/usr/bin/true"),
