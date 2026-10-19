@@ -44,30 +44,37 @@ pub(crate) fn block_on_agent<F: std::future::Future>(task: impl FnOnce(Uuid, Pat
 }
 
 /// Reads the payload and forwards it, giving up silently once `BUDGET` has passed.
-async fn deliver(kind: HookKind, agent: Uuid, socket: PathBuf, mut input: impl AsyncRead + Unpin) {
-    let _ = tokio::time::timeout(BUDGET, async {
-        let mut payload = String::new();
-        let _ = input.read_to_string(&mut payload).await;
-        let payload = serde_json::from_str::<serde_json::Value>(&payload).ok();
-        let field = |name: &str| {
-            payload
-                .as_ref()
-                .and_then(|value| value.get(name)?.as_str().map(str::to_owned))
-        };
-        let Some(kind) = effective_kind(kind, payload.as_ref()) else {
-            return Ok(());
-        };
-        let request = Request::Hook {
-            id: AgentId(agent),
-            kind,
-            session_id: field("session_id"),
-            source: field("source"),
-            detail: detail(kind, payload.as_ref()),
-            subagent: field("agent_id"),
-        };
-        send(socket, request).await
-    })
-    .await;
+async fn deliver(kind: HookKind, agent: Uuid, socket: PathBuf, input: impl AsyncRead + Unpin) {
+    let _ = tokio::time::timeout(BUDGET, relay(kind, agent, socket, input)).await;
+}
+
+/// Reads the payload and forwards it, however long that takes.
+pub(crate) async fn relay(
+    kind: HookKind,
+    agent: Uuid,
+    socket: PathBuf,
+    mut input: impl AsyncRead + Unpin,
+) -> std::io::Result<()> {
+    let mut payload = String::new();
+    let _ = input.read_to_string(&mut payload).await;
+    let payload = serde_json::from_str::<serde_json::Value>(&payload).ok();
+    let field = |name: &str| {
+        payload
+            .as_ref()
+            .and_then(|value| value.get(name)?.as_str().map(str::to_owned))
+    };
+    let Some(kind) = effective_kind(kind, payload.as_ref()) else {
+        return Ok(());
+    };
+    let request = Request::Hook {
+        id: AgentId(agent),
+        kind,
+        session_id: field("session_id"),
+        source: field("source"),
+        detail: detail(kind, payload.as_ref()),
+        subagent: field("agent_id"),
+    };
+    send(socket, request).await
 }
 
 const DETAIL_CHARS: usize = 120;

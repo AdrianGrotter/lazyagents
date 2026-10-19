@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,33 +15,48 @@ const DEFAULT_ROWS: u16 = 40;
 
 pub async fn run(command: Command) -> anyhow::Result<()> {
     let paths = StatePaths::from_env()?;
+    let mut stdout = io::stdout();
     if matches!(command, Command::Shutdown) {
-        return shutdown(&paths).await;
+        return shutdown(&paths, &mut stdout).await;
     }
     let exe = std::env::current_exe().context("locating the lazyagents binary")?;
     let mut client = Client::connect_or_spawn(&paths, &exe).await?;
+    execute(&mut client, command, &std::env::current_dir, &mut stdout).await
+}
+
+/// Runs a command that talks to the daemon through `client` and writes its report to
+/// `out`. `cwd` gives the caller's directory; only commands that need it ask.
+pub async fn execute(
+    client: &mut Client,
+    command: Command,
+    cwd: &dyn Fn() -> io::Result<PathBuf>,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     match command {
         Command::Ls => {
-            let (projects, agents) = snapshot(&mut client).await?;
-            print!("{}", format_ls(&projects, &agents));
+            let (projects, agents) = snapshot(client).await?;
+            write!(out, "{}", format_ls(&projects, &agents))?;
         }
         Command::Project(ProjectCommand::Add { path, name }) => {
             let path = match path {
-                Some(path) => path,
-                None => std::env::current_dir()?,
+                Some(path) if path.is_absolute() || path.as_os_str().is_empty() => path,
+                Some(path) => cwd()
+                    .with_context(|| format!("resolving {}", path.display()))?
+                    .join(path),
+                None => cwd()?,
             };
             let path = std::path::absolute(&path)
                 .with_context(|| format!("resolving {}", path.display()))?;
-            let project = add_project(&mut client, path, name).await?;
-            println!("added {} ({})", project.name, project.path.display());
+            let project = add_project(client, path, name).await?;
+            writeln!(out, "added {} ({})", project.name, project.path.display())?;
         }
         Command::Project(ProjectCommand::Rm { project }) => {
-            let (projects, _) = snapshot(&mut client).await?;
+            let (projects, _) = snapshot(client).await?;
             let project = resolve_project(&projects, &project)?;
             client
                 .request(Request::RemoveProject { id: project.id })
                 .await?;
-            println!("removed project {}", project.name);
+            writeln!(out, "removed project {}", project.name)?;
         }
         Command::New {
             name,
@@ -49,14 +65,14 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
             prompt,
             command,
         } => {
-            let (projects, _) = snapshot(&mut client).await?;
+            let (projects, _) = snapshot(client).await?;
             let project = match project {
                 Some(query) => resolve_project(&projects, &query)?,
                 None => {
-                    let cwd = std::env::current_dir()?.canonicalize()?;
+                    let cwd = cwd()?.canonicalize()?;
                     match containing_project(&projects, &cwd) {
                         Some(project) => project,
-                        None => add_project(&mut client, cwd, None).await?,
+                        None => add_project(client, cwd, None).await?,
                     }
                 }
             };
@@ -77,12 +93,12 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
             });
             let info = match client.request(request).await {
                 Ok(response) => expect_agent(response)?,
-                Err(e) => return Err(explain_kept_agent(&mut client, &project, &name, e).await),
+                Err(e) => return Err(explain_kept_agent(client, &project, &name, e).await),
             };
-            println!("started {}", info.name);
+            writeln!(out, "started {}", info.name)?;
         }
         Command::Send { agent, text } => {
-            let info = find_agent(&mut client, &agent).await?;
+            let info = find_agent(client, &agent).await?;
             let enter = protocol::Key::new(protocol::KeyCode::Enter, protocol::Modifiers::NONE);
             for event in [
                 protocol::InputEvent::Paste(text),
@@ -92,25 +108,25 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
                     .request(Request::Input { id: info.id, event })
                     .await?;
             }
-            println!("sent to {}", info.name);
+            writeln!(out, "sent to {}", info.name)?;
         }
         Command::Kill { agent } => {
-            let info = find_agent(&mut client, &agent).await?;
+            let info = find_agent(client, &agent).await?;
             client.request(Request::KillAgent { id: info.id }).await?;
-            println!("stopped {}", info.name);
+            writeln!(out, "stopped {}", info.name)?;
         }
         Command::Restart { agent } => {
-            let info = find_agent(&mut client, &agent).await?;
+            let info = find_agent(client, &agent).await?;
             let request = Request::RestartAgent {
                 id: info.id,
                 cols: DEFAULT_COLS,
                 rows: DEFAULT_ROWS,
             };
             client.request(request).await?;
-            println!("restarted {}", info.name);
+            writeln!(out, "restarted {}", info.name)?;
         }
         Command::Rm { agent } => {
-            let info = find_agent(&mut client, &agent).await?;
+            let info = find_agent(client, &agent).await?;
             client
                 .request(Request::RemoveAgent {
                     id: info.id,
@@ -119,16 +135,16 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
                     delete_branch: false,
                 })
                 .await?;
-            println!("{}", removed_message(&info));
+            writeln!(out, "{}", removed_message(&info))?;
         }
         Command::Rename { agent, name } => {
-            let info = find_agent(&mut client, &agent).await?;
+            let info = find_agent(client, &agent).await?;
             let renamed = expect_agent(
                 client
                     .request(Request::RenameAgent { id: info.id, name })
                     .await?,
             )?;
-            println!("renamed {} to {}", info.name, renamed.name);
+            writeln!(out, "renamed {} to {}", info.name, renamed.name)?;
         }
         Command::Daemon | Command::Hook { .. } | Command::Statusline | Command::Shutdown => {
             unreachable!("dispatched in main")
@@ -137,12 +153,12 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn shutdown(paths: &StatePaths) -> anyhow::Result<()> {
+pub async fn shutdown(paths: &StatePaths, out: &mut dyn Write) -> anyhow::Result<()> {
     let mut client = match Client::connect(paths).await {
         Ok(client) => client,
         Err(e) => {
             let Some(mismatch) = e.downcast_ref::<VersionMismatch>() else {
-                println!("daemon is not running");
+                writeln!(out, "daemon is not running")?;
                 return Ok(());
             };
             client::stop_daemon(paths, SHUTDOWN_WAIT).with_context(|| {
@@ -151,7 +167,7 @@ async fn shutdown(paths: &StatePaths) -> anyhow::Result<()> {
                     mismatch.daemon_version, mismatch.protocol_version
                 )
             })?;
-            println!("daemon stopped");
+            writeln!(out, "daemon stopped")?;
             return Ok(());
         }
     };
@@ -171,7 +187,7 @@ async fn shutdown(paths: &StatePaths) -> anyhow::Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    println!("daemon stopped");
+    writeln!(out, "daemon stopped")?;
     Ok(())
 }
 
