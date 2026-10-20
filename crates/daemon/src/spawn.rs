@@ -24,6 +24,9 @@ pub struct SpawnContext<'a> {
     pub paths: &'a StatePaths,
     pub project_root: &'a Path,
     pub direnv: Option<&'a Path>,
+    /// A directory above the project root whose `.envrc` direnv allows, loaded when no
+    /// `.envrc` in the project is.
+    pub envrc_above: Option<&'a Path>,
     /// The daemon inherited a direnv-loaded `.envrc`'s changes; an agent with no `.envrc` of
     /// its own then runs under `direnv exec /`, which reverts them.
     pub revert_direnv: bool,
@@ -68,6 +71,7 @@ pub fn spawn_spec(record: &AgentRecord, launch: Launch, ctx: &SpawnContext<'_>) 
     }
 
     let envrc_dir = find_envrc(&record.cwd, ctx.project_root)
+        .or_else(|| ctx.envrc_above.map(Path::to_path_buf))
         .or_else(|| ctx.revert_direnv.then(|| PathBuf::from("/")));
     let (program, args) = match ctx.direnv.zip(envrc_dir) {
         Some((direnv, dir)) => {
@@ -110,6 +114,18 @@ pub fn find_envrc(cwd: &Path, root: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The nearest directory above `root` with an `.envrc`, for an agent in `cwd` that no
+/// `.envrc` in the project applies to.
+pub fn envrc_above(cwd: &Path, root: &Path) -> Option<PathBuf> {
+    if find_envrc(cwd, root).is_some() {
+        return None;
+    }
+    root.ancestors()
+        .skip(1)
+        .find(|dir| dir.join(".envrc").is_file())
+        .map(Path::to_path_buf)
 }
 
 /// direnv allows an `.envrc` by path, so the copy checked out in a new worktree starts
@@ -218,6 +234,7 @@ mod tests {
             paths,
             project_root: root,
             direnv,
+            envrc_above: None,
             revert_direnv: false,
             prompt: None,
             setup: None,
@@ -462,6 +479,55 @@ mod tests {
         std::fs::create_dir_all(&root).expect("mkdir");
         std::fs::write(outer.path().join(".envrc"), "").expect("envrc");
         assert_eq!(find_envrc(&root, &root), None);
+    }
+
+    #[test]
+    fn the_nearest_envrc_above_the_project_is_the_one_to_check() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let mid = outer.path().join("mid");
+        let root = mid.join("project");
+        let worktree = outer.path().join("worktree");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::create_dir_all(&worktree).expect("mkdir");
+        assert_eq!(envrc_above(&root, &root), None);
+        std::fs::write(outer.path().join(".envrc"), "").expect("envrc");
+        assert_eq!(envrc_above(&root, &root), Some(outer.path().to_path_buf()));
+        std::fs::write(mid.join(".envrc"), "").expect("envrc");
+        assert_eq!(envrc_above(&root, &root), Some(mid.clone()));
+        assert_eq!(envrc_above(&worktree, &root), Some(mid.clone()));
+        std::fs::write(root.join(".envrc"), "").expect("envrc");
+        assert_eq!(envrc_above(&root, &root), None);
+        std::fs::write(worktree.join(".envrc"), "").expect("envrc");
+        assert_eq!(envrc_above(&worktree, &root), None);
+    }
+
+    #[test]
+    fn an_envrc_above_the_project_loads_only_where_none_inside_does() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let root = outer.path().join("project");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let worktree = tempfile::tempdir().expect("worktree");
+        let paths = StatePaths::new("/s");
+        let above = SpawnContext {
+            envrc_above: Some(outer.path()),
+            revert_direnv: true,
+            ..ctx(&paths, &root, Some(Path::new("/nix/direnv")))
+        };
+        for cwd in [root.as_path(), worktree.path()] {
+            let rec = record(AgentKind::Generic, &["sh"], cwd);
+            let spec = spawn_spec(&rec, Launch::Fresh, &above);
+            assert_eq!(spec.program, "/nix/direnv");
+            assert_eq!(
+                spec.args,
+                ["exec", outer.path().to_str().expect("utf8"), "sh"]
+            );
+            assert_eq!(spec.cwd, cwd);
+        }
+
+        std::fs::write(root.join(".envrc"), "use flake\n").expect("envrc");
+        let rec = record(AgentKind::Generic, &["sh"], &root);
+        let spec = spawn_spec(&rec, Launch::Fresh, &above);
+        assert_eq!(spec.args[1], root.display().to_string());
     }
 
     #[test]

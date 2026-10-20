@@ -27,7 +27,9 @@ use crate::encode::encode;
 use crate::lock::InstanceLock;
 use crate::outbox::{self, Outbox, Outgoing};
 use crate::reap::{self, ProcessTable, Tracked};
-use crate::spawn::{Launch, SpawnContext, blocked_envrc_hint, hook_settings, spawn_spec};
+use crate::spawn::{
+    Launch, SpawnContext, blocked_envrc_hint, envrc_above, hook_settings, spawn_spec,
+};
 use crate::status::{GenericWindows, Times, awaits_trust, on_hook, settle, trust_keys};
 use crate::store::{self, AgentRecord, PendingWorktree, StoredState};
 use crate::terminal::{Outcome, PaneSize, Proxy, Terminal, TerminalEvent, session_title};
@@ -937,16 +939,43 @@ impl Daemon {
         if create.kind == AgentKind::Generic && create.command.is_empty() {
             return now(Err("a generic agent needs a command".into()));
         }
-        let Some(request) = create.worktree.clone() else {
-            return now(self
-                .finish_create(&project, create, None)
-                .map(Response::Agent));
-        };
         let reservation = Reservation {
             project: project.id,
             name: create.name.clone(),
             client,
             request_id,
+        };
+        let Some(request) = create.worktree.clone() else {
+            let checked = self
+                .direnv
+                .clone()
+                .filter(|_| envrc_above(&project.path, &project.path).is_some());
+            let Some(direnv) = checked else {
+                return now(self
+                    .finish_create(&project, create, None, None)
+                    .map(Response::Agent));
+            };
+            self.creating.push(reservation.clone());
+            let root = project.path.clone();
+            self.off_loop(
+                "direnv",
+                move || allowed_envrc_above(Some(&direnv), &root, &root),
+                move |daemon, envrc_above| {
+                    let result = if daemon.shutting_down {
+                        Err(format!(
+                            "the daemon shut down before {} started",
+                            create.name
+                        ))
+                    } else {
+                        let envrc_above = envrc_above.flatten();
+                        daemon
+                            .finish_create(&project, create, None, envrc_above.as_deref())
+                            .map(Response::Agent)
+                    };
+                    reservation.answer(daemon, result);
+                },
+            );
+            return Reply::Deferred;
         };
         self.creating.push(reservation.clone());
         let state = self.paths.dir().to_path_buf();
@@ -1002,6 +1031,9 @@ impl Daemon {
                     requested_base.as_deref(),
                     direnv.as_deref(),
                 )
+                .map(|()| {
+                    allowed_envrc_above(direnv.as_deref(), &job_worktree.path, &job_project.path)
+                })
             },
             move |daemon, made| {
                 let Creation {
@@ -1011,12 +1043,17 @@ impl Daemon {
                 } = creation;
                 let failed = format!("creating the worktree for {} failed", create.name);
                 match made {
-                    Some(Ok(())) if !daemon.shutting_down => {
+                    Some(Ok(envrc_above)) if !daemon.shutting_down => {
                         daemon.forget_pending(&pending);
-                        let result = daemon.finish_create(&project, create, Some(worktree));
+                        let result = daemon.finish_create(
+                            &project,
+                            create,
+                            Some(worktree),
+                            envrc_above.as_deref(),
+                        );
                         reservation.answer(daemon, result.map(Response::Agent));
                     }
-                    Some(Ok(())) => daemon.discard_pending(pending, move |daemon, gone| {
+                    Some(Ok(_)) => daemon.discard_pending(pending, move |daemon, gone| {
                         let what = if gone {
                             "its worktree was removed"
                         } else {
@@ -1159,6 +1196,7 @@ impl Daemon {
         project: &Project,
         create: CreateAgent,
         worktree: Option<WorktreeInfo>,
+        envrc_above: Option<&Path>,
     ) -> Result<AgentInfo, String> {
         let record = AgentRecord {
             id: AgentId::random(),
@@ -1179,23 +1217,33 @@ impl Daemon {
         agent.pending_prompt = create.prompt.filter(|p| !p.trim().is_empty());
         agent.pending_setup = create.setup.filter(|s| !s.trim().is_empty());
         self.agents.insert(id, agent);
-        let started = self.spawn_agent(id, Launch::Fresh, PaneSize::new(create.cols, create.rows));
+        let size = PaneSize::new(create.cols, create.rows);
+        let started = self.spawn_agent(id, Launch::Fresh, size, envrc_above);
         self.persist();
         self.announce(id);
         started?;
         self.info_of(id)
     }
 
+    fn project_root(&self, id: AgentId) -> Result<PathBuf, String> {
+        let agent = self.agent(id)?;
+        Ok(self
+            .projects
+            .iter()
+            .find(|p| p.id == agent.record.project)
+            .map(|p| p.path.clone())
+            .unwrap_or_else(|| agent.record.cwd.clone()))
+    }
+
     /// Starts the agent's process; whatever ran before must be stopped already.
-    fn spawn_agent(&mut self, id: AgentId, launch: Launch, size: PaneSize) -> Result<(), String> {
-        let project_root = {
-            let agent = self.agent(id)?;
-            self.projects
-                .iter()
-                .find(|p| p.id == agent.record.project)
-                .map(|p| p.path.clone())
-                .unwrap_or_else(|| agent.record.cwd.clone())
-        };
+    fn spawn_agent(
+        &mut self,
+        id: AgentId,
+        launch: Launch,
+        size: PaneSize,
+        envrc_above: Option<&Path>,
+    ) -> Result<(), String> {
+        let project_root = self.project_root(id)?;
         let agent = self
             .agents
             .get_mut(&id)
@@ -1229,6 +1277,7 @@ impl Daemon {
             paths: &self.paths,
             project_root: &project_root,
             direnv: self.direnv.as_deref(),
+            envrc_above,
             revert_direnv: self.revert_direnv,
             prompt: claude_prompt.as_deref(),
             setup: setup.as_deref(),
@@ -1619,11 +1668,19 @@ impl Daemon {
         if let Err(e) = self.idle(id) {
             return now(Err(e));
         }
+        let dirs = self
+            .project_root(id)
+            .and_then(|root| Ok((self.agent(id)?.record.cwd.clone(), root)));
+        let (cwd, root) = match dirs {
+            Ok(dirs) => dirs,
+            Err(e) => return now(Err(e)),
+        };
+        let direnv = self.direnv.clone();
         self.begin_stop(
             id,
             "restarting",
-            || (),
-            move |daemon, _| {
+            move || allowed_envrc_above(direnv.as_deref(), &cwd, &root),
+            move |daemon, envrc_above| {
                 let started = if daemon.shutting_down {
                     if let Some(agent) = daemon.agents.get_mut(&id) {
                         agent.set_status(Status::Stopped);
@@ -1631,7 +1688,8 @@ impl Daemon {
                     }
                     Err("the daemon is shutting down".to_string())
                 } else {
-                    daemon.spawn_agent(id, Launch::Resume, size)
+                    let envrc_above = envrc_above.flatten();
+                    daemon.spawn_agent(id, Launch::Resume, size, envrc_above.as_deref())
                 };
                 daemon.persist();
                 daemon.announce(id);
@@ -2396,6 +2454,15 @@ fn worktree_failure(
     let raw = format!("{e:#}");
     tracing::warn!(error = %raw, "creating a worktree failed");
     git::worktree_failure(&raw, &project.path, path, branch, requested_base).unwrap_or(raw)
+}
+
+/// The allowed `.envrc` above `root` that an agent in `cwd` loads; a direnv call that
+/// fails is logged and loads none.
+fn allowed_envrc_above(direnv: Option<&Path>, cwd: &Path, root: &Path) -> Option<PathBuf> {
+    direnv::allowed_envrc_above(direnv?, cwd, root, &[]).unwrap_or_else(|e| {
+        tracing::warn!(error = %format!("{e:#}"), "checking the .envrc above the project failed");
+        None
+    })
 }
 
 fn inherits_direnv_env(direnv: &Path) -> bool {

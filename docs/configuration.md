@@ -336,6 +336,14 @@ again (ADR 0014). Approvals are kept in `approved-setups.toml` in the state dire
 agent form open with the error. Agents get `LAZYAGENTS_PROJECT_PATH`, the project's
 directory, in their environment, which a setup can use to copy from the main checkout.
 
+Agents load the project's direnv `.envrc` when `direnv` is on `PATH`: the nearest one from
+the agent's directory up to the project root, or, when the project has none, the nearest
+one above the project root (such as a flake shared by the repos in a parent folder), but
+only once you have allowed it with `direnv allow`. An `.envrc` above the project that
+direnv reports as blocked is ignored; lazyagents neither prompts for it nor allows it
+(ADR 0034). Worktree agents get the same `.envrc` above the project as agents in its
+checkout. Allowing or revoking it takes effect at an agent's next start or restart.
+
 `.worktreeinclude` lists, in gitignore syntax, gitignored files to copy from the project
 into each new worktree, such as `.env`; it is the file Claude Code and the Codex app read for
 their own worktrees. Files already in the worktree are left alone, and nothing is run. As in

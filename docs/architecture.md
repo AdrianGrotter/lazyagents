@@ -237,14 +237,19 @@ PTY size follows the main pane size of the most recently active client (tmux sem
 Agents are spawned in their working directory with the daemon's environment plus
 `LAZYAGENTS_*` variables. If the working directory (or an ancestor up to the project root)
 contains `.envrc` and `direnv` is on `PATH`, the command is wrapped as
-`direnv exec <dir> <cmd...>` so nix/direnv environments load. The user's `claude` shell
-function is not used; the binary on `PATH` is.
+`direnv exec <dir> <cmd...>` so nix/direnv environments load. Failing that, the nearest
+`.envrc` above the project root (searched from the project root, for worktree agents too)
+is used the same way, but only when `direnv status --json` run in its directory reports it
+as allowed; a blocked one is ignored, never prompted for or allowed (ADR 0034). That
+check runs off the event loop: with the worktree on a worktree create, with the stop on a
+restart, and on a thread of its own for a plain create when such an `.envrc` exists. The
+user's `claude` shell function is not used; the binary on `PATH` is.
 
 The daemon's environment is that of the process that started it, which may be a shell
 where direnv loaded some other project's `.envrc`. `direnv exec` reverts that diff before
 loading, so agents with an `.envrc` of their own never see it. For the rest, the daemon
 runs `direnv export json` in `/` once at startup; when that prints a revert, every agent
-without an `.envrc` runs as `direnv exec / <cmd...>` (direnv keeps the working directory)
+that loads no `.envrc` runs as `direnv exec / <cmd...>` (direnv keeps the working directory)
 and sees the variables as they were before direnv loaded (ADR 0016). With no `direnv` on
 `PATH`, no inherited diff, or a `DIRENV_DIFF` direnv cannot read (logged), agents start
 without the wrapper.

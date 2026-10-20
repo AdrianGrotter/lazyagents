@@ -1,7 +1,7 @@
 # 0016. Revert an inherited direnv environment by running agents under `direnv exec /`
 
 Date: 2026-10-17
-Status: Accepted
+Status: Accepted; amended by 0034
 
 ## Context
 
@@ -24,3 +24,5 @@ At startup, when `direnv` is on its `PATH`, the daemon runs `direnv export json`
 ## Consequences
 
 Agents see the environment the starting shell had before direnv loaded anything, plus their own project's `.envrc`. One `direnv export` runs at daemon start, and affected agents pay one `direnv exec`. The daemon's own subprocesses (git, `direnv status`/`allow`) still run with the inherited environment. Like direnv itself on `cd`, the revert restores the recorded previous values, so a change the shell made after direnv loaded to a variable direnv touched is undone too. The startup probe and `direnv exec /` run direnv in `/`, so a `/.envrc` the user has allowed would be evaluated by the probe and its variables would reach every agent without an `.envrc` of its own.
+
+Amended by [0034](0034-load-an-allowed-envrc-above-the-project.md): an agent with no `.envrc` in the project loads the nearest one above the project root when direnv already allows it, and runs under `direnv exec /` only when that does not apply either. A blocked `.envrc` above the project is still ignored.

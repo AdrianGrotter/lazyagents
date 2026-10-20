@@ -1,11 +1,14 @@
 //! Allows a new worktree's `.envrc` when the user already allowed the same content in
-//! the project, and tells whether the daemon inherited a direnv-loaded environment.
+//! the project, finds an allowed `.envrc` above a project, and tells whether the daemon
+//! inherited a direnv-loaded environment.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::Context;
 use serde_json::Value;
+
+use crate::spawn::envrc_above;
 
 /// Extra environment for the direnv commands.
 pub type Env<'a> = &'a [(&'a str, &'a Path)];
@@ -46,6 +49,20 @@ pub fn is_allowed(direnv: &Path, dir: &Path, env: Env) -> anyhow::Result<bool> {
         String::from_utf8_lossy(&output.stderr).trim()
     );
     parse_allowed(&output.stdout, dir)
+}
+
+/// The directory above `root` whose `.envrc` an agent in `cwd` loads: the nearest one, when
+/// no `.envrc` in the project applies and direnv already allows it.
+pub fn allowed_envrc_above(
+    direnv: &Path,
+    cwd: &Path,
+    root: &Path,
+    env: Env,
+) -> anyhow::Result<Option<PathBuf>> {
+    match envrc_above(cwd, root) {
+        Some(dir) if is_allowed(direnv, &dir, env)? => Ok(Some(dir)),
+        _ => Ok(None),
+    }
 }
 
 pub fn allow(direnv: &Path, dir: &Path, env: Env) -> anyhow::Result<()> {

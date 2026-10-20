@@ -643,6 +643,174 @@ fn agents_do_not_inherit_the_direnv_environment_the_daemon_started_in() {
     assert_eq!(wait_for_line(&seen), "unset original");
 }
 
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("run git");
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+fn direnv_allow(dir: &Path, base: &[(String, String)]) {
+    let direnv = daemon::find_in_path("direnv").expect("direnv in the nix dev shell");
+    let out = without_direnv(direnv)
+        .arg("allow")
+        .arg(dir)
+        .envs(base.iter().map(|(k, v)| (k, v)))
+        .output()
+        .expect("direnv allow");
+    assert!(out.status.success(), "{out:?}");
+}
+
+/// A git repo at `outer/project` whose parent holds an `.envrc` exporting
+/// `LAZYAGENTS_TEST_ABOVE=above`, and a daemon whose direnv state lives in `home`.
+struct EnvrcAbove {
+    env: TestEnv,
+    outer: tempfile::TempDir,
+    home: tempfile::TempDir,
+    base: Vec<(String, String)>,
+    _daemon: Option<DaemonChild>,
+}
+
+impl EnvrcAbove {
+    fn new() -> Self {
+        let outer = tempfile::tempdir().expect("outer dir");
+        std::fs::write(
+            outer.path().join(".envrc"),
+            "export LAZYAGENTS_TEST_ABOVE=above\n",
+        )
+        .expect("write .envrc");
+        let root = outer.path().join("project");
+        std::fs::create_dir(&root).expect("project dir");
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=lazyagents test",
+                "-c",
+                "user.email=test@lazyagents.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        let home = tempfile::tempdir().expect("direnv home");
+        let base = isolated_direnv_home(home.path());
+        Self {
+            env: TestEnv::new(),
+            outer,
+            home,
+            base,
+            _daemon: None,
+        }
+    }
+
+    fn root(&self) -> PathBuf {
+        self.outer.path().join("project")
+    }
+
+    fn start(&mut self) -> protocol::ProjectId {
+        let vars: Vec<(&str, &str)> = self
+            .base
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        self._daemon = Some(DaemonChild::start(&self.env, &vars));
+        match request(
+            &self.env.paths(),
+            Request::AddProject {
+                path: self.root(),
+                name: None,
+            },
+        ) {
+            Response::Project(added) => added.id,
+            other => panic!("unexpected reply to AddProject: {other:?}"),
+        }
+    }
+
+    /// What an agent, in a worktree when `worktree`, saw in `LAZYAGENTS_TEST_ABOVE`, the
+    /// same when started and when restarted.
+    fn seen_by(&self, project: protocol::ProjectId, name: &str, worktree: bool) -> String {
+        let seen = self.home.path().join(format!("seen-{name}"));
+        let script = format!(
+            "echo \"${{LAZYAGENTS_TEST_ABOVE-unset}}\" > '{}'",
+            seen.display()
+        );
+        let create = Request::CreateAgent(CreateAgent {
+            project,
+            name: name.into(),
+            kind: AgentKind::Generic,
+            command: vec!["sh".into(), "-c".into(), script],
+            cols: 80,
+            rows: 24,
+            worktree: worktree.then_some(protocol::WorktreeRequest { base: None }),
+            prompt: None,
+            setup: None,
+        });
+        let id = match request(&self.env.paths(), create) {
+            Response::Agent(info) => info.id,
+            other => panic!("unexpected reply to CreateAgent: {other:?}"),
+        };
+        let first = wait_for_line(&seen);
+        std::fs::remove_file(&seen).expect("remove the first reading");
+        let restart = Request::RestartAgent {
+            id,
+            cols: 80,
+            rows: 24,
+        };
+        match request(&self.env.paths(), restart) {
+            Response::Agent(_) => assert_eq!(wait_for_line(&seen), first, "after a restart"),
+            other => panic!("unexpected reply to RestartAgent: {other:?}"),
+        }
+        first
+    }
+}
+
+#[test]
+fn an_allowed_envrc_above_the_project_loads_for_checkout_and_worktree_agents() {
+    let mut above = EnvrcAbove::new();
+    direnv_allow(above.outer.path(), &above.base);
+    let project = above.start();
+    assert_eq!(above.seen_by(project, "checkout", false), "above");
+    assert_eq!(above.seen_by(project, "tree", true), "above");
+}
+
+#[test]
+fn a_blocked_envrc_above_the_project_is_ignored_and_stays_blocked() {
+    let mut above = EnvrcAbove::new();
+    let project = above.start();
+    assert_eq!(above.seen_by(project, "checkout", false), "unset");
+    assert_eq!(above.seen_by(project, "tree", true), "unset");
+    let direnv = daemon::find_in_path("direnv").expect("direnv in the nix dev shell");
+    let home: Vec<(&str, &Path)> = above
+        .base
+        .iter()
+        .map(|(k, v)| (k.as_str(), Path::new(v)))
+        .collect();
+    assert!(!daemon::direnv::is_allowed(&direnv, above.outer.path(), &home).expect("status"));
+}
+
+#[test]
+fn an_envrc_in_the_project_wins_over_one_above() {
+    let mut above = EnvrcAbove::new();
+    direnv_allow(above.outer.path(), &above.base);
+    std::fs::write(
+        above.root().join(".envrc"),
+        "export LAZYAGENTS_TEST_ABOVE=inside\n",
+    )
+    .expect("write .envrc");
+    direnv_allow(&above.root(), &above.base);
+    let project = above.start();
+    assert_eq!(above.seen_by(project, "checkout", false), "inside");
+}
+
 #[test]
 fn an_unreadable_direnv_diff_still_starts_agents() {
     let env = TestEnv::new();
