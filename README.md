@@ -8,17 +8,36 @@ Your own Claude Code setup (`~/.claude`, project `.claude/`, plugins, skills, MC
 
 ## Status
 
-Early development. The daemon, the CLI and the TUI exist, with git worktrees per agent, a diff view, a config file (keybindings, presets, theme) and mouse selection with copy. See `docs/architecture.md` and `docs/superpowers/specs/2026-10-15-lazyagents-design.md`.
+A personal project, shared as is. It is not maintained as a product: there are no releases and no support, and anything (config, CLI, on-disk state) can change without notice. Issues and pull requests may go unanswered.
+
+What exists: a daemon that keeps agents running, a CLI and the TUI, git worktrees per agent, a diff view, a config file (keybindings, presets, theme) and mouse selection with copy. How it fits together: [docs/architecture.md](docs/architecture.md).
+
+## Install
+
+Needs macOS or Linux, git, and [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude` on your `PATH`) for Claude agents. [direnv](https://direnv.net) is used when present.
+
+With [Nix](https://nixos.org):
+
+```sh
+nix develop -c just install    # release build to ~/.local/bin/lazyagents
+```
+
+On Linux the build is relinked to the system's loader and libraries and installed only if it runs that way; when the system's glibc is older than the nix shell's, the script stops and says how to build with rustup instead.
+
+Without Nix, with a [rustup](https://rustup.rs) toolchain:
+
+```sh
+cargo install --locked --path crates/lazyagents --root ~/.local
+```
+
+Either way `~/.local/bin` must be on your `PATH`; `LAZYAGENTS_INSTALL_ROOT` makes `just install` use `$LAZYAGENTS_INSTALL_ROOT/bin` instead. Install again after pulling to upgrade, to the same path: Claude agents call `lazyagents hook` through it, so agents started before an upgrade keep reporting their status.
 
 ## Usage
 
 ```sh
-nix develop -c just install    # release build to ~/.local/bin/lazyagents
 cd ~/some-project
 lazyagents                     # open the TUI
 ```
-
-`~/.local/bin` must be on your `PATH`; `LAZYAGENTS_INSTALL_ROOT` installs to `$LAZYAGENTS_INSTALL_ROOT/bin` instead. On Linux the build is relinked to the system's loader and libraries and installed only if it runs that way; when the system's glibc is older than the nix shell's, the script stops and says how to build with rustup instead. Run `just install` again after pulling to upgrade. The install path stays the same across upgrades, which matters: Claude agents call `lazyagents hook` through that path, so agents started before an upgrade keep reporting their status.
 
 The TUI starts the daemon if none is running. Quitting it leaves the agents running; run `lazyagents` again to reattach.
 
@@ -61,3 +80,7 @@ just dev ls         # ... or any CLI subcommand
 Experiment with a throwaway state dir so your real agents stay untouched: `LAZYAGENTS_STATE_DIR=$(mktemp -d) just dev`.
 
 Contributor and agent guide: [AGENTS.md](AGENTS.md).
+
+## License
+
+[MIT](LICENSE). `vendor/crossterm` is a patched copy of [crossterm](https://github.com/crossterm-rs/crossterm), MIT licensed by its authors.
