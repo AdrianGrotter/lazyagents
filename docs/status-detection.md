@@ -67,8 +67,7 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   `--resume`. A `SessionStart` carrying a different session id replaces the stored id.
   When its `source` is `resume` or `compact` (`/resume`, compaction) the agent is
   resumable afterwards; for `startup`, `clear` or a missing source it is not until the
-  next prompt. See
-  `docs/decisions/0006-resume-only-prompted-sessions.md`.
+  next prompt.
 - **Generic agents**: `Starting` until their first output, then `Working`; `Idle` after
   2 s without output, `Working` again on new output. A generic agent that prints nothing
   becomes `Idle` 2 s after it starts.
@@ -79,4 +78,3 @@ Status enum: `Starting`, `Working`, `NeedsInput`, `Idle`, `Exited(i32)`, `Stoppe
   frames once it is restarted. Hook events for generic agents are ignored.
 - **Both**: process exit → `Exited(code)`; agents loaded from disk at daemon start →
   `Stopped`.
-- The merge behaviour of `--settings` with user hooks was verified in the spike (see `docs/decisions/0003-status-via-claude-hooks.md`).

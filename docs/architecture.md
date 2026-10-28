@@ -57,7 +57,7 @@ Subcommands:
 Commands that talk to the daemon start it if its socket is missing or dead, except
 `shutdown`, which only connects to a running one. A state directory whose `daemon.sock`
 path would exceed the platform's socket limit (104 bytes on macOS, 108 on Linux) is
-refused before anything starts (ADR 0024). The auto-started daemon runs in its own
+refused before anything starts. The auto-started daemon runs in its own
 session without a controlling terminal, from `/`, with null stdio and without the caller's
 terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
 
@@ -68,8 +68,7 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   daemon writes two lines into the file: its pid, then its start time in decimal (just
   the pid when the start time cannot be read). A client trusts the pid only while the
   lock is held and, when a start time is recorded, the pid still has that start time,
-  so an entry outliving its daemon never names a recycled pid. Daemons from before ADR
-  0031 recorded the `ps -o lstart=` text in the C locale and UTC instead; a client
+  so an entry outliving its daemon never names a recycled pid. Older daemons recorded the `ps -o lstart=` text in the C locale and UTC instead; a client
   compares that text to the pid's start time to the second. A pid-only file, as older
   daemons write, is trusted on the lock alone. A client
   checking whether a daemon runs takes the lock for a moment, so a starting daemon tries
@@ -78,7 +77,7 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   answers on is removed only while the lock is held.
 - **Reading the process table.** Every pid, parent pid and start time, in the lock file
   and in process tracking, comes from `protocol::process`, which reads the kernel
-  directly and launches nothing (ADR 0031): libproc on macOS, `/proc/<pid>/stat` on
+  directly and launches nothing: libproc on macOS, `/proc/<pid>/stat` on
   Linux. A start time is the microseconds since the epoch on macOS and the clock ticks
   since boot on Linux, so it does not depend on locale or time zone and does not move
   when the system clock is set. A reading takes about a millisecond. On macOS it leaves
@@ -147,7 +146,7 @@ terminal variables or Claude Code's `CLAUDECODE` and `CLAUDE_CODE_*` variables.
   generic status windows, shutdown's grace, snapshot wait and drain) come from
   `daemon::Timings` in the daemon's `Config`. The binary always runs with
   `Timings::default()`, the values this document gives; the daemon's integration tests run
-  with shorter ones so they wait less for the behaviour they check (ADR 0033).
+  with shorter ones so they wait less for the behaviour they check.
 
 ### Nothing slow runs on the event loop
 
@@ -161,13 +160,13 @@ a hook never waits behind other work. Shutdown is the one exception: it runs on 
 which ends with it.
 
 Nothing waits for a client either: each connection has a bounded queue, which its own
-task writes to the socket (`outbox.rs`, ADR 0023). Frames go only while fewer than 4 are
+task writes to the socket (`outbox.rs`). Frames go only while fewer than 4 are
 queued; a frame that finds 4 is dropped, and the next frame for that connection is full,
 so a client that stalled sees the current screen as soon as it reads again. Every other
 message (replies and events) must arrive: up to 16384 of them may queue, and a connection
 whose queue overflows is closed, since its client stopped reading.
 
-While such work is in flight the daemon keeps its state consistent (ADR 0019):
+While such work is in flight the daemon keeps its state consistent:
 
 - **Kill, restart, remove and merge** mark the agent busy until they are answered. A kill,
   restart, remove, merge or rename of it is refused meanwhile with `<name> is stopping;
@@ -193,7 +192,7 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   project's agent on the same repository. When a daemon
   starts and finds pending worktrees, a crash or a shutdown cut a create short: it removes
   each one with its branch off the event loop (keeping one an agent records) and keeps its
-  name reserved until then (ADR 0021). A locked worktree is removed too (`git worktree
+  name reserved until then. A locked worktree is removed too (`git worktree
   remove --force --force`): git locks one while it checks it out, and an add killed then
   leaves the lock behind. One git will not let go of (a file it may not delete, or a
   branch checked out elsewhere) stays pending, with a warning in the log, and is tried
@@ -209,10 +208,10 @@ While such work is in flight the daemon keeps its state consistent (ADR 0019):
   `Stopped` and answers `the daemon is shutting down`, a removal completes, and a
   worktree made for an agent that never started is removed with its branch, the create
   answered `the daemon shut down before <name> started; its worktree was removed`. It
-  waits until 13 s after it began (ADR 0022), so a checkout hook that never ends cannot
+  waits until 13 s after it began, so a checkout hook that never ends cannot
   hold it: a create still running then is answered `the daemon shut down before <name>
   started; its worktree is removed at the next start`, and the next start removes what
-  it made (ADR 0021); other requests still running are logged and get no answer.
+  it made; other requests still running are logged and get no answer.
   Processes found meanwhile get a second pass.
 
 ### The daemon is the terminal
@@ -240,7 +239,7 @@ contains `.envrc` and `direnv` is on `PATH`, the command is wrapped as
 `direnv exec <dir> <cmd...>` so nix/direnv environments load. Failing that, the nearest
 `.envrc` above the project root (searched from the project root, for worktree agents too)
 is used the same way, but only when `direnv status --json` run in its directory reports it
-as allowed; a blocked one is ignored, never prompted for or allowed (ADR 0034). That
+as allowed; a blocked one is ignored, never prompted for or allowed. That
 check runs off the event loop: with the worktree on a worktree create, with the stop on a
 restart, and on a thread of its own for a plain create when such an `.envrc` exists. The
 user's `claude` shell function is not used; the binary on `PATH` is.
@@ -250,7 +249,7 @@ where direnv loaded some other project's `.envrc`. `direnv exec` reverts that di
 loading, so agents with an `.envrc` of their own never see it. For the rest, the daemon
 runs `direnv export json` in `/` once at startup; when that prints a revert, every agent
 that loads no `.envrc` runs as `direnv exec / <cmd...>` (direnv keeps the working directory)
-and sees the variables as they were before direnv loaded (ADR 0016). With no `direnv` on
+and sees the variables as they were before direnv loaded. With no `direnv` on
 `PATH`, no inherited diff, or a `DIRENV_DIFF` direnv cannot read (logged), agents start
 without the wrapper.
 
@@ -289,10 +288,10 @@ After the add, files named by the project's `.worktreeinclude` that git ignores 
 the worktree, skipping any already there. `git ls-files --others --ignored --exclude-standard
 --directory` lists the ignored files and each directory ignored as a whole once, without
 walking it; such a directory is searched only when an include pattern names it or a path in
-it (ADR 0018). Within those paths, the files `ls-files` lists with the include patterns are
+it. Within those paths, the files `ls-files` lists with the include patterns are
 copied when git ignores them: a file the first listing names on its own is ignored, and
 within a directory it lists whole `ls-files --exclude-standard` tells. A failure is logged
-and the agent starts anyway. A `CreateAgent.setup` the user approved in the TUI (ADR 0014) wraps the
+and the agent starts anyway. A `CreateAgent.setup` the user approved in the TUI wraps the
 agent's first start in `sh -c`, which runs the script in a shell of its own in the agent's
 terminal and then starts the agent whatever the script did.
 
@@ -300,8 +299,7 @@ direnv allows an `.envrc` by its path and content, so a new worktree's checked-o
 `.envrc` starts out blocked, and `direnv exec` refuses it until it is allowed. Right after
 the worktree is added, and only when `direnv` is on `PATH`, the daemon runs `direnv allow
 <worktree path>` when the worktree's `.envrc` is byte-identical to the project's and
-`direnv status --json`, run in the project, reports the project's `.envrc` as allowed
-(ADR 0008). In every other case (different content, a project `.envrc` the user has not
+`direnv status --json`, run in the project, reports the project's `.envrc` as allowed. In every other case (different content, a project `.envrc` the user has not
 allowed, no project `.envrc`, or a direnv call that fails or prints something unparsable)
 it leaves direnv untouched, logs any error, and still creates the agent, which then exits
 at once on the blocked `.envrc`. When a worktree agent exits and its screen shows direnv's
@@ -326,7 +324,7 @@ force the removal on that failure alone, never on an error's text. Both this che
 even when the user's git config hides them. `force: true` skips the check and runs `git
 worktree remove --force`. Without `remove_worktree` the worktree stays on disk. Its branch
 is deleted only by a `RemoveAgent` with `delete_branch`, which needs the branch merged
-into its base (`git merge-base --is-ancestor`); see ADR 0013.
+into its base (`git merge-base --is-ancestor`).
 
 ### The TUI
 
@@ -405,8 +403,7 @@ daemon last told it.
   outside a popup closes it, and the wheel scrolls the diff, the scroll-mode history or the
   pane's scrollback, or goes to the agent when it enabled mouse reporting. A click in the
   pane that ends in the cell it started in also goes to the agent, which the daemon
-  reports only when the agent enabled mouse reporting; drags never reach the agent (ADR
-  0015). See [keybindings.md](keybindings.md#mouse).
+  reports only when the agent enabled mouse reporting; drags never reach the agent. See [keybindings.md](keybindings.md#mouse).
 - **Connection actor** (`connection.rs`): a task owning the `Client`. It forwards
   responses, errors and server events (agent list changes, screen frames) on one channel.
   `GitStat` and `GitDiff` go out without waiting for their replies, which the daemon may
@@ -426,22 +423,20 @@ daemon last told it.
   paste, focus reporting and, where supported, keyboard enhancement. A thread reads terminal
   events, polling in 50 ms slices so it can be paused; a read error means the terminal is
   gone and the TUI exits, even with SIGHUP and
-  SIGTERM ignored ([ADR 0005](decisions/0005-vendor-crossterm-dead-tty-fix.md)). SIGHUP,
+  SIGTERM ignored. SIGHUP,
   SIGTERM and SIGINT also exit. The guard and a panic hook restore every terminal mode on
   any exit path, ignoring errors from a vanished terminal.
   `run` drives the event loop; `restart_mismatched_daemon` holds the mismatch prompt and
   restart, and `apply_effect` carries out each `Effect` the model returns.
 - **Custom commands** (`commands.rs`): `[[commands]]` from the config, expanded with
-  shell-quoted values and run with `sh -c` by the runtime ([ADR
-  0010](decisions/0010-custom-commands-run-by-the-tui.md)). A `terminal` command pauses the
+  shell-quoted values and run with `sh -c` by the runtime. A `terminal` command pauses the
   reader thread, hands it the terminal out of raw mode and the alternate screen, and
   restores both afterwards, dropping the SIGINT a ctrl-c also sent the TUI. `popup` and
   `none` commands run on a blocking task and report back to `App::command_finished`;
   `agent` commands become a `CreateAgent` request.
 - **Project setup scripts** (`project_config.rs`, `approved.rs`): a project's
   `.lazyagents.toml` may carry a `[worktree] setup` script. The user approves it once per
-  exact text (`ApproveSetup`); an edited script asks again ([ADR
-  0014](decisions/0014-approve-project-setup-scripts.md)).
+  exact text (`ApproveSetup`); an edited script asks again.
 - **Review comments** (`review.rs`): maps each diff line to its file and line number,
   following the hunk headers' counts, and builds the prompt that sends an agent the
   comments on its diff. `App` keeps the comments per agent in memory.
@@ -460,9 +455,9 @@ daemon last told it.
   (projects, agents, session ids and titles, worktree info, worktrees being created),
   `daemon.sock`, `daemon.lock`, `daemon.log`, `hooks/<agent_id>.json`, `worktrees/`, and
   `known-projects.toml`, which only the TUI writes: every project it has seen, kept after
-  removal for the add picker (`known.rs`, ADR 0009), and `current-project.toml`, also
+  removal for the add picker (`known.rs`), and `current-project.toml`, also
   written only by the TUI: the current project's path and whether all agents are listed,
-  so the next TUI starts there (`current.rs`, ADR 0032).
+  so the next TUI starts there (`current.rs`).
 - Config: `$LAZYAGENTS_CONFIG`, else `$XDG_CONFIG_HOME/lazyagents/config.toml`, else
   `~/.config/lazyagents/config.toml`: keybindings, agent presets, theme colours,
   notifications, custom commands. A missing file gives the built-in defaults; anything
@@ -502,8 +497,7 @@ daemon last told it.
   ignore it or left the agent's session can outlive the daemon. On the next start agents
   load as `Stopped` and can be restarted.
   A worktree it was creating, and its branch, are removed at the next start.
-  Claude resumes only sessions that received a prompt
-  (see [ADR 0006](decisions/0006-resume-only-prompted-sessions.md)).
+  Claude resumes only sessions that received a prompt.
 - A corrupt or empty `state.toml` → the daemon refuses to start and leaves the file
   untouched; for an empty one it says `<path> is empty; restore it from a backup or delete
   it to start with no agents`. The daemon never writes an empty file (even no projects and
@@ -532,4 +526,3 @@ daemon last told it.
 - [configuration.md](configuration.md): the config file.
 - [status-detection.md](status-detection.md): how agent status is derived from hooks and the
   pane.
-- [decisions/](decisions/): ADRs recording the design choices behind this system.

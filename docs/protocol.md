@@ -197,7 +197,7 @@ nothing until it is restarted. A frame is full (`full: true`, every row) on subs
 size change and after frames were dropped. Other frames carry only the changed rows plus the
 cursor position. A connection that does not keep up (4 frames queued or being written)
 has frames dropped, and the next frame that goes through is full. Every other message is
-queued, up to 16384; a connection with more pending is closed (ADR 0023). `Frame` has the fields
+queued, up to 16384; a connection with more pending is closed. `Frame` has the fields
 `agent`, `cols`, `rows`, `full`, `lines` and `cursor`. A cell with an empty `text`
 is the spacer that follows a wide character.
 

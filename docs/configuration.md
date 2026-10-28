@@ -158,8 +158,7 @@ direct_next = "ctrl-j"
 direct_previous = "ctrl-k"
 ```
 
-`alt-[` and `alt-]` are not bound by default, so they reach the agent
-([ADR 0007](decisions/0007-ctrl-q-pane-prefix.md)).
+`alt-[` and `alt-]` are not bound by default, so they reach the agent.
 
 If `leave` and `direct_leave` both end up empty, no key could return from the pane to the
 sidebar, so `leave` gets its defaults back (`q`, `esc`, taking them from any other pane
@@ -331,7 +330,7 @@ agent. Because the script comes
 from the repository, creating a worktree agent shows it and asks first: `y` runs it and
 remembers the approval for that project, `s` creates the agent without it this time, `n` or
 `esc` creates nothing. An approval holds for that exact text, so an edited script asks
-again (ADR 0014). Approvals are kept in `approved-setups.toml` in the state directory. A
+again. Approvals are kept in `approved-setups.toml` in the state directory. A
 `.lazyagents.toml` that cannot be parsed, or a `setup` that is not a string, keeps the new
 agent form open with the error. Agents get `LAZYAGENTS_PROJECT_PATH`, the project's
 directory, in their environment, which a setup can use to copy from the main checkout.
@@ -340,8 +339,7 @@ Agents load the project's direnv `.envrc` when `direnv` is on `PATH`: the neares
 the agent's directory up to the project root, or, when the project has none, the nearest
 one above the project root (such as a flake shared by the repos in a parent folder), but
 only once you have allowed it with `direnv allow`. An `.envrc` above the project that
-direnv reports as blocked is ignored; lazyagents neither prompts for it nor allows it
-(ADR 0034). Worktree agents get the same `.envrc` above the project as agents in its
+direnv reports as blocked is ignored; lazyagents neither prompts for it nor allows it. Worktree agents get the same `.envrc` above the project as agents in its
 checkout. Allowing or revoking it takes effect at an agent's next start or restart.
 
 `.worktreeinclude` lists, in gitignore syntax, gitignored files to copy from the project

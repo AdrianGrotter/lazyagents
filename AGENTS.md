@@ -2,7 +2,7 @@
 
 A lazygit-style terminal UI for running many coding agents (mostly Claude Code) side by side: a sidebar of projects and agents with live status, and a main pane holding the selected agent's interactive terminal. A background daemon owns the agent processes; the TUI is a client that can quit and reattach.
 
-`docs/` describes the system as it is now; `docs/superpowers/specs/`, `docs/superpowers/plans/` and `docs/superpowers/notes/` are dated history. Start with `docs/architecture.md`.
+`docs/` describes the system as it is now. Start with `docs/architecture.md`.
 
 ## Environment
 
@@ -27,9 +27,9 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 | `crates/client` | connects to the daemon, starting it on demand; used by the CLI and the TUI |
 | `crates/tui` | ratatui client: model (`app/`, one module per area), rendering (ui.rs), shared screen geometry (layout.rs, help.rs), keymap and config, connection, runtime |
 | `crates/lazyagents` | the binary and CLI |
-| `vendor/crossterm` | crossterm 0.29.0 with a dead-terminal fix (ADR 0005); drop when upstream releases it |
+| `vendor/crossterm` | crossterm 0.29.0 with a dead-terminal fix; drop when upstream releases it |
 | `scripts/` | test runner, install script and its tests, tmux harness, hook tests, TUI smoke, hangup and worktree scripts |
-| `docs/` | architecture, protocol, keybindings, configuration, status detection, ADRs (`decisions/`) |
+| `docs/` | architecture, protocol, keybindings, configuration, status detection |
 
 ## Working rules
 
@@ -38,7 +38,6 @@ All tooling comes from the nix dev shell: run `direnv allow` once, or prefix com
 - A hook or clippy failure (the Stop hook, pre-commit) in files you didn't touch is reported, not fixed.
 - Parallel agents each work in their own worktree (a worktree agent or `git worktree`) and set `LAZYAGENTS_HARNESS_SERVER` to a distinct name.
 - Commit each logical change with a Conventional Commit (skill: committing). Git hooks gate message format, fmt and clippy; Claude Code hooks format edited Rust files and run clippy before you stop.
-- A choice between real alternatives gets an ADR in `docs/decisions/` (skill: recording-decisions).
 - A change to the protocol, keybindings, configuration or status detection updates its doc in `docs/` in the same commit.
 - Any change to the encoded bytes of a protocol message bumps `PROTOCOL_VERSION`; `crates/protocol/tests/wire.rs` fails until you do, then `UPDATE_GOLDEN=1 cargo test -p protocol --test wire` records the new fixture.
 - Comments: default to none. Write one only for a non-obvious invariant or constraint that stays true as the code evolves; change history belongs in commit messages.
