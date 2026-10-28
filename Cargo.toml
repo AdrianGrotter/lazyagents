@@ -6,6 +6,9 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "A lazygit-style terminal UI for running many coding agents side by side"
+repository = "https://github.com/AdrianGrotter/lazyagents"
+homepage = "https://github.com/AdrianGrotter/lazyagents"
 
 [workspace.dependencies]
 alacritty_terminal = "0.26.0"
@@ -33,3 +36,8 @@ all = { level = "warn", priority = -1 }
 
 [patch.crates-io]
 crossterm = { path = "vendor/crossterm" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

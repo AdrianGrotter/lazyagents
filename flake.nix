@@ -27,6 +27,7 @@
             toolchain
             pkgs.just
             pkgs.cargo-deny
+            pkgs.cargo-dist
             pkgs.jq
             pkgs.tmux
             pkgs.git
