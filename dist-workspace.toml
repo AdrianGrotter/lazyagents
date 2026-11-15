@@ -17,3 +17,6 @@ hosting = "github"
 tap = "AdrianGrotter/homebrew-tap"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
+
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
